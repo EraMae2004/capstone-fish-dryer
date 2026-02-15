@@ -1,0 +1,349 @@
+/* ================= HEADER ================= */
+
+.profile-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 25px;
+}
+
+.content h2 {
+    color: #113F67;
+    font-size: 32px;
+    font-weight: 700;
+}
+
+/* ================= CHANGE PASSWORD BUTTON ================= */
+
+.change-password-btn {
+    background: #113F67;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    margin-top: 35px;
+}
+
+/* ================= PROFILE CARD ================= */
+
+.profile-card {
+    background: white;
+    border-radius: 12px;
+    padding: 30px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+}
+
+/* ================= CARD HEADER ================= */
+
+.profile-card h3 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+}
+
+.card-header-section {
+    padding-bottom: 20px;
+    color: #113F67;
+
+}
+
+/* EDGE-TO-EDGE DIVIDER */
+.card-divider {
+    height: 1px;
+    background: #e5e5e5;
+    margin-left: -30px;   /* must match card padding */
+    margin-right: -30px;
+    margin-bottom: 40px;
+}
+
+/* ================= BODY ================= */
+
+.profile-body {
+    display: flex;
+    align-items: flex-start;
+    gap: 80px;
+    margin-left: 40px; /* slight move right */
+}
+
+/* ================= PROFILE IMAGE ================= */
+
+.profile-picture-section {
+    text-align: center;
+}
+
+.profile-large-circle {
+    width: 140px;
+    height: 140px;
+    background: #ddd;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 30px;
+    overflow: hidden;
+    margin-left: 20px;
+}
+
+.profile-large-circle img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.profile-actions {
+    margin-top: 18px;
+    display: flex;
+    gap: 30px;
+}
+
+.edit-btn {
+    background: #495057;
+    color: white;
+    border: none;
+    padding: 7px 14px;
+    border-radius: 6px;
+}
+
+.remove-btn {
+    background: #dc3545;
+    color: white;
+    border: none;
+    padding: 7px 14px;
+    border-radius: 6px;
+}
+
+/* ================= FORM ================= */
+
+.profile-form {
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    column-gap: 60px;
+    row-gap: 25px;
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.form-group.full {
+    grid-column: span 2;
+}
+
+.form-group label {
+    color: #073A61;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.form-group input {
+    padding: 10px;
+    border-radius: 6px;
+    border: 1px solid #ccc;
+    width: 80%;
+}
+
+/* ================= FOOTER ================= */
+
+.profile-footer {
+    margin-top: 40px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 60px;
+    margin-right: 90px;
+}
+
+.save-btn {
+    background: #113F67;
+    color: white;
+    border: none;
+    padding: 9px 22px;
+    border-radius: 6px;
+}
+
+.cancel-btn {
+    background: #6c757d;
+    color: white;
+    border: none;
+    padding: 9px 22px;
+    border-radius: 6px;
+}
+
+/* ================= MODAL BACKDROP ================= */
+
+.modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(255, 255, 255, 0.403);
+    justify-content: center;
+    align-items: center;
+    z-index: 9999;
+}
+
+/* ================= PASSWORD CARD ================= */
+
+.password-card {
+    background: #ffffff;
+    width: 420px;
+    padding: 40px;
+    border-radius: 20px;
+    text-align: center;
+    box-shadow: inset 0 0 0 1px #e5e5e5;
+}
+
+/* HEADER */
+
+.modal-header {
+    position: relative;
+    margin-bottom: 30px;
+}
+
+.modal-header h2 {
+    font-size: 28px;
+    font-weight: 700;
+}
+
+.back-btn {
+    position: absolute;
+    left: 0;
+    top: 5px;
+    color: #4fb0d9;
+    font-size: 20px;
+    cursor: pointer;
+}
+
+/* FIELD GROUP */
+
+.field-group {
+    margin-bottom: 25px;
+    text-align: left;
+}
+
+.field-group label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+/* PASSWORD INPUT STYLE */
+
+.password-input {
+    position: relative;
+}
+
+.password-input input {
+    width: 100%;
+    padding: 14px 45px 14px 14px;
+    border-radius: 12px;
+    border: 2px solid #dcdcdc;
+    font-size: 15px;
+    outline: none;
+}
+
+input[type="password"]::-ms-reveal {
+    display: none;
+}
+
+/* Custom Eye */
+
+.toggle-eye {
+    position: absolute;
+    right: 15px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #4fb0d9;
+    cursor: pointer;
+    font-size: 18px;
+}
+
+/* UPDATE BUTTON */
+
+.update-btn {
+    margin-top: 20px;
+    width: 100%;
+    background: #4fb0d9;
+    border: none;
+    padding: 14px;
+    border-radius: 12px;
+    font-weight: 600;
+    font-size: 16px;
+    cursor: pointer;
+}
+
+/* ================= SUCCESS MODAL ================= */
+
+.success-card {
+    background: #f0f0f0;
+    padding: 40px;
+    border-radius: 20px;
+    width: 350px;
+    text-align: center;
+}
+
+.check-icon {
+    width: 70px;
+    height: 70px;
+    background: #4fb0d9;
+    border-radius: 50%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin: 0 auto 20px;
+}
+
+.check-icon i {
+    color: white;
+    font-size: 28px;
+}
+
+/* ================= CONFIRM MODAL ================= */
+
+.confirm-card {
+    background: #f0f0f0;
+    width: 380px;
+    padding: 35px;
+    border-radius: 20px;
+    text-align: center;
+}
+
+.confirm-title {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 30px;
+}
+
+.confirm-actions {
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+}
+
+/* YES BUTTON */
+
+.confirm-yes-btn {
+    background: #4fb0d9;
+    border: none;
+    padding: 12px 25px;
+    border-radius: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    min-width: 100px;
+}
+
+/* NO BUTTON */
+
+.confirm-no-btn {
+    background: #6c757d;
+    border: none;
+    padding: 12px 25px;
+    border-radius: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    min-width: 100px;
+}
