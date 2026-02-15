@@ -1,18 +1,7 @@
-/* ================= EXACT SCREENSHOT STYLE ================= */
-
-/* ===== HEADER ===== */
-
 .overview-header {
     display: flex;
     justify-content: space-between;
-    align-items: flex-start;
     margin-bottom: 30px;
-}
-
-.overview-header h2 {
-    font-size: 22px;
-    font-weight: 700;
-    color: #1f3a4d;
 }
 
 .machine-status-line {
@@ -20,8 +9,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-weight: 500;
-    color: #2c3e50;
 }
 
 .status-dot {
@@ -34,42 +21,11 @@
 .dot-red { background: #e74c3c; }
 .dot-gray { background: #95a5a6; }
 
-/* ===== HEADER CONTROLS ===== */
-
-.header-controls {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 10px;
-}
-
 .machine-dropdown {
     padding: 6px 10px;
     border-radius: 6px;
-    border: 1px solid #dcdcdc;
-    background: #fff;
-    font-size: 13px;
+    border: 1px solid #ddd;
 }
-
-.header-buttons {
-    display: flex;
-    gap: 10px;
-}
-
-.btn {
-    padding: 6px 16px;
-    border-radius: 6px;
-    border: none;
-    color: white;
-    font-size: 13px;
-    cursor: pointer;
-}
-
-.btn-start { background: #2ecc71; }
-.btn-pause { background: #f1c40f; }
-.btn-stop  { background: #e74c3c; }
-
-/* ===== MAIN GRID ===== */
 
 .overview-grid {
     display: grid;
@@ -84,57 +40,25 @@
     gap: 25px;
 }
 
-/* ===== CARDS ===== */
-
 .info-card {
-    background: #ffffff;
+    background: #fff;
     border-radius: 12px;
     overflow: hidden;
     box-shadow: 0 4px 15px rgba(0,0,0,0.05);
 }
 
-/* Header bar like screenshot */
 .card-header {
     background: #f4f6f8;
     padding: 12px 18px;
-    font-size: 15px;
     font-weight: 600;
-    color: #1f3a4d;
-    border-bottom: 1px solid #e6e6e6;
+    border-bottom: 1px solid #eee;
 }
-
-/* Card body spacing */
-.info-card > .info-row,
-.info-card > .control-grid,
-.info-card > .hardware-row,
-.info-card > .fish-layout,
-.info-card > .fish-grid {
-    padding: 12px 18px;
-}
-
-/* ===== CURRENT DETAILS ROWS ===== */
 
 .info-row {
     display: flex;
     justify-content: space-between;
     padding: 10px 18px;
-    border-bottom: 1px solid #eeeeee;
-    font-size: 14px;
-}
-
-.info-row:last-child {
-    border-bottom: none;
-}
-
-.info-row strong {
-    font-weight: 600;
-    color: #1f3a4d;
-}
-
-/* ================= CONTROL PANEL REAL INPUT STYLE ================= */
-
-.control-panel-card {
-    padding-bottom: 20px;
+    border-bottom: 1px solid #eee;
 }
 
 .control-grid {
@@ -147,111 +71,54 @@
 .control-row {
     display: flex;
     justify-content: space-between;
-    align-items: center;
 }
 
-.control-row label {
-    font-size: 13px;
-    color: #5f6b7a;
-    font-weight: 500;
-}
-
-/* REAL INPUT STYLE */
 .control-row input {
     width: 170px;
-    height: 34px;
-
-    padding: 6px 10px;
-
-    background-color: #ffffff;          /* REAL white */
-    border: 1px solid #cfd6dd;          /* visible border */
+    padding: 6px;
     border-radius: 6px;
+    border: 1px solid #ccc;
+}
 
+.control-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 15px 20px 20px 20px;
+}
+
+.btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: none;
+    color: white;
     font-size: 13px;
-    color: #1f3a4d;
-
-    transition: all 0.2s ease;
+    cursor: pointer;
 }
 
-/* Proper focus style */
-.control-row input:focus {
-    outline: none;
-    border-color: #4fc3f7;
-    box-shadow: 0 0 0 2px rgba(79,195,247,0.2);
-}
-
-/* Disabled / readonly style */
-.control-row input[readonly] {
-    background-color: #f8fafc;
-    cursor: default;
-}
-
-
-/* ===== HARDWARE STATUS ===== */
+.btn-start { background: #2ecc71; }
+.btn-pause { background: #f1c40f; color: #000; }
+.btn-stop { background: #e74c3c; }
 
 .hardware-row {
     display: flex;
     justify-content: space-between;
     padding: 10px 18px;
-    border-bottom: 1px solid #eeeeee;
-    font-size: 14px;
+    border-bottom: 1px solid #eee;
 }
 
-.hardware-row:last-child {
-    border-bottom: none;
-}
+.badge-green { color: #27ae60; }
+.badge-red { color: #e74c3c; }
+.badge-gray { color: #95a5a6; }
 
-.hardware-badge {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-weight: 600;
-    font-size: 13px;
-}
-
-.badge-green {
-    color: #27ae60;
-}
-
-.badge-red {
-    color: #e74c3c;
-}
-
-.badge-gray {
-    color: #95a5a6;
-}
-
-/* ===== FISH STATUS ===== */
-
-.fish-status-card {
-    padding-bottom: 18px;
-}
-
-.fish-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 12px 18px;
-    border-bottom: 1px solid #e6e6e6;
-    background: #f4f6f8;
-}
-
-.capture-button {
-    background: #163a59;
-    color: white;
-    border: none;
-    padding: 7px 14px;
-    border-radius: 6px;
-    font-size: 13px;
-    cursor: pointer;
-}
-
-/* Layout inside fish status */
 .fish-layout {
     display: grid;
     grid-template-columns: 250px 1fr;
     gap: 40px;
-    padding: 20px 18px;
+    padding: 20px;
 }
 
 .fish-images {
@@ -267,8 +134,6 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-weight: 600;
-    color: #2c3e50;
 }
 
 .fish-details {
@@ -276,23 +141,3 @@
     flex-direction: column;
     gap: 18px;
 }
-
-.fish-row {
-    display: flex;
-    gap: 12px;
-    font-size: 14px;
-}
-
-.fish-row span {
-    width: 140px;
-    color: #5f6b7a;
-    font-weight: 500;
-}
-
-.fish-row strong {
-    color: #1f3a4d;
-}
-
-.dot-blue { background: #3498db; }
-.dot-orange { background: #f39c12; }
-.badge-gray { color: #95a5a6; }
