@@ -30,17 +30,18 @@ Route::middleware(['auth', 'role:user'])->group(function () {
         [DryingController::class, 'overview']
     )->name('api.user.overview');
 
-    Route::get('/history', function () {
-        return view('user-view.user-history');
-    })->name('api.user.history');
+    Route::get('/history',
+        [DryingController::class, 'history']
+    )->name('api.user.history');
+
 
     Route::get('/notifications', function () {
         return view('user-view.user-notifications');
     })->name('api.user.notifications');
 
-    Route::get('/hardware', function () {
-        return view('user-view.user-hardware');
-    })->name('api.user.hardware');
+    Route::get('/hardware',
+        [DryingController::class, 'hardware']
+    )->name('api.user.hardware');
 
     Route::get('/profile', function () {
         return view('user-view.user-profile');
