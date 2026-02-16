@@ -38,9 +38,9 @@ class User extends Authenticatable
         return $this->hasMany(Machine::class, 'created_by');
     }
 
-    public function dryingBatches()
+    public function dryingSessions()
     {
-        return $this->hasMany(DryingBatch::class);
+        return $this->hasMany(DryingSession::class);
     }
 
     public function notifications()

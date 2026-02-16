@@ -23,3 +23,4 @@ class CaptureImage extends Model
         return $this->belongsTo(CaptureSession::class);
     }
 }
+

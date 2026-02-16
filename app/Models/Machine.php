@@ -3,16 +3,23 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use App\Models\DryingSession;
 
 class Machine extends Model
 {
     protected $fillable = [
         'name',
         'status',
+        'last_used_at',
+        'overall_health',
         'created_by',
     ];
 
-    /* ================= RELATIONSHIPS ================= */
+    protected $casts = [
+        'last_used_at' => 'datetime',
+    ];
+
+
 
     public function creator()
     {
@@ -24,9 +31,9 @@ class Machine extends Model
         return $this->hasMany(MachineHardwareStatus::class);
     }
 
-    public function dryingBatches()
+    public function dryingSessions()
     {
-        return $this->hasMany(DryingBatch::class);
+        return $this->hasMany(DryingSession::class);
     }
 
     public function notifications()

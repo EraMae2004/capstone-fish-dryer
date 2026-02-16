@@ -9,6 +9,7 @@ class Notification extends Model
     protected $fillable = [
         'machine_id',
         'user_id',
+        'drying_session_id',
         'type',
         'title',
         'message',
@@ -27,5 +28,10 @@ class Notification extends Model
     public function user()
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function dryingSession()
+    {
+        return $this->belongsTo(DryingSession::class);
     }
 }
