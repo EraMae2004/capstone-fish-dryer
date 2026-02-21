@@ -1,0 +1,25 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:80"
+    environment:
+      - APP_ENV=production
+      - APP_DEBUG=false
+      - APP_URL=http://localhost:8000
+      - DB_CONNECTION=sqlite
+      - DB_DATABASE=/var/www/html/database/database.sqlite
+      - CACHE_STORE=database
+      - SESSION_DRIVER=database
+      - QUEUE_CONNECTION=database
+    volumes:
+      # Persist SQLite DB and storage (logs, uploads, etc.)
+      - app_storage:/var/www/html/storage
+      - app_database:/var/www/html/database
+    restart: unless-stopped
+
+volumes:
+  app_storage:
+  app_database:
