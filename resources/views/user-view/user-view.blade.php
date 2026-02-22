@@ -62,39 +62,39 @@
         <!-- ================= SIDEBAR ================= -->
         <div class="sidebar">
 
-            <a href="{{ route('api.user.overview') }}"
-            class="menu-item {{ request()->routeIs('api.user.overview') ? 'active' : '' }}">
+            <a href="{{ route('user.overview') }}"
+            class="menu-item {{ request()->routeIs('user.overview') ? 'active' : '' }}">
                 <i class="fa-solid fa-gauge"></i>
                 Overview
             </a>
 
-            <a href="{{ route('api.user.history') }}"
-            class="menu-item {{ request()->routeIs('api.user.history') ? 'active' : '' }}">
+            <a href="{{ route('user.history') }}"
+            class="menu-item {{ request()->routeIs('user.history') ? 'active' : '' }}">
                 <i class="fa-solid fa-clock-rotate-left"></i>
                 History
             </a>
 
-            <a href="{{ route('api.user.notifications') }}"
-            class="menu-item {{ request()->routeIs('api.user.notifications') ? 'active' : '' }}">
+            <a href="{{ route('user.notifications') }}"
+            class="menu-item {{ request()->routeIs('user.notifications') ? 'active' : '' }}">
                 <i class="fa-solid fa-bell"></i>
                 Notifications
             </a>
 
-            <a href="{{ route('api.user.hardware') }}"
-            class="menu-item {{ request()->routeIs('api.user.hardware') ? 'active' : '' }}">
+            <a href="{{ route('user.hardware') }}"
+            class="menu-item {{ request()->routeIs('user.hardware') ? 'active' : '' }}">
                 <i class="fa-solid fa-microchip"></i>
                 Hardware Status
             </a>
 
-            <a href="{{ route('api.user.profile') }}"
-            class="menu-item {{ request()->routeIs('api.user.profile') ? 'active' : '' }}">
+            <a href="{{ route('user.profile') }}"
+            class="menu-item {{ request()->routeIs('user.profile') ? 'active' : '' }}">
                 <i class="fa-solid fa-user"></i>
                 Profile
             </a>
 
             <div class="divider"></div>
 
-            <form method="POST" action="{{ route('api.logout') }}">
+            <form method="POST" action="{{ route('logout') }}">
                 @csrf
                 <a href="#"
                 onclick="event.preventDefault(); this.closest('form').submit();"

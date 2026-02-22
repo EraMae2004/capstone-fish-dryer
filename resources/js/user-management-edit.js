@@ -121,7 +121,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
             const formData = new FormData(form);
 
-            fetch(`/api/admin/users/${currentUserId}`, {
+            fetch(`/admin/users/${currentUserId}`, {
                 method: 'POST', // Laravel needs POST with override
                 headers: {
                     "X-HTTP-Method-Override": "PUT",

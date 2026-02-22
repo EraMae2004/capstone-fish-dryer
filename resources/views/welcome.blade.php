@@ -22,7 +22,7 @@
             <div class="error">{{ session('error') }}</div>
         @endif
 
-        <form method="POST" action="{{ route('api.login') }}">
+        <form method="POST" action="{{ route('login') }}">
 
             @csrf
 
@@ -51,7 +51,7 @@
                     <input type="checkbox" name="remember">
                     Remember me
                 </label>
-                <a href="{{ route('api.forgot') }}">Forgot password?</a>
+                <a href="{{ route('forgot') }}">Forgot password?</a>
             </div>
 
             <button type="submit" class="login-btn">
@@ -61,7 +61,7 @@
 
             <div class="bottom-link">
                 Already have an account?
-                <a href="{{ url('/api/Authentication/signin') }}">Click here</a>
+                <a href="{{ route('signin') }}">Click here</a>
             </div>
 
         </form>

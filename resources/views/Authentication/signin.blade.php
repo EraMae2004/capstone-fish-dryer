@@ -15,7 +15,7 @@
 
         <h2>Create Account</h2>
 
-        <form id="registerForm" method="POST" action="{{ route('api.register') }}" enctype="multipart/form-data">
+        <form id="registerForm" method="POST" action="{{ route('register') }}" enctype="multipart/form-data">
             @csrf
 
 

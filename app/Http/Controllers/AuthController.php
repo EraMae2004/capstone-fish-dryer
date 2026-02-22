@@ -19,32 +19,24 @@ class AuthController extends Controller
             'password' => 'required'
         ]);
 
-        // 🔎 First check if user exists by email
         $user = User::where('email', $request->email)->first();
 
-        if (!$user) {
+        if (!$user || !Hash::check($request->password, $user->password)) {
             return back()->with('error', 'Invalid credentials');
         }
 
-        // 🔐 Check password
-        if (!Hash::check($request->password, $user->password)) {
-            return back()->with('error', 'Invalid credentials');
-        }
-
-        // 🚫 Check if inactive
         if ($user->status === 'inactive') {
             return back()->with('error', 'Account is inactive');
         }
 
-        // ✅ Login manually
         Auth::login($user, $request->remember);
         $request->session()->regenerate();
 
         if ($user->role === 'admin') {
-            return redirect()->route('api.admin.overview');
+            return redirect()->route('admin.overview');
         }
 
-        return redirect()->route('api.user.overview');
+        return redirect()->route('user.overview');
     }
 
 
@@ -130,7 +122,7 @@ class AuthController extends Controller
 
         session(['verified_user' => $user->id]);
 
-        return redirect()->route('api.reset.form');
+        return redirect()->route('reset.form');
     }
 
     public function resetPassword(Request $request)

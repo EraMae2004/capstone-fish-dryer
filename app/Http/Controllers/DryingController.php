@@ -22,6 +22,7 @@ class DryingController extends Controller
         $machine = Machine::where('status', 'online')->first();
 
         $session = null;
+        $batch = null;              // ✅ define batch properly
         $hardwareStatuses = collect();
         $latestCapture = null;
         $remainingTime = null;
@@ -39,11 +40,12 @@ class DryingController extends Controller
 
             if ($session) {
 
-                // Get latest tray batch
-                $latestBatch = $session->dryingBatches()->latest()->first();
+                // Get latest drying batch
+                $batch = $session->dryingBatches()->latest()->first();
 
-                if ($latestBatch) {
-                    $latestCapture = CaptureSession::where('drying_batch_id', $latestBatch->id)
+                // Get latest capture
+                if ($batch) {
+                    $latestCapture = CaptureSession::where('drying_batch_id', $batch->id)
                         ->latest('captured_at')
                         ->first();
                 }
@@ -52,7 +54,10 @@ class DryingController extends Controller
                 if ($session->started_at && $session->initial_duration_minutes) {
 
                     $endTime = Carbon::parse($session->started_at)
-                        ->addMinutes($session->initial_duration_minutes + $session->extension_minutes);
+                        ->addMinutes(
+                            $session->initial_duration_minutes +
+                            ($session->extension_minutes ?? 0)
+                        );
 
                     $seconds = now()->diffInSeconds($endTime, false);
 
@@ -66,6 +71,7 @@ class DryingController extends Controller
         return view('user-view.user-overview', [
             'machine' => $machine,
             'session' => $session,
+            'batch' => $batch,
             'hardwareStatuses' => $hardwareStatuses,
             'latestCapture' => $latestCapture,
             'remainingTime' => $remainingTime

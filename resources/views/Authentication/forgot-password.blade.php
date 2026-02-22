@@ -21,7 +21,7 @@
             <div class="error">{{ session('error') }}</div>
         @endif
 
-        <form method="POST" action="{{ route('api.verify') }}">
+        <form method="POST" action="{{ route('verify.identity') }}">
             @csrf
 
             <label><i class="fa-solid fa-envelope"></i> Email</label>

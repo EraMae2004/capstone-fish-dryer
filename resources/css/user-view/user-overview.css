@@ -1,3 +1,11 @@
+/* ================= GLOBAL FIX ================= */
+
+html, body {
+    overflow-x: hidden; /* Prevent full-page horizontal scroll */
+}
+
+/* ================= HEADER ================= */
+
 .overview-header {
     display: flex;
     justify-content: space-between;
@@ -27,18 +35,26 @@
     border: 1px solid #ddd;
 }
 
+
+/* ================= GRID ================= */
+
 .overview-grid {
     display: grid;
-    grid-template-columns: 1.2fr 1fr;
+    grid-template-columns: 1fr 1.5fr;
     gap: 25px;
 }
 
+/* CRITICAL FIX */
 .left-section,
 .right-section {
+    min-width: 0;          /* allows shrinking inside grid */
     display: flex;
     flex-direction: column;
     gap: 25px;
 }
+
+
+/* ================= CARDS ================= */
 
 .info-card {
     background: #fff;
@@ -61,6 +77,9 @@
     border-bottom: 1px solid #eee;
 }
 
+
+/* ================= CONTROL ================= */
+
 .control-grid {
     padding: 20px;
     display: flex;
@@ -74,7 +93,7 @@
 }
 
 .control-row input {
-    width: 170px;
+    width: 200px;
     padding: 6px;
     border-radius: 6px;
     border: 1px solid #ccc;
@@ -101,7 +120,10 @@
 
 .btn-start { background: #2ecc71; }
 .btn-pause { background: #f1c40f; color: #000; }
-.btn-stop { background: #e74c3c; }
+.btn-stop  { background: #e74c3c; }
+
+
+/* ================= HARDWARE ================= */
 
 .hardware-row {
     display: flex;
@@ -110,34 +132,173 @@
     border-bottom: 1px solid #eee;
 }
 
-.badge-green { color: #27ae60; }
-.badge-red { color: #e74c3c; }
-.badge-gray { color: #95a5a6; }
 
-.fish-layout {
-    display: grid;
-    grid-template-columns: 250px 1fr;
-    gap: 40px;
-    padding: 20px;
+/* ===================================================== */
+/* ================= BATCH EVALUATION =================== */
+/* ===================================================== */
+
+.batch-evaluation-card {
+    width: 100%;
+    overflow: hidden; /* LOCK outer card size */
+    padding-bottom: 20px;
 }
 
-.fish-images {
+.batch-header {
     display: flex;
-    flex-direction: column;
-    gap: 20px;
+    justify-content: space-between;
+    align-items: center;
+    background: #f4f6f8;
+    padding: 12px 18px;
+    border-bottom: 1px solid #eee;
 }
 
-.image-box {
-    height: 150px;
-    background: #d9d9d9;
+.add-batch-btn {
+    background: #0d3b66;
+    color: white;
+    padding: 6px 12px;
+    border: none;
     border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+/* ===================================================== */
+/* ============ ONLY THIS AREA SCROLLS ================= */
+/* ===================================================== */
+
+.batch-scroll-wrapper {
+    display: flex;          /* horizontal layout */
+    gap: 20px;
+    overflow-x: auto;       /* SCROLL HERE ONLY */
+    overflow-y: hidden;
+    padding: 20px;
+    scroll-behavior: smooth;
+}
+
+/* scrollbar style (optional) */
+.batch-scroll-wrapper::-webkit-scrollbar {
+    height: 8px;
+}
+
+.batch-scroll-wrapper::-webkit-scrollbar-thumb {
+    background: #ccc;
+    border-radius: 6px;
+}
+
+/* Each batch container */
+.batch-item {
+    flex: 0 0 340px; /* fixed width */
+}
+
+/* Batch card */
+.batch-card {
+    width: 100%;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    background: #fff;
+}
+
+/* ===================================================== */
+/* ================= CARD CONTENT ======================= */
+/* ===================================================== */
+
+.batch-card-header {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: #f2f2f2;
+    font-weight: 600;
+}
+
+.remove-btn {
+    background: #e74c3c;
+    color: white;
+    border: none;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.batch-images {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    padding: 15px;
+    text-align: center;
+}
+
+.capture-btn {
+    background: #0d3b66;
+    color: white;
+    border: none;
+    padding: 6px;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.image-frame {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    background: #d9d9d9;
+    border-radius: 8px;
     display: flex;
     align-items: center;
     justify-content: center;
+    border: 2px dashed #bbb;
+    overflow: hidden;
 }
 
-.fish-details {
+.batch-status-title {
+    background: #e9d8a6;
+    padding: 6px;
+    text-align: center;
+    font-weight: 600;
+}
+
+.batch-details {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 20px;
+    padding: 15px;
+}
+
+.batch-details div {
     display: flex;
-    flex-direction: column;
-    gap: 18px;
+    justify-content: space-between;
+    font-size: 13px;
+}
+
+.full-row {
+    grid-column: span 2;
+}
+
+/* ===================================================== */
+/* ================= RECOMMENDATION ===================== */
+/* ===================================================== */
+
+.recommendation-card {
+    margin-top: 20px;
+}
+
+.recommendation-body {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px;
+}
+
+.apply-btn {
+    background: #0d3b66;
+    color: white;
+    padding: 8px 18px;
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.apply-btn:hover {
+    background: #092c4d;
 }

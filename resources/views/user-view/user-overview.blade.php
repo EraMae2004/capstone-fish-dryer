@@ -1,7 +1,7 @@
 @extends('user-view.user-view')
 
 @section('content')
-@vite(['resources/css/user-view/user-overview.css'])
+@vite(['resources/css/user-view/user-overview.css', 'resources/js/user-overview.js'])
 
 <div class="overview-wrapper">
 
@@ -163,42 +163,92 @@
                 @endforeach
             </div>
 
-            <!-- FISH STATUS -->
-            <div class="info-card fish-status-card">
 
-                <div class="fish-header">
-                    <div class="card-header">Fish Status</div>
-                    <button class="capture-button">
-                        <i class="fa fa-camera"></i> Capture Tray
+            <!-- ================= BATCH EVALUATION ================= -->
+            <div class="info-card batch-evaluation-card">
+
+                <div class="batch-header">
+                    <div class="card-header">Batch Evaluation</div>
+
+                    <button type="button" class="add-batch-btn" id="addBatchBtn">
+                        <i class="fa fa-plus"></i> Add Batch
                     </button>
                 </div>
 
-                <div class="fish-layout">
+                <div class="batch-scroll-wrapper" id="batchScrollWrapper">
 
-                    <div class="fish-images">
-                        <div class="image-box">Front Image</div>
-                        <div class="image-box">Back Image</div>
-                    </div>
+                    <!-- INITIAL BATCH -->
+                    <div class="batch-item">
 
-                    <div class="fish-details">
-                        @foreach([
-                            ['Appearance', $latestCapture->appearance ?? '--'],
-                            ['Color', $latestCapture->color ?? '--'],
-                            ['Texture', $latestCapture->texture ?? '--'],
-                            ['Description', $latestCapture->description ?? '--'],
-                            ['Recommendations', $latestCapture->recommendations ?? '--'],
-                        ] as $item)
+                        <div class="batch-card">
 
-                        <div class="fish-row">
-                            <span>{{ $item[0] }}:</span>
-                            <strong>{{ $item[1] }}</strong>
+                            <div class="batch-card-header">
+                                <span class="batch-title">Batch 1</span>
+                                <button type="button" class="remove-btn">Remove</button>
+                            </div>
+
+                            <div class="batch-images">
+                                <button type="button" class="capture-btn">Capture Front</button>
+                                <button type="button" class="capture-btn">Capture Back</button>
+
+                                <div class="image-frame">
+                                    <span>Front Image</span>
+                                </div>
+
+                                <div class="image-frame">
+                                    <span>Back Image</span>
+                                </div>
+                            </div>
+
+                            <div class="batch-status-title">Status</div>
+
+                            <div class="batch-details">
+                                <div><span>Appearance:</span><strong>--</strong></div>
+                                <div><span>Fully Dried:</span><strong>--</strong></div>
+                                <div><span>Color:</span><strong>--</strong></div>
+                                <div><span>Partially Dried:</span><strong>--</strong></div>
+                                <div><span>Texture:</span><strong>--</strong></div>
+                                <div><span>Not Dried:</span><strong>--</strong></div>
+                                <div class="full-row">
+                                    <span>Description:</span>
+                                    <strong>--</strong>
+                                </div>
+                            </div>
+
                         </div>
 
-                        @endforeach
                     </div>
+                    <!-- END INITIAL BATCH -->
 
                 </div>
 
+            </div>
+
+
+        </div>
+
+    </div>
+
+
+    <!-- ================= RECOMMENDATION ================= -->
+    <div class="info-card recommendation-card">
+
+        <div class="recommendation-body">
+
+            <div class="recommendation-left">
+                <h4>Recommendations</h4>
+            </div>
+
+            <div class="recommendation-center">
+                <p><strong>Extend Drying Time:</strong> --</p>
+                <p><strong>Suggested Temperature:</strong> -- °C</p>
+                <p><strong>Suggested Fan Speed:</strong> Level --</p>
+            </div>
+
+            <div class="recommendation-right">
+                <button type="button" class="apply-btn">
+                    Apply Recommendations
+                </button>
             </div>
 
         </div>

@@ -18,13 +18,13 @@
 <div class="wrapper">
     <div class="container">
 
-        <a href="{{ route('api.forgot') }}" class="back-arrow">
+        <a href="{{ route('forgot') }}" class="back-arrow">
             <i class="fa-solid fa-arrow-left"></i>
         </a>
 
         <h2>Reset Password</h2>
 
-        <form id="resetForm" method="POST" action="{{ route('api.reset.submit') }}">
+        <form id="resetForm" method="POST" action="{{ route('reset.submit') }}">
             @csrf
 
             <!-- NEW PASSWORD -->

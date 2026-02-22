@@ -67,7 +67,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
         try {
 
-            const response = await fetch("/api/user/profile/update", {
+            const response = await fetch("/user/profile/update", {
                 method: "POST",
                 headers: {
                     "X-CSRF-TOKEN": document
@@ -152,7 +152,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
         try {
 
-            const response = await fetch("/api/user/change-password", {
+            const response = await fetch("/user/change-password", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",

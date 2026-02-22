@@ -17,9 +17,9 @@
     </div>
 
     <form id="userProfileForm"
-          onsubmit="return false;"
-          enctype="multipart/form-data">
-
+        method="POST"
+        action="{{ route('user.profile.update') }}"
+        enctype="multipart/form-data">
         @csrf
 
         <input type="hidden" name="remove_image"
