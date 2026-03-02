@@ -1,0 +1,13 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Laravel
+vendor/
+
+# Node
+node_modules/
+
+# Environment
+.env

@@ -1,0 +1,278 @@
+.user-management-container {
+    padding: 10px;
+}
+
+/* ===== STATS CARDS ===== */
+
+.stats-cards {
+    display: flex;
+    gap: 30px;
+    margin-bottom: 30px;
+}
+
+.card {
+    flex: 1;
+    background: white;
+    padding: 30px;
+    border-radius: 12px;
+    text-align: center;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.05);
+}
+
+.card h1 {
+    font-size: 38px;
+    margin-bottom: 8px;
+    color: #2c3e50;
+}
+
+.card p {
+    color: #7a8a99;
+}
+
+.highlight {
+    border: 3px solid #4fc3f7;
+}
+
+/* ===== TABLE ===== */
+
+.table-wrapper {
+    background: white;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.05);
+}
+
+.table-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 25px;
+}
+
+.search-form {
+    width: 100%;
+}
+
+.search-box {
+    position: relative;
+    width: 350px; /* adjust here */
+}
+
+.search-box input {
+    width: 100% !important;
+    height: 40px;
+    padding: 0 40px 0 15px;
+    border-radius: 10px;
+    border: 1.5px solid #e0e0e0;
+    background-color: #f4f6f8;
+    font-size: 14px;
+    outline: none;
+}
+
+.search-box i {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 14px;
+    color: #7f8c8d;
+    pointer-events: none;
+}
+
+
+.table-top input {
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid #ddd;
+}
+
+.delete-btn {
+    background: #e74c3c;
+    border: none;
+    padding: 8px 14px;
+    color: white;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+/* TABLE */
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+thead {
+    background: #f3f6f9;
+}
+
+th, td {
+    padding: 12px 10px;
+    text-align: center;
+}
+
+tbody tr {
+    border-bottom: 1px solid #eee;
+}
+
+/* AVATAR */
+
+.avatar {
+    width: 38px;
+    height: 38px;
+    background: #34495e;
+    border-radius: 50%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    color: white;
+    font-size: 13px;
+    overflow: hidden;
+}
+
+.avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+/* STATUS */
+
+.status.active {
+    color: green;
+    font-weight: 600;
+}
+
+.status.inactive {
+    color: red;
+    font-weight: 600;
+}
+
+/* ACTION ICONS */
+
+.actions {
+    display: flex;
+    gap: 18px;
+    align-items: center;
+}
+
+.actions i {
+    cursor: pointer;
+    font-size: 18px;
+    transition: 0.2s ease;
+}
+
+.actions i:hover {
+    transform: scale(1.2);
+}
+
+/* Edit */
+.edit-icon {
+    color: #2c3e50;
+}
+
+/* View */
+.view-icon {
+    color: #5f6b7a;
+}
+
+/* Activate */
+.activate-icon {
+    color: #f1c40f;
+}
+
+/* Deactivate */
+.deactivate-icon {
+    color: #f39c12;
+}
+
+/* Delete */
+.delete-icon {
+    color: #e74c3c;
+}
+
+.toggle-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    outline: none;
+}
+
+.delete-icon-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    outline: none;
+}
+/* Pagination */
+
+.pagination {
+    margin-top: 20px;
+}
+
+/* CONFIRM MODAL */
+.confirm-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.25);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 99999;
+}
+
+.confirm-card {
+    background: white;
+    width: 420px;
+    padding: 45px;
+    border-radius: 20px;
+    text-align: center;
+    box-shadow: 0 25px 60px rgba(0,0,0,0.15);
+}
+
+.confirm-icon {
+    width: 90px;
+    height: 90px;
+    background: #f5b041;
+    border-radius: 50%;
+    margin: 0 auto 25px auto;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.confirm-icon i {
+    font-size: 38px;
+    color: white;
+}
+
+.confirm-card h2 {
+    font-size: 20px;
+    margin-bottom: 25px;
+}
+
+.confirm-actions {
+    display: flex;
+    justify-content: center;
+    gap: 15px;
+}
+
+.btn-confirm {
+    background: #1f3c88;
+    color: white;
+    padding: 8px 28px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.btn-cancel {
+    background: #6c757d;
+    color: white;
+    padding: 8px 28px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+}

@@ -1,0 +1,152 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', sans-serif;
+    background: #EEEEEF; /* FULL PAGE BG */
+}
+
+/* ================= TOP BAR ================= */
+
+.topbar {
+    height: 80px;
+    background: #2c3e50;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 30px;
+    color: white;
+}
+
+.logo-section {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+
+
+.logo-section {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.logo-icon {
+    display: block;
+}
+
+.system-name {
+    font-size: 30px;
+    font-weight: 700; /* Bold */
+    color: white;
+}
+
+
+.user-section {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.profile-circle {
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    background: #34495e;
+    overflow: hidden;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    color: white;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.profile-circle img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.username {
+    font-size: 15px;
+}
+
+/* ================= MAIN ================= */
+
+.main {
+    display: flex;
+    padding: 30px;
+    gap: 30px;
+}
+
+/* ================= SIDEBAR ================= */
+
+.sidebar {
+    width: 230px;
+    height: 350px;
+    background: white; /* WHITE LIKE IMAGE */
+    border-radius: 14px;
+    padding: 15px 0;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.05);
+    flex-shrink: 0;
+}
+
+/* MENU ITEMS */
+.menu-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 22px;
+    text-decoration: none;
+    color: #5f6b7a;
+    font-size: 16px;  /* BIGGER TEXT */
+    font-weight: 400;
+    transition: 0.2s ease;
+}
+
+.menu-item i {
+    font-size: 18px; /* BIGGER ICON */
+}
+
+/* ACTIVE */
+.menu-item.active {
+    background: #d6e7f5;
+    border-left: 4px solid #4fc3f7;
+    color: #2c3e50;
+    font-weight: 600;
+}
+
+/* HOVER */
+.menu-item:hover {
+    background: #f1f5f9;
+}
+
+/* DIVIDER LINE */
+.divider {
+    height: 1px;
+    background: #e5e5e5;
+    margin: 12px 20px;
+}
+
+/* LOGOUT */
+.logout {
+    color: #e74c3c;
+}
+
+/* ================= CONTENT ================= */
+
+.content {
+    flex: 1;
+}
+
+.content h2 {
+    color: #2c3e50;
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 20px;
+}
