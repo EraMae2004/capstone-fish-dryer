@@ -26,6 +26,8 @@ export default function OverviewControlPanel({ session }: any) {
       fully_dried: "--",
       partially_dried: "--",
       not_dried: "--",
+      detections: [] as any[],
+      recommendation: {} as any,
     };
   }
 
@@ -289,18 +291,7 @@ export default function OverviewControlPanel({ session }: any) {
                         style={styles.previewImage}
                         resizeMode="cover"
                       />
-
-                      {/* Render detection boxes if available */}
-                      {batch.detections && batch.detections.map((d: any, di: number) => {
-                        // d.box is [x1,y1,x2,y2] relative to original image pixels
-                        // We'll render simple small badges at the top-left of the image for now
-                        const color = d.type === 'unknown' ? 'purple' : (d.dryness_class === 0 ? 'green' : (d.dryness_class === 1 ? 'yellow' : 'red'));
-                        return (
-                          <View key={di} style={{ position: 'absolute', left: 6 + di*2, top: 6 + di*2, backgroundColor: color, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
-                            <Text style={{ color: '#000', fontWeight: '700' }}>{d.type === 'unknown' ? 'Unknown' : (d.species || 'Fish')}</Text>
-                          </View>
-                        );
-                      })}
+                      <DetectionImage uri={batch.frontImage} detections={batch.detections || []} />
                     </View>
                   ) : (
                     <Text style={styles.imageText}>Front Image</Text>
@@ -459,6 +450,48 @@ function StatusRow({ label, value }: any) {
     <View style={styles.statusRow}>
       <Text style={styles.statusLabel}>{label}:</Text>
       <Text style={styles.statusValue}>{value}</Text>
+    </View>
+  );
+}
+
+function DetectionImage({ uri, detections }: any) {
+  const [imgSize, setImgSize] = useState({ w: 1, h: 1 });
+  const [displaySize, setDisplaySize] = useState({ w: 1, h: 1 });
+
+  const onImageLoad = (e: any) => {
+    const s = e.nativeEvent.source || {};
+    if (s.width && s.height) setImgSize({ w: s.width, h: s.height });
+  };
+
+  return (
+    <View style={{ width: '100%', height: '100%', position: 'relative' }} onLayout={(e) => {
+      const layout = e.nativeEvent.layout;
+      setDisplaySize({ w: layout.width, h: layout.height });
+    }}>
+      <Image source={{ uri }} style={styles.previewImage} resizeMode="cover" onLoad={onImageLoad} />
+
+      {/* overlay boxes */}
+      {detections && detections.map((d: any, i: number) => {
+        const box = d.box || [0,0,0,0];
+        const imgW = imgSize.w || 1;
+        const imgH = imgSize.h || 1;
+        const scaleX = displaySize.w / imgW || 1;
+        const scaleY = displaySize.h / imgH || 1;
+        const left = box[0] * scaleX;
+        const top = box[1] * scaleY;
+        const width = Math.max(2, (box[2] - box[0]) * scaleX);
+        const height = Math.max(2, (box[3] - box[1]) * scaleY);
+
+        const borderColor = d.type === 'unknown' ? 'purple' : (d.dryness_class === 0 ? 'green' : (d.dryness_class === 1 ? 'yellow' : 'red'));
+
+        return (
+          <View key={i} style={{ position: 'absolute', left, top, width, height, borderWidth: 2, borderColor, borderRadius: 4 }}>
+            <View style={{ backgroundColor: '#00000066', paddingHorizontal: 4 }}>
+              <Text style={{ color: '#fff', fontSize: 11 }}>{d.type === 'unknown' ? 'Unknown' : (d.species || 'Fish')}</Text>
+            </View>
+          </View>
+        );
+      })}
     </View>
   );
 }

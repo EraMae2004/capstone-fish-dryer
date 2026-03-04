@@ -6,7 +6,18 @@ import cv2
 import numpy as np
 import base64
 import joblib
-from skimage.feature import greycomatrix, greycoprops
+# scikit-image changed locations for texture helpers across versions; import defensively
+HAVE_GREY = False
+try:
+    from skimage.feature import greycomatrix, greycoprops
+    HAVE_GREY = True
+except Exception:
+    try:
+        from skimage.feature.texture import greycomatrix, greycoprops
+        HAVE_GREY = True
+    except Exception:
+        HAVE_GREY = False
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -43,9 +54,11 @@ dryness_model = try_load_torch_model([
     "models/dryness_model.pt",
 ])
 
-# Random forest regressor for recommendation (joblib)
+# Random forest regressor for recommendation (joblib).
+# Only use an explicitly trained model file; do not
+# generate any synthetic model or predefined values.
 rf_model = None
-for p in ["models/rf_model.pkl", "models/random_forest.pkl", "random_forest.pkl", "models/random_forest.pkl"]:
+for p in ["models/rf_model.pkl", "models/random_forest.pkl", "random_forest.pkl"]:
     try:
         rf_model = joblib.load(p)
         break
@@ -72,9 +85,20 @@ def extract_features(img):
     mean_sat = np.mean(hsv[:,:,1])
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    glcm = greycomatrix(gray, [1], [0], 256, symmetric=True, normed=True)
-    contrast = greycoprops(glcm, 'contrast')[0,0]
-    homogeneity = greycoprops(glcm, 'homogeneity')[0,0]
+    # compute texture features; fall back to simple stats if GLCM unavailable
+    contrast = 0.0
+    homogeneity = 0.0
+    if HAVE_GREY:
+        try:
+            glcm = greycomatrix(gray, [1], [0], 256, symmetric=True, normed=True)
+            contrast = greycoprops(glcm, 'contrast')[0,0]
+            homogeneity = greycoprops(glcm, 'homogeneity')[0,0]
+        except Exception:
+            contrast = float(np.var(gray))
+            homogeneity = float(1.0 / (1.0 + contrast))
+    else:
+        contrast = float(np.var(gray))
+        homogeneity = float(1.0 / (1.0 + contrast))
 
     return mean_hue, mean_sat, contrast, homogeneity
 
@@ -94,6 +118,27 @@ def analyze():
                 detections = detection_model([tensor])[0]
             except Exception:
                 detections = {"boxes": [], "scores": [], "labels": []}
+    else:
+        # Fallback: simple contour-based detection so system still locates objects
+        try:
+            gray = cv2.cvtColor(front, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5,5), 0)
+            _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            boxes = []
+            scores = []
+            labels = []
+            for c in contours:
+                area = cv2.contourArea(c)
+                if area < 500:
+                    continue
+                x, y, w, h = cv2.boundingRect(c)
+                boxes.append([int(x), int(y), int(x + w), int(y + h)])
+                scores.append(0.95)
+                labels.append(1)
+            detections = {"boxes": boxes, "scores": scores, "labels": labels}
+        except Exception:
+            detections = {"boxes": [], "scores": [], "labels": []}
 
     fully = 0
     partial = 0
