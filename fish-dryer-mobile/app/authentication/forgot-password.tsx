@@ -7,10 +7,13 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
-  ScrollView
+  ScrollView,
+  Alert
 } from 'react-native';
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+
+const BASE_URL = "https://spinproof-brineless-marleen.ngrok-free.dev";
 
 export default function ForgotPassword() {
   const router = useRouter();
@@ -18,6 +21,36 @@ export default function ForgotPassword() {
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
+
+  const handleVerify = async () => {
+    try {
+      const response = await fetch(`${BASE_URL}/api/mobile/verify-identity`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          email,
+          phone,
+          address
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        router.push({
+          pathname: '/authentication/reset-password',
+          params: { email }
+        });
+      } else {
+        Alert.alert("Error", data.message);
+      }
+    } catch (error) {
+      console.log(error);
+      Alert.alert("Error", "Something went wrong.");
+    }
+  };
 
   return (
     <KeyboardAvoidingView
@@ -27,7 +60,6 @@ export default function ForgotPassword() {
       <ScrollView contentContainerStyle={styles.wrapper}>
         <View style={styles.container}>
 
-          {/* BACK BUTTON */}
           <TouchableOpacity
             style={styles.backArrow}
             onPress={() => router.back()}
@@ -35,10 +67,8 @@ export default function ForgotPassword() {
             <Ionicons name="arrow-back" size={22} color="#4fc3f7" />
           </TouchableOpacity>
 
-          {/* TITLE */}
           <Text style={styles.title}>Forgot Password</Text>
 
-          {/* EMAIL */}
           <View style={styles.formGroup}>
             <Text style={styles.label}>
               <FontAwesome name="envelope" size={14} color="#4fc3f7" /> Email
@@ -49,11 +79,9 @@ export default function ForgotPassword() {
               onChangeText={setEmail}
               keyboardType="email-address"
               autoCapitalize="none"
-              placeholderTextColor="#999"
             />
           </View>
 
-          {/* PHONE */}
           <View style={styles.formGroup}>
             <Text style={styles.label}>
               <FontAwesome name="phone" size={14} color="#4fc3f7" /> Phone
@@ -63,11 +91,9 @@ export default function ForgotPassword() {
               value={phone}
               onChangeText={setPhone}
               keyboardType="phone-pad"
-              placeholderTextColor="#999"
             />
           </View>
 
-          {/* ADDRESS */}
           <View style={styles.formGroup}>
             <Text style={styles.label}>
               <FontAwesome name="map-marker" size={14} color="#4fc3f7" /> Address
@@ -76,12 +102,13 @@ export default function ForgotPassword() {
               style={styles.input}
               value={address}
               onChangeText={setAddress}
-              placeholderTextColor="#999"
             />
           </View>
 
-          {/* BUTTON */}
-          <TouchableOpacity style={styles.button}>
+          <TouchableOpacity
+            style={styles.button}
+            onPress={handleVerify}
+          >
             <Text style={styles.buttonText}>Reset Password</Text>
           </TouchableOpacity>
 
@@ -92,7 +119,6 @@ export default function ForgotPassword() {
 }
 
 const styles = StyleSheet.create({
-
   wrapper: {
     flexGrow: 1,
     backgroundColor: '#2c3e50',
@@ -100,7 +126,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 20
   },
-
   container: {
     width: '100%',
     maxWidth: 380,
@@ -115,13 +140,11 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 10 },
     elevation: 12
   },
-
   backArrow: {
     position: 'absolute',
     top: 20,
     left: 20
   },
-
   title: {
     textAlign: 'center',
     fontSize: 28,
@@ -129,11 +152,9 @@ const styles = StyleSheet.create({
     marginBottom: 50,
     color: '#2c3e50'
   },
-
   formGroup: {
     marginBottom: 30
   },
-
   label: {
     fontSize: 14,
     fontWeight: '600',
@@ -141,7 +162,6 @@ const styles = StyleSheet.create({
     marginLeft: 8,
     color: '#2c3e50'
   },
-
   input: {
     width: '100%',
     padding: 14,
@@ -150,7 +170,6 @@ const styles = StyleSheet.create({
     borderColor: '#e0e6ed',
     fontSize: 14
   },
-
   button: {
     width: '80%',
     alignSelf: 'center',
@@ -159,12 +178,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#4fc3f7',
     marginTop: 20
   },
-
   buttonText: {
     textAlign: 'center',
     fontSize: 14,
     fontWeight: '600',
     color: '#2c3e50'
   }
-
 });

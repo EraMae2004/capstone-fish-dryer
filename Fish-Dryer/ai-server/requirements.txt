@@ -5,3 +5,5 @@ torchvision
 joblib
 numpy
 scikit-learn
+flask-cors
+scikit-image

@@ -32,7 +32,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
         try {
 
-            const response = await fetch("/api/admin/profile/update", {
+            const response = await fetch("/admin/profile/update", {
                 method: "POST",
                 headers: {
                     "X-CSRF-TOKEN": document

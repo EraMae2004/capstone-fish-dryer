@@ -54,26 +54,26 @@
         <!-- ================= SIDEBAR ================= -->
         <div class="sidebar">
 
-            <a href="{{ route('api.admin.overview') }}"
-               class="menu-item {{ request()->routeIs('api.admin.overview') ? 'active' : '' }}">
+            <a href="{{ route('admin.overview') }}"
+               class="menu-item {{ request()->routeIs('admin.overview') ? 'active' : '' }}">
                 <i class="fa-solid fa-gauge"></i>
                 Overview
             </a>
 
-            <a href="{{ route('api.admin.user-management') }}"
-               class="menu-item {{ request()->routeIs('api.admin.user-management') ? 'active' : '' }}">
+            <a href="{{ route('admin.user-management') }}"
+               class="menu-item {{ request()->routeIs('admin.user-management') ? 'active' : '' }}">
                 <i class="fa-solid fa-users"></i>
                 User Management
             </a>
 
-            <a href="{{ route('api.admin.drying-machines') }}"
-               class="menu-item {{ request()->routeIs('api.admin.drying-machines') ? 'active' : '' }}">
+            <a href="{{ route('admin.drying-machines') }}"
+               class="menu-item {{ request()->routeIs('admin.drying-machines') ? 'active' : '' }}">
                 <i class="fa-solid fa-microchip"></i>
                 Drying Machines
             </a>
 
-            <a href="{{ route('api.admin.profile') }}"
-                class="menu-item {{ request()->routeIs('api.admin.profile') ? 'active' : '' }}">
+            <a href="{{ route('admin.profile') }}"
+                class="menu-item {{ request()->routeIs('admin.profile') ? 'active' : '' }}">
                 <i class="fa-solid fa-user"></i>
                 Profile
             </a>
@@ -81,7 +81,7 @@
 
             <div class="divider"></div>
 
-            <form method="POST" action="{{ route('api.logout') }}">
+            <form method="POST" action="{{ route('logout') }}">
                 @csrf
                 <a href="#"
                 onclick="event.preventDefault(); this.closest('form').submit();"

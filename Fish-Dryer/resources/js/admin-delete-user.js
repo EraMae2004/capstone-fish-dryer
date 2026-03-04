@@ -57,7 +57,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 const selected = document.querySelectorAll('.user-checkbox:checked');
                 const ids = Array.from(selected).map(cb => cb.value);
 
-                fetch('/api/admin/users', {
+                fetch('/admin/users', {
                     method: 'DELETE',
                     headers: {
                         'Content-Type': 'application/json',

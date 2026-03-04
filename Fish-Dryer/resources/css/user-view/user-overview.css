@@ -1,7 +1,9 @@
-/* ================= GLOBAL FIX ================= */
+/* ================= BASE LAYOUT ================= */
 
 html, body {
-    overflow-x: hidden; /* Prevent full-page horizontal scroll */
+    overflow-x: hidden;
+    margin: 0;
+    padding: 0;
 }
 
 /* ================= HEADER ================= */
@@ -26,15 +28,14 @@ html, body {
 }
 
 .dot-green { background: #2ecc71; }
-.dot-red { background: #e74c3c; }
-.dot-gray { background: #95a5a6; }
+.dot-red   { background: #e74c3c; }
+.dot-gray  { background: #95a5a6; }
 
 .machine-dropdown {
     padding: 6px 10px;
-    border-radius: 6px;
-    border: 1px solid #ddd;
+    border: 1px solid #ccc;
+    border-radius: 4px;
 }
-
 
 /* ================= GRID ================= */
 
@@ -44,41 +45,44 @@ html, body {
     gap: 25px;
 }
 
-/* CRITICAL FIX */
 .left-section,
 .right-section {
-    min-width: 0;          /* allows shrinking inside grid */
     display: flex;
     flex-direction: column;
     gap: 25px;
+    min-width: 0;
 }
 
-
-/* ================= CARDS ================= */
+/* ================= CARD SYSTEM ================= */
 
 .info-card {
-    background: #fff;
-    border-radius: 12px;
+    background: #ffffff;
+    border: 1px solid #cfcfcf;
+    border-radius: 6px;
     overflow: hidden;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.05);
 }
 
 .card-header {
-    background: #f4f6f8;
+    background: #e9e9e9;
     padding: 12px 18px;
     font-weight: 600;
-    border-bottom: 1px solid #eee;
+    border-bottom: 1px solid #d5d5d5;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
 }
 
-.info-row {
+/* ================= INFO / HARDWARE ROWS ================= */
+
+.info-row,
+.hardware-row {
     display: flex;
     justify-content: space-between;
     padding: 10px 18px;
     border-bottom: 1px solid #eee;
 }
 
-
-/* ================= CONTROL ================= */
+/* ================= CONTROL PANEL ================= */
 
 .control-grid {
     padding: 20px;
@@ -95,210 +99,301 @@ html, body {
 .control-row input {
     width: 200px;
     padding: 6px;
-    border-radius: 6px;
     border: 1px solid #ccc;
+    border-radius: 4px;
 }
 
 .control-actions {
     display: flex;
     justify-content: flex-end;
     gap: 10px;
-    padding: 15px 20px 20px 20px;
+    padding: 15px 20px 20px;
 }
 
 .btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
     padding: 8px 16px;
-    border-radius: 6px;
-    border: none;
-    color: white;
     font-size: 13px;
+    border: none;
+    border-radius: 4px;
     cursor: pointer;
+    color: white;
 }
 
 .btn-start { background: #2ecc71; }
 .btn-pause { background: #f1c40f; color: #000; }
 .btn-stop  { background: #e74c3c; }
 
+/* ================= RECOMMENDATION ================= */
 
-/* ================= HARDWARE ================= */
-
-.hardware-row {
-    display: flex;
-    justify-content: space-between;
-    padding: 10px 18px;
-    border-bottom: 1px solid #eee;
+.recommendation-body {
+    padding: 15px;
+    font-size: 14px;
 }
 
-
-/* ===================================================== */
-/* ================= BATCH EVALUATION =================== */
-/* ===================================================== */
-
-.batch-evaluation-card {
+.apply-btn {
+    margin-top: 10px;
     width: 100%;
-    overflow: hidden; /* LOCK outer card size */
-    padding-bottom: 20px;
-}
-
-.batch-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    background: #f4f6f8;
-    padding: 12px 18px;
-    border-bottom: 1px solid #eee;
-}
-
-.add-batch-btn {
-    background: #0d3b66;
+    padding: 8px;
+    background: #123b59;
     color: white;
-    padding: 6px 12px;
     border: none;
-    border-radius: 6px;
-    font-size: 13px;
+    border-radius: 4px;
     cursor: pointer;
 }
 
-/* ===================================================== */
-/* ============ ONLY THIS AREA SCROLLS ================= */
-/* ===================================================== */
+/* ================= BATCH EVALUATION ================= */
+
+.batch-evaluation-card {
+    height: 780px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.add-batch-btn {
+    background: #123b59;
+    color: #ffffff;
+    border: none;
+    padding: 8px 16px;
+    font-size: 14px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.add-batch-btn:hover {
+    background: #0f2f45;
+}
+
 
 .batch-scroll-wrapper {
-    display: flex;          /* horizontal layout */
+    flex: 1;
+    overflow-y: auto;
+    padding: 15px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
     gap: 20px;
-    overflow-x: auto;       /* SCROLL HERE ONLY */
-    overflow-y: hidden;
-    padding: 20px;
-    scroll-behavior: smooth;
 }
 
-/* scrollbar style (optional) */
-.batch-scroll-wrapper::-webkit-scrollbar {
-    height: 8px;
-}
+/* ================= BATCH CARD ================= */
 
-.batch-scroll-wrapper::-webkit-scrollbar-thumb {
-    background: #ccc;
+.batch-card {
+    background: #ffffff;
+    border: 1px solid #cfcfcf;
     border-radius: 6px;
 }
 
-/* Each batch container */
-.batch-item {
-    flex: 0 0 340px; /* fixed width */
-}
-
-/* Batch card */
-.batch-card {
-    width: 100%;
-    border: 1px solid #ddd;
-    border-radius: 10px;
-    background: #fff;
-}
-
-/* ===================================================== */
-/* ================= CARD CONTENT ======================= */
-/* ===================================================== */
-
 .batch-card-header {
+    background: #e9e9e9;
+    padding: 10px 15px;
+    border-bottom: 1px solid #d5d5d5;
     display: flex;
     justify-content: space-between;
-    padding: 10px 14px;
-    background: #f2f2f2;
-    font-weight: 600;
+    align-items: center;
 }
 
 .remove-btn {
     background: #e74c3c;
     color: white;
     border: none;
-    padding: 4px 10px;
-    border-radius: 6px;
+    padding: 5px 12px;
+    border-radius: 4px;
     font-size: 12px;
     cursor: pointer;
 }
 
-.batch-images {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
+/* ================= ACTION BUTTONS ================= */
+
+.batch-actions {
     padding: 15px;
-    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
 }
 
-.capture-btn {
-    background: #0d3b66;
+.action-btn {
+    background: #123b59;
     color: white;
     border: none;
-    padding: 6px;
-    border-radius: 6px;
-    font-size: 12px;
+    padding: 10px;
+    border-radius: 4px;
     cursor: pointer;
+}
+
+.action-btn.upload-image-btn {
+    background: #5f6f7a;
+}
+
+/* ================= IMAGE FRAMES ================= */
+
+.batch-images {
+    padding: 0 15px 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
 }
 
 .image-frame {
+    background: #cfcfcf;
     width: 100%;
-    aspect-ratio: 1 / 1;
-    background: #d9d9d9;
-    border-radius: 8px;
+    aspect-ratio: 1 / 1;   /* 🔥 Makes it PERFECT square */
     display: flex;
     align-items: center;
     justify-content: center;
-    border: 2px dashed #bbb;
-    overflow: hidden;
+    color: #555;
+    overflow: hidden;      /* prevents overflow */
 }
 
+.image-frame img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;     /* fills square nicely */
+}
+
+/* ================= STATUS ================= */
+
 .batch-status-title {
-    background: #e9d8a6;
-    padding: 6px;
+    background: #e4d29b;
+    padding: 8px;
     text-align: center;
     font-weight: 600;
+    border-top: 1px solid #d6c48c;
+    border-bottom: 1px solid #d6c48c;
 }
 
 .batch-details {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px 20px;
     padding: 15px;
+    font-size: 14px;
 }
 
-.batch-details div {
+.status-row {
     display: flex;
     justify-content: space-between;
-    font-size: 13px;
+    margin-bottom: 8px;
 }
 
-.full-row {
-    grid-column: span 2;
+.status-row.full-row {
+    flex-direction: column;
 }
 
-/* ===================================================== */
-/* ================= RECOMMENDATION ===================== */
-/* ===================================================== */
+
+
+/* ================= CAMERA STYLE ================= */
+
+.modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+}
+
+.modal-box {
+    background: #f3f3f3;
+    width: 600px;
+    padding: 40px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+}
+
+.modal-preview-area {
+    background: #d3d3d3;
+    height: 350px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+
+.modal-preview-area video,
+.modal-preview-area img {
+    max-width: 100%;
+    max-height: 100%;
+}
+
+.modal-buttons {
+    margin-top: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.modal-btn {
+    padding: 10px;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.modal-btn.primary {
+    background: #123b59;
+    color: white;
+}
+
+.modal-btn.secondary {
+    background: #5f6f7a;
+    color: white;
+}
+
+.flip-text {
+    position: absolute;
+    color: #123b59;
+    font-weight: 600;
+    font-size: 16px;
+}
+
+.analyzing-box {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #123b59;
+    font-weight: 600;
+}
+
+.loader {
+    width: 18px;
+    height: 18px;
+    border: 3px solid #123b59;
+    border-top: 3px solid transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+
+/* ================= RECOMMENDATION ================= */
 
 .recommendation-card {
     margin-top: 20px;
 }
 
 .recommendation-body {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 20px;
+    padding: 15px;
+    font-size: 14px;
+}
+
+.recommendation-body p {
+    margin-bottom: 10px;
 }
 
 .apply-btn {
-    background: #0d3b66;
-    color: white;
-    padding: 8px 18px;
+    margin-top: 10px;
+    width: 100%;
+    padding: 8px;
+    background: #123b59;
+    color: #ffffff;
     border: none;
-    border-radius: 6px;
-    font-size: 13px;
+    border-radius: 4px;
     cursor: pointer;
 }
 
 .apply-btn:hover {
-    background: #092c4d;
+    background: #0f2f45;
 }

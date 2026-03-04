@@ -107,8 +107,8 @@
                         </div>
 
                         <div class="control-row">
-                            <label>Duration (minutes)</label>
-                            <input type="number" value="{{ $batch->planned_duration_minutes ?? '' }}">
+                            <label>Duration (hh:mm:ss)</label>
+                            <input type="text" class="duration-input" value="{{ gmdate('H:i:s', (($batch->planned_duration_minutes ?? 0) * 60)) }}" placeholder="00:00:00">
                         </div>
 
                     </div>
@@ -131,6 +131,21 @@
                     </div>
 
                 </form>
+            </div>
+
+            <!-- ================= RECOMMENDATION ================= -->
+            <div class="info-card recommendation-card">
+                <div class="card-header">Recommendations</div>
+
+                <div class="recommendation-body">
+                    <p><strong>Extend Drying Time:</strong> --</p>
+                    <p><strong>Suggested Temperature:</strong> -- °C</p>
+                    <p><strong>Suggested Fan Speed:</strong> Level --</p>
+
+                    <button type="button" class="apply-btn">
+                        Apply Recommendations
+                    </button>
+                </div>
             </div>
         </div>
 
@@ -166,62 +181,78 @@
 
             <!-- ================= BATCH EVALUATION ================= -->
             <div class="info-card batch-evaluation-card">
-
                 <div class="batch-header">
-                    <div class="card-header">Batch Evaluation</div>
+                    <div class="card-header">
+                        <span>Batch Evaluation</span>
 
-                    <button type="button" class="add-batch-btn" id="addBatchBtn">
-                        <i class="fa fa-plus"></i> Add Batch
-                    </button>
+                        <button type="button" class="add-batch-btn" id="addBatchBtn">
+                            <i class="fa fa-plus"></i> Add Batch
+                        </button>
+                    </div>
                 </div>
 
                 <div class="batch-scroll-wrapper" id="batchScrollWrapper">
-
-                    <!-- INITIAL BATCH -->
-                    <div class="batch-item">
-
+                    <!-- Batch 1 (template) -->
+                    <div class="batch-item" data-batch-id="1">
                         <div class="batch-card">
-
                             <div class="batch-card-header">
                                 <span class="batch-title">Batch 1</span>
                                 <button type="button" class="remove-btn">Remove</button>
                             </div>
 
+                            <div class="batch-actions">
+                                <button type="button" class="action-btn capture-tray-btn">
+                                    <i class="fa fa-camera"></i> Capture Tray
+                                </button>
+                                <button type="button" class="action-btn upload-image-btn">
+                                    <i class="fa fa-upload"></i> Upload Image
+                                </button>
+                            </div>
+
                             <div class="batch-images">
-                                <button type="button" class="capture-btn">Capture Front</button>
-                                <button type="button" class="capture-btn">Capture Back</button>
-
-                                <div class="image-frame">
-                                    <span>Front Image</span>
+                                <div class="image-frame front-frame">
+                                    <span class="placeholder">Front Image</span>
                                 </div>
-
-                                <div class="image-frame">
-                                    <span>Back Image</span>
+                                <div class="image-frame back-frame">
+                                    <span class="placeholder">Back Image</span>
                                 </div>
                             </div>
 
                             <div class="batch-status-title">Status</div>
 
                             <div class="batch-details">
-                                <div><span>Appearance:</span><strong>--</strong></div>
-                                <div><span>Fully Dried:</span><strong>--</strong></div>
-                                <div><span>Color:</span><strong>--</strong></div>
-                                <div><span>Partially Dried:</span><strong>--</strong></div>
-                                <div><span>Texture:</span><strong>--</strong></div>
-                                <div><span>Not Dried:</span><strong>--</strong></div>
-                                <div class="full-row">
+                                <div class="status-row">
+                                    <span>Appearance:</span>
+                                    <strong class="appearance">--</strong>
+                                </div>
+                                <div class="status-row">
+                                    <span>Color:</span>
+                                    <strong class="color">--</strong>
+                                </div>
+                                <div class="status-row">
+                                    <span>Texture:</span>
+                                    <strong class="texture">--</strong>
+                                </div>
+                                <div class="status-row">
+                                    <span>Fully Dried:</span>
+                                    <strong class="fully-dried">0</strong>
+                                </div>
+                                <div class="status-row">
+                                    <span>Partially Dried:</span>
+                                    <strong class="partially-dried">0</strong>
+                                </div>
+                                <div class="status-row">
+                                    <span>Not Dried:</span>
+                                    <strong class="not-dried">0</strong>
+                                </div>
+                                <div class="status-row full-row">
                                     <span>Description:</span>
-                                    <strong>--</strong>
+                                    <strong class="description">--</strong>
                                 </div>
                             </div>
-
                         </div>
-
                     </div>
-                    <!-- END INITIAL BATCH -->
-
                 </div>
-
             </div>
 
 
@@ -229,45 +260,33 @@
 
     </div>
 
-
-    <!-- ================= RECOMMENDATION ================= -->
-    <div class="info-card recommendation-card">
-
-        <div class="recommendation-body">
-
-            <div class="recommendation-left">
-                <h4>Recommendations</h4>
-            </div>
-
-            <div class="recommendation-center">
-                <p><strong>Extend Drying Time:</strong> --</p>
-                <p><strong>Suggested Temperature:</strong> -- °C</p>
-                <p><strong>Suggested Fan Speed:</strong> Level --</p>
-            </div>
-
-            <div class="recommendation-right">
-                <button type="button" class="apply-btn">
-                    Apply Recommendations
-                </button>
-            </div>
-
-        </div>
-
     </div>
 
-    <!-- CAMERA MODAL -->
-    <div id="cameraModal" style="display:none; position:fixed; inset:0;
-    background:rgba(0,0,0,0.8); justify-content:center;
-    align-items:center; z-index:9999;">
+ 
+    <!-- ================= CAMERA / UPLOAD MODAL ================= -->
+    <div id="imageProcessModal" class="modal" style="display:none;">
+        <div class="modal-box">
 
-        <div style="background:#fff; padding:20px; border-radius:10px;">
-            <video id="cameraVideo" autoplay playsinline
-            style="width:500px; max-width:100%;"></video>
-
-            <div style="margin-top:10px; text-align:center;">
-                <button id="takePhotoBtn">Take Photo</button>
-                <button id="closeCameraBtn">Close</button>
+            <div class="modal-preview-area">
+                <video id="cameraVideo" autoplay playsinline></video>
+                <img id="previewImage" style="display:none;" />
+                <div id="analyzingBox" class="analyzing-box" style="display:none;">
+                    <div class="loader"></div>
+                    <span>Analyzing Image......</span>
+                </div>
+                <div id="flipText" class="flip-text" style="display:none;"></div>
             </div>
+
+            <div class="modal-buttons">
+                <button id="takePhotoBtn" class="modal-btn primary">Take Photo</button>
+                <button id="savePhotoBtn" class="modal-btn primary" style="display:none;">Save Photo</button>
+                <button id="retakePhotoBtn" class="modal-btn secondary" style="display:none;">Retake Photo</button>
+                <button id="closeModalBtn" class="modal-btn secondary">Close</button>
+            </div>
+
+            <input type="file" id="uploadInput" accept="image/*" style="display:none;" />
+            <canvas id="photoCanvas" style="display:none;"></canvas>
+
         </div>
     </div>
 

@@ -14,26 +14,21 @@ import {
 import { FontAwesome } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
-
-
-import UserOverview from './user-overview';
-import UserProfile from './user-profile';
-import HardwareStatus from './hardware-status';
-import UserHistory from './user-history';
-import UserNotifications from './user-notifications';
+import AdminProfile from './admin-profile';
+import AdminUserManagement from './admin-user-management';
+import AdminDryingMachines from './admin-drying-machines';
+import AdminOverview from './admin-overview';
 
 const { width } = Dimensions.get('window');
-
-// 🔥 YOUR NGROK URL
 const BASE_URL = 'https://spinproof-brineless-marleen.ngrok-free.dev';
 
-export default function UserView() {
+export default function AdminView() {
   const router = useRouter();
 
   const [user, setUser] = useState<any>(null);
   const [sidebarVisible, setSidebarVisible] = useState(false);
   const [activeScreen, setActiveScreen] = useState<
-    'overview' | 'history' | 'notifications' | 'hardware' | 'profile'
+    'overview' | 'machines' | 'users' | 'profile'
   >('overview');
 
   const slideAnim = useState(new Animated.Value(-width))[0];
@@ -47,21 +42,22 @@ export default function UserView() {
         return;
       }
 
-      setUser(JSON.parse(storedUser));
+      const parsed = JSON.parse(storedUser);
+
+      if (parsed.role !== 'admin') {
+        router.replace('/user-view/user-view');
+        return;
+      }
+
+      setUser(parsed);
     };
 
     loadUser();
   }, []);
 
   const handleLogout = async () => {
-    try {
-      await AsyncStorage.removeItem('user');
-      setUser(null);
-      setSidebarVisible(false);
-      router.replace('/authentication/login');
-    } catch (error) {
-      console.log('Logout error:', error);
-    }
+    await AsyncStorage.removeItem('user');
+    router.replace('/authentication/login');
   };
 
   const initials =
@@ -92,27 +88,23 @@ export default function UserView() {
   const renderContent = () => {
     switch (activeScreen) {
       case 'overview':
-        return <UserOverview />;
-      case 'history':
-        return <UserHistory />;
-      case 'notifications':
-        return <UserNotifications />;
-      case 'hardware':
-        return <HardwareStatus />;
+        return <AdminOverview />;
+      case 'machines':
+        return <AdminDryingMachines />;
+      case 'users':
+        return <AdminUserManagement />;
       case 'profile':
-        return <UserProfile />;
+        return <AdminProfile />;
       default:
         return null;
     }
   };
 
   return (
-
-    
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" />
 
-      {/* ================= TOP BAR ================= */}
+      {/* TOP BAR */}
       <View style={styles.topbar}>
         <View style={styles.leftSection}>
           <TouchableOpacity onPress={toggleSidebar}>
@@ -136,99 +128,56 @@ export default function UserView() {
         </View>
       </View>
 
-      {/* ================= CONTENT ================= */}
+      {/* CONTENT */}
       <View style={styles.content}>{renderContent()}</View>
 
-      {/* ================= OVERLAY ================= */}
       {sidebarVisible && (
         <Pressable style={styles.overlay} onPress={toggleSidebar} />
       )}
 
-      {/* ================= SIDEBAR ================= */}
+      {/* SIDEBAR */}
       <Animated.View
-        style={[
-          styles.sidebar,
-          { transform: [{ translateX: slideAnim }] },
-        ]}
+        style={[styles.sidebar, { transform: [{ translateX: slideAnim }] }]}
       >
-        {/* OVERVIEW */}
-        <TouchableOpacity
-          style={[
-            styles.menuItem,
-            activeScreen === 'overview' && styles.activeItem,
-          ]}
-          onPress={() => {
-            setActiveScreen('overview');
-            toggleSidebar();
-          }}
-        >
-          <FontAwesome name="dashboard" size={18} color="#2c3e50" />
-          <Text
-            style={
-              activeScreen === 'overview'
-                ? styles.menuTextActive
-                : styles.menuText
-            }
-          >
-            Overview
-          </Text>
-        </TouchableOpacity>
+        {[
+          { key: 'overview', label: 'Overview', icon: 'dashboard' },
+          { key: 'machines', label: 'Drying Machines', icon: 'cogs' },
+          { key: 'users', label: 'User Management', icon: 'users' },
+          { key: 'profile', label: 'Profile', icon: 'user' },
+        ].map(item => {
+          const isActive = activeScreen === item.key;
 
-        {/* HISTORY */}
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={() => {
-            setActiveScreen('history');
-            toggleSidebar();
-          }}
-        >
-          <FontAwesome name="history" size={18} color="#5f6b7a" />
-          <Text style={styles.menuText}>History</Text>
-        </TouchableOpacity>
-
-        {/* NOTIFICATIONS */}
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={() => {
-            setActiveScreen('notifications');
-            toggleSidebar();
-          }}
-        >
-          <FontAwesome name="bell" size={18} color="#5f6b7a" />
-          <Text style={styles.menuText}>Notifications</Text>
-        </TouchableOpacity>
-
-        {/* HARDWARE */}
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={() => {
-            setActiveScreen('hardware');
-            toggleSidebar();
-          }}
-        >
-          <FontAwesome name="microchip" size={18} color="#5f6b7a" />
-          <Text style={styles.menuText}>Hardware Status</Text>
-        </TouchableOpacity>
-
-        {/* PROFILE */}
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={() => {
-            setActiveScreen('profile');
-            toggleSidebar();
-          }}
-        >
-          <FontAwesome name="user" size={18} color="#5f6b7a" />
-          <Text style={styles.menuText}>Profile</Text>
-        </TouchableOpacity>
+          return (
+            <TouchableOpacity
+              key={item.key}
+              style={[
+                styles.menuItem,
+                isActive && styles.activeItem,
+              ]}
+              onPress={() => {
+                setActiveScreen(item.key as any);
+                toggleSidebar();
+              }}
+            >
+              <FontAwesome
+                name={item.icon as any}
+                size={18}
+                color={isActive ? '#4fc3f7' : '#5f6b7a'}
+              />
+              <Text
+                style={
+                  isActive ? styles.menuTextActive : styles.menuText
+                }
+              >
+                {item.label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
 
         <View style={styles.divider} />
 
-        {/* LOGOUT */}
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={handleLogout}
-        >
+        <TouchableOpacity style={styles.menuItem} onPress={handleLogout}>
           <FontAwesome name="sign-out" size={18} color="#e74c3c" />
           <Text style={styles.logoutText}>Logout</Text>
         </TouchableOpacity>
@@ -238,10 +187,7 @@ export default function UserView() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#EEEEEF',
-  },
+  container: { flex: 1, backgroundColor: '#EEEEEF' },
 
   topbar: {
     height: 80,
@@ -284,7 +230,6 @@ const styles = StyleSheet.create({
   profileImage: {
     width: '100%',
     height: '100%',
-    borderRadius: 21,
   },
 
   profileText: {
@@ -301,6 +246,11 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     padding: 25,
+  },
+
+  screenTitle: {
+    fontSize: 22,
+    fontWeight: '700',
   },
 
   sidebar: {

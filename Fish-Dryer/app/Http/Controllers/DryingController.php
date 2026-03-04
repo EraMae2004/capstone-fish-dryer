@@ -80,6 +80,68 @@ class DryingController extends Controller
     }
 
 
+    /* =========================================================
+    ANALYZE BATCH (FRONT + BACK)
+    ========================================================= */
+    public function analyzeBatch(Request $request)
+    {
+        $request->validate([
+            'front_image' => 'required|image',
+            'back_image'  => 'required|image',
+        ]);
+
+        try {
+
+            $response = Http::timeout(120)
+                ->attach(
+                    'front_image',
+                    file_get_contents($request->file('front_image')->getRealPath()),
+                    'front.jpg'
+                )
+                ->attach(
+                    'back_image',
+                    file_get_contents($request->file('back_image')->getRealPath()),
+                    'back.jpg'
+                )
+                ->post('http://127.0.0.1:5000/analyze-batch');
+
+            if (!$response->successful()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'AI server error'
+                ], 500);
+            }
+
+            $data = $response->json();
+
+            // Save capture
+            CaptureSession::create([
+                'user_id' => Auth::id(),
+                'appearance' => $data['appearance'],
+                'color' => $data['color'],
+                'texture' => $data['texture'],
+                'fully_dried' => $data['fully_dried'],
+                'partially_dried' => $data['partially_dried'],
+                'not_dried' => $data['not_dried'],
+                'total_fish' => $data['total_fish'],
+                'description' => $data['description'],
+                'extend_minutes' => $data['extend_minutes'],
+                'suggested_temperature' => $data['temperature'],
+                'suggested_fan_speed' => $data['fan_speed'],
+                'captured_at' => now()
+            ]);
+
+            return response()->json($data);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+
     public function detectFish(Request $request)
     {
         $image = $request->file('image');

@@ -109,9 +109,6 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
-    /* ==========================
-       SAVE USING FETCH API
-    ========================== */
     if (form) {
         form.addEventListener('submit', function (e) {
 

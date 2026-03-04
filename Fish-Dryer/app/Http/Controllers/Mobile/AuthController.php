@@ -6,9 +6,55 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\User;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Validator;
 
 class AuthController extends Controller
 {
+    public function register(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'profile_picture' => 'nullable|image|mimes:jpg,jpeg,png|max:2048',
+            'name' => 'required|string|max:255',
+            'birthdate' => 'nullable|date',
+            'address' => 'nullable|string|max:255',
+            'phone' => 'required|string|max:20|unique:users,phone',
+            'email' => 'required|email|max:255|unique:users,email',
+            'password' => 'required|min:6|confirmed',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => $validator->errors()->first()
+            ], 422);
+        }
+
+        $imagePath = null;
+
+        if ($request->hasFile('profile_picture')) {
+            $imagePath = $request->file('profile_picture')
+                ->store('profile_pictures', 'public');
+        }
+
+        User::create([
+            'profile_picture' => $imagePath,
+            'name' => $request->name,
+            'birthdate' => $request->birthdate,
+            'address' => $request->address,
+            'phone' => $request->phone,
+            'email' => $request->email,
+            'password' => Hash::make($request->password),
+            'role' => 'user',
+            'status' => 'active',
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Registration successful.'
+        ]);
+    }
+
+
     public function login(Request $request)
     {
         $request->validate([
@@ -38,6 +84,72 @@ class AuthController extends Controller
             'user' => $user
         ]);
     }
+
+    public function verifyIdentity(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'email' => 'required|email',
+            'phone' => 'required',
+            'address' => 'required'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => $validator->errors()->first()
+            ]);
+        }
+
+        $user = User::where('email', $request->email)
+            ->where('phone', $request->phone)
+            ->where('address', $request->address)
+            ->first();
+
+        if (!$user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'User not found.'
+            ]);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Identity verified.'
+        ]);
+    }
+
+    public function resetPassword(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'email' => 'required|email',
+            'password' => 'required|min:6|confirmed'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => $validator->errors()->first()
+            ]);
+        }
+
+        $user = User::where('email', $request->email)->first();
+
+        if (!$user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'User not found.'
+            ]);
+        }
+
+        $user->password = Hash::make($request->password);
+        $user->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Password updated successfully.'
+        ]);
+    }
+
 
     // ================= GET USER =================
     public function getUser($id)

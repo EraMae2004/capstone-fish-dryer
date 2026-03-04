@@ -53,11 +53,15 @@ export default function Login() {
         return;
       }
 
-      // ✅ Save Laravel user to AsyncStorage
+      // ✅ Save Laravel user
       await AsyncStorage.setItem('user', JSON.stringify(data.user));
 
-      // ✅ Go to user view
-      router.replace('/user-view/user-view');
+      // ✅ Role based redirect
+      if (data.user.role === "admin") {
+        router.replace('/admin-view/admin-view');
+      } else {
+        router.replace('/user-view/user-view');
+      }
 
     } catch (error: any) {
       Alert.alert("Error", "Cannot connect to server");
@@ -160,8 +164,13 @@ export default function Login() {
 
           <View style={styles.bottomLink}>
             <Text style={{ fontSize: 14 }}>
-              Already have an account?{' '}
-              <Text style={styles.link}>Click here</Text>
+              Don’t have an account?{' '}
+              <Text
+                style={styles.link}
+                onPress={() => router.push('/authentication/registration')}
+              >
+                Click here
+              </Text>
             </Text>
           </View>
 

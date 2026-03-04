@@ -7,12 +7,16 @@ use App\Http\Controllers\DryingController;
 
 
 
-
+Route::post('/mobile/register', [MobileAuthController::class, 'register']);
 Route::post('/mobile/login', [MobileAuthController::class, 'login']);
+Route::post('/mobile/verify-identity', [MobileAuthController::class, 'verifyIdentity']);
+Route::post('/mobile/reset-password', [MobileAuthController::class, 'resetPassword']);
 Route::post('/ai/detect', [DryingController::class, 'detectFish']);
 
 Route::get('/mobile/overview', [MobileDryingController::class, 'overview']);
 Route::get('/mobile/user/{id}', [MobileAuthController::class, 'getUser']);
+Route::get('/drying-sessions', [MobileDryingController::class, 'index']);
+Route::get('/drying-sessions/{id}', [MobileDryingController::class, 'show']);
 Route::post('/mobile/update-profile/{id}', [MobileAuthController::class, 'updateProfile']);
 Route::post('/mobile/change-password/{id}', [MobileAuthController::class, 'changePassword']);
 
