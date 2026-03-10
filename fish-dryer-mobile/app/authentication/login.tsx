@@ -23,7 +23,7 @@ export default function Login() {
   const [remember, setRemember] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const BASE_URL = 'https://spinproof-brineless-marleen.ngrok-free.dev';
+  const BASE_URL = 'http://10.246.103.15:8000';
 
   const handleLogin = async () => {
     if (!email || !password) {

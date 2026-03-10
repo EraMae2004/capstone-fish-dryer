@@ -13,10 +13,16 @@ return new class extends Migration
             $table->id();
             $table->foreignId('drying_batch_id')->constrained('drying_batches')->onDelete('cascade');
             $table->integer('capture_round');
+            $table->string('image_path');
+            $table->string('detected_fish_species')->nullable();
+            $table->text('appearance')->nullable();
+            $table->text('color')->nullable();
+            $table->text('texture')->nullable();
             $table->integer('total_fully_dried')->default(0);
             $table->integer('total_partially_dried')->default(0);
             $table->integer('total_not_dried')->default(0);
             $table->decimal('suggested_additional_hours', 4, 2)->nullable();
+            $table->text('recommendation_text')->nullable();
             $table->enum('overall_status', ['fully_dried','partially_dried','not_dried']);
             $table->timestamp('captured_at');
             $table->timestamps();

@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { View, TouchableOpacity, Text, StyleSheet, ActivityIndicator } from "react-native";
 import OverviewStatus from "./overview-status";
-import OverviewControlPanel from "./overview-control-panel";
+import OverviewControlPanel from "./overview-batch";
 
-const API_URL = "https://spinproof-brineless-marleen.ngrok-free.dev/api/mobile/overview";
+const API_URL = "http://10.246.103.15:8000/api/mobile/overview";
 
 export default function UserOverview() {
   const [activeTab, setActiveTab] = useState<"status" | "control">("status");
@@ -12,7 +12,7 @@ export default function UserOverview() {
   const [hardwareStatuses, setHardwareStatuses] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {.
+  useEffect(() => {
     fetchOverview();
   }, []);
 
@@ -20,8 +20,7 @@ export default function UserOverview() {
     try {
       const res = await fetch(API_URL, {
         headers: {
-          Accept: "application/json",
-          "ngrok-skip-browser-warning": "true"
+          Accept: "application/json"
         }
       });
       const data = await res.json();

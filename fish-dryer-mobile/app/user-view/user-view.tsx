@@ -25,7 +25,7 @@ import UserNotifications from './user-notifications';
 const { width } = Dimensions.get('window');
 
 // 🔥 YOUR NGROK URL
-const BASE_URL = 'https://spinproof-brineless-marleen.ngrok-free.dev';
+const BASE_URL = 'http://10.246.103.15:8000';
 
 export default function UserView() {
   const router = useRouter();

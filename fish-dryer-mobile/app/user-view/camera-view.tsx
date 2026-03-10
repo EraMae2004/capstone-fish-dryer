@@ -18,13 +18,7 @@ export default function CameraViewScreen() {
   const cameraRef = useRef<any>(null);
 
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
-  const [stage, setStage] = useState<"front" | "back">("front");
-
   const [preview, setPreview] = useState<string | null>(null);
-  const [frontImage, setFrontImage] = useState<string | null>(null);
-  const [backImage, setBackImage] = useState<string | null>(null);
-
-  const [message, setMessage] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
 
   useEffect(() => {
@@ -60,41 +54,24 @@ export default function CameraViewScreen() {
     setPreview(null);
   }
 
+  /* SAVE IMAGE → RETURN TO BATCH SCREEN */
+
   function saveImage() {
-    if (stage === "front") {
-      setFrontImage(preview);
-      setPreview(null);
 
-      const msg =
-        mode === "capture"
-          ? "Flip tray to capture back view..."
-          : "Select image that capture the fish tray back view";
+    if (!preview) return;
 
-      setMessage(msg);
+    setAnalyzing(true);
 
-      setTimeout(() => {
-        setMessage(null);
-        setStage("back");
-      }, 3000);
-    } else {
-      const back = preview;
+    setTimeout(() => {
+      router.replace({
+        pathname: "/user-view/overview-batch",
+        params: {
+          image: preview,
+          batchIndex,
+        },
+      });
+    }, 500);
 
-      setBackImage(back);
-      setPreview(null);
-
-      setAnalyzing(true);
-
-      setTimeout(() => {
-        router.replace({
-          pathname: "/user-view/overview-control-panel",
-          params: {
-            frontImage,
-            backImage: back,
-            batchIndex,
-          },
-        });
-      }, 2000);
-    }
   }
 
   if (hasPermission === null) {
@@ -118,25 +95,8 @@ export default function CameraViewScreen() {
       <View style={styles.container}>
         <View style={styles.frame}>
           <ActivityIndicator size="large" />
-          <Text style={styles.text}>Analyzing Image...</Text>
+          <Text style={styles.text}>Processing Image...</Text>
         </View>
-      </View>
-    );
-  }
-
-  if (message) {
-    return (
-      <View style={styles.container}>
-        <View style={styles.frame}>
-          <Text style={styles.text}>{message}</Text>
-        </View>
-
-        <TouchableOpacity
-          style={styles.closeBtn}
-          onPress={() => router.back()}
-        >
-          <Text style={styles.btnText}>Close</Text>
-        </TouchableOpacity>
       </View>
     );
   }
@@ -178,10 +138,7 @@ export default function CameraViewScreen() {
         </TouchableOpacity>
       )}
 
-      <TouchableOpacity
-        style={styles.closeBtn}
-        onPress={() => router.back()}
-      >
+      <TouchableOpacity style={styles.closeBtn} onPress={() => router.back()}>
         <Text style={styles.btnText}>Close</Text>
       </TouchableOpacity>
     </View>

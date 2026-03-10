@@ -13,7 +13,7 @@ import {
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 
-const BASE_URL = "https://spinproof-brineless-marleen.ngrok-free.dev";
+const BASE_URL = "http://10.246.103.15:8000";
 
 export default function ResetPassword() {
   const router = useRouter();

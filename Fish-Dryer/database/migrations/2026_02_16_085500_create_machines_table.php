@@ -12,7 +12,7 @@ return new class extends Migration
         Schema::create('machines', function (Blueprint $table) {
             $table->id();
             $table->string('name');
-            $table->enum('status', ['online', 'offline'])->default('offline');
+            $table->enum('status', ['online', 'standby', 'offline'])->default('offline');
             $table->timestamp('last_used_at')->nullable();
             $table->enum('overall_health', ['healthy', 'warning', 'critical'])->default('healthy');
             $table->foreignId('created_by')->constrained('users')->onDelete('cascade');

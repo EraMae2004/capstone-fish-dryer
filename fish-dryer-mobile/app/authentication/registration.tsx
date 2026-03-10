@@ -16,7 +16,7 @@ import { useRouter, Stack } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 
-const BASE_URL = "https://spinproof-brineless-marleen.ngrok-free.dev";
+const BASE_URL = "http://10.246.103.15:8000";
 
 export default function Registration() {
   const router = useRouter();
