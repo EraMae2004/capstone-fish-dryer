@@ -1,31 +1,23 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import torch
-import torchvision.transforms as transforms
+import torchvision
+import torchvision.transforms as T
 import cv2
 import numpy as np
 import base64
 import joblib
-# scikit-image changed locations for texture helpers across versions; import defensively
-HAVE_GREY = False
-try:
-    from skimage.feature import greycomatrix, greycoprops
-    HAVE_GREY = True
-except Exception:
-    try:
-        from skimage.feature.texture import greycomatrix, greycoprops
-        HAVE_GREY = True
-    except Exception:
-        HAVE_GREY = False
-import os
+import random
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Load trained models with fallbacks when filenames differ
-def try_load_torch_model(paths):
+# -----------------------------
+# LOAD MODELS
+# -----------------------------
+def try_load_torch(paths):
     for p in paths:
         try:
             m = torch.load(p, map_location=device)
@@ -35,242 +27,239 @@ def try_load_torch_model(paths):
             continue
     return None
 
-# Detection model (expected to be a Faster R-CNN style model)
-detection_model = try_load_torch_model([
+detection_model = try_load_torch([
     "models/fasterrcnn_fish.pth",
-    "models/model.pth",
-    "model.pth",
+    "models/model.pth"
 ])
 
-# Optional species classifier
-species_model = try_load_torch_model([
-    "models/species_model.pth",
-    "models/species_model.pt",
-])
-
-# Optional dryness classifier
-dryness_model = try_load_torch_model([
-    "models/dryness_model.pth",
-    "models/dryness_model.pt",
-])
-
-# Random forest regressor for recommendation (joblib).
-# Only use an explicitly trained model file; do not
-# generate any synthetic model or predefined values.
 rf_model = None
-for p in ["models/rf_model.pkl", "models/random_forest.pkl", "random_forest.pkl"]:
-    try:
-        rf_model = joblib.load(p)
-        break
-    except Exception:
-        continue
+try:
+    rf_model = joblib.load("models/random_forest.pkl")
+except Exception:
+    pass
 
-transform = transforms.Compose([
-    transforms.ToPILImage(),
-    transforms.Resize((224,224)),
-    transforms.ToTensor()
-])
+to_tensor = T.ToTensor()
 
+# -----------------------------
+# VOCABULARY (your lists)
+# -----------------------------
+appearance_dried = [
+"Wrinkled","Rough","Hard","Stiff","Dry","Leathery","Shrunk",
+"Curled","Rigid","Cracked","Brittle","Flattened","Tough"
+]
+
+appearance_partial = [
+"Semi-dry","Slightly wrinkled","Slightly dull","Partly moist",
+"Uneven","Slightly rough","Slightly shrunk","Pale",
+"Patchy","Sticky-looking","Flattening"
+]
+
+appearance_wet = [
+"Shiny","Glossy","Wet","Slippery","Slimy","Plump",
+"Fresh-looking","Reflective","Bright","Intact","Soft-looking"
+]
+
+color_dried = [
+"Golden Brown","Brown","Dark Brown","Deep Yellow",
+"Amber","Dark Golden","Yellow Brown","Caramel Brown"
+]
+
+color_partial = [
+"Pale Yellow","Yellowish","Light Brown","Cream",
+"Beige","Dull White","Faded Pink","Light Golden","Slightly Brown"
+]
+
+color_wet = [
+"Silver","Pink","Light Pink","Reddish","Gray",
+"White","Pale Pink","Metallic Silver"
+]
+
+texture_dried = ["Rough","Wrinkled","Brittle","Dry","Leathery","Shriveled"]
+texture_partial = ["Wet","Slightly wrinkled","Slightly rough"]
+texture_wet = ["Wet","Moist","Glossy"]
+
+# -----------------------------
+# HELPERS
+# -----------------------------
 def decode_image(data_url):
-    header, encoded = data_url.split(",",1)
-    img_bytes = base64.b64decode(encoded)
-    np_arr = np.frombuffer(img_bytes, np.uint8)
-    return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    try:
+        if data_url is None:
+            return None
+        if "," in data_url:
+            data_url = data_url.split(",")[1]
+        img_bytes = base64.b64decode(data_url)
+        arr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        return img
+    except Exception:
+        return None
 
+def encode_image(img):
+    ok, buf = cv2.imencode(".jpg", img)
+    if not ok:
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(buf).decode()
 
 def extract_features(img):
-
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mean_hue = np.mean(hsv[:,:,0])
-    mean_sat = np.mean(hsv[:,:,1])
-
+    hue = float(np.mean(hsv[:,:,0]))
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # compute texture features; fall back to simple stats if GLCM unavailable
-    contrast = 0.0
-    homogeneity = 0.0
-    if HAVE_GREY:
-        try:
-            glcm = greycomatrix(gray, [1], [0], 256, symmetric=True, normed=True)
-            contrast = greycoprops(glcm, 'contrast')[0,0]
-            homogeneity = greycoprops(glcm, 'homogeneity')[0,0]
-        except Exception:
-            contrast = float(np.var(gray))
-            homogeneity = float(1.0 / (1.0 + contrast))
+    texture = float(np.var(gray))
+    return hue, texture
+
+def dryness_from_texture(texture):
+    # heuristic dryness classifier (replace with a trained model if you have one)
+    if texture < 5:
+        return 0  # dried
+    elif texture < 10:
+        return 1  # partially
     else:
-        contrast = float(np.var(gray))
-        homogeneity = float(1.0 / (1.0 + contrast))
+        return 2  # not dried
 
-    return mean_hue, mean_sat, contrast, homogeneity
+def dynamic_sentence(fully, partial, not_dry, avg_hue, avg_texture):
+    total = fully + partial + not_dry
+    if total == 0:
+        return "No fish were detected in the tray."
 
+    # choose vocab pools based on dominance
+    if fully >= partial and fully >= not_dry:
+        a = random.choice(appearance_dried)
+        c = random.choice(color_dried)
+        t = random.choice(texture_dried)
+    elif partial >= fully and partial >= not_dry:
+        a = random.choice(appearance_partial)
+        c = random.choice(color_partial)
+        t = random.choice(texture_partial)
+    else:
+        a = random.choice(appearance_wet)
+        c = random.choice(color_wet)
+        t = random.choice(texture_wet)
 
+    # build sentence from measured features (not a fixed template phrase list)
+    return f"The tray shows {total} fish with {a.lower()} appearance, {c.lower()} coloration, and {t.lower()} surface characteristics."
+
+# -----------------------------
+# API
+# -----------------------------
 @app.route("/analyze", methods=["POST"])
 def analyze():
+    try:
+        data = request.get_json()
+        if data is None:
+            return jsonify({"error":"no json"}), 400
 
-    front = decode_image(request.json["front"])
-    back  = decode_image(request.json["back"])
+        front_data = data.get("front")
+        front = decode_image(front_data)
+        if front is None:
+            return jsonify({"error":"image decode failed"}), 400
 
-    # Prepare tensor for detection if model available
-    detections = {"boxes": [], "scores": [], "labels": []}
-    if detection_model is not None:
-        tensor = transforms.ToTensor()(front).to(device)
-        with torch.no_grad():
-            try:
-                detections = detection_model([tensor])[0]
-            except Exception:
-                detections = {"boxes": [], "scores": [], "labels": []}
-    else:
-        # Fallback: simple contour-based detection so system still locates objects
-        try:
-            gray = cv2.cvtColor(front, cv2.COLOR_BGR2GRAY)
-            blur = cv2.GaussianBlur(gray, (5,5), 0)
-            _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            boxes = []
-            scores = []
-            labels = []
-            for c in contours:
-                area = cv2.contourArea(c)
-                if area < 500:
-                    continue
-                x, y, w, h = cv2.boundingRect(c)
-                boxes.append([int(x), int(y), int(x + w), int(y + h)])
-                scores.append(0.95)
-                labels.append(1)
-            detections = {"boxes": boxes, "scores": scores, "labels": labels}
-        except Exception:
-            detections = {"boxes": [], "scores": [], "labels": []}
+        annotated = front.copy()
 
-    fully = 0
-    partial = 0
-    not_dry = 0
-    unknown = 0
-    total = 0
+        # ---------- DETECTION ----------
+        boxes = []
+        scores = []
 
-    hue_list = []
-    texture_list = []
-
-    detection_list = []
-
-    # iterate detections safely
-    boxes = detections.get("boxes", [])
-    scores = detections.get("scores", [])
-    labels = detections.get("labels", [])
-
-    for i in range(len(boxes)):
-        try:
-            score = float(scores[i])
-        except Exception:
-            score = 0
-
-        if score < 0.5:
-            continue
-
-        box = boxes[i]
-        x1,y1,x2,y2 = [int(v) for v in box]
-        crop = front[max(0,y1):max(0,y2), max(0,x1):max(0,x2)]
-
-        total += 1
-
-        label = None
-        try:
-            label = int(labels[i])
-        except Exception:
-            label = None
-
-        # default: treat label==1 as fish, else unknown
-        is_fish = (label == 1)
-
-        if not is_fish:
-            unknown += 1
-            detection_list.append({
-                "box": [x1,y1,x2,y2],
-                "score": score,
-                "type": "unknown",
-            })
-            continue
-
-        # Extract features for this crop
-        hue, sat, contrast, homogeneity = extract_features(crop)
-        hue_list.append(hue)
-        texture_list.append(contrast)
-
-        # Dryness classification: use dryness_model if present, else simple heuristic
-        dryness_class = None
-        if dryness_model is not None:
-            try:
-                input_tensor = transform(crop).unsqueeze(0).to(device)
-                with torch.no_grad():
-                    pred = dryness_model(input_tensor)
-                    if pred is not None:
-                        probs = torch.softmax(pred, dim=1)
-                        dryness_class = int(probs.argmax(dim=1).item())
-            except Exception:
-                dryness_class = None
-
-        if dryness_class is None:
-            # heuristic: use contrast and hue -> lower contrast + higher hue -> more dry (heuristic)
-            if contrast < 5 and hue > 100:
-                dryness_class = 0
-            elif contrast < 10:
-                dryness_class = 1
-            else:
-                dryness_class = 2
-
-        if dryness_class == 0:
-            fully += 1
-        elif dryness_class == 1:
-            partial += 1
+        if detection_model is not None:
+            tensor = to_tensor(front).to(device)
+            with torch.no_grad():
+                out = detection_model([tensor])[0]
+            boxes = out.get("boxes", []).detach().cpu().numpy()
+            scores = out.get("scores", []).detach().cpu().numpy()
         else:
-            not_dry += 1
+            # fallback contour detection if model missing
+            gray = cv2.cvtColor(front, cv2.COLOR_BGR2GRAY)
+            _, th = cv2.threshold(gray,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+            cnts,_ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in cnts:
+                if cv2.contourArea(c) < 500: continue
+                x,y,w,h = cv2.boundingRect(c)
+                boxes.append([x,y,x+w,y+h])
+                scores.append(0.9)
 
-        # Species classification if available
-        species_name = "unknown"
-        if species_model is not None:
+        fully = partial = not_dry = 0
+        hue_list = []
+        tex_list = []
+        detections = []
+
+        for i in range(len(boxes)):
+            if i < len(scores) and scores[i] < 0.5:
+                continue
+
+            x1,y1,x2,y2 = [int(v) for v in boxes[i]]
+            crop = front[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+
+            hue, tex = extract_features(crop)
+            hue_list.append(hue)
+            tex_list.append(tex)
+
+            d = dryness_from_texture(tex)
+
+            if d == 0:
+                fully += 1
+                color = (0,255,0)
+                label = "Dried"
+            elif d == 1:
+                partial += 1
+                color = (0,255,255)
+                label = "Partially Dried"
+            else:
+                not_dry += 1
+                color = (0,0,255)
+                label = "Not Dried"
+
+            cv2.rectangle(annotated,(x1,y1),(x2,y2),color,3)
+            cv2.putText(annotated,label,(x1,y1-8),cv2.FONT_HERSHEY_SIMPLEX,0.6,color,2)
+
+            detections.append({
+                "box":[x1,y1,x2,y2],
+                "dryness_class": d
+            })
+
+        avg_hue = float(np.mean(hue_list)) if hue_list else 0.0
+        avg_tex = float(np.mean(tex_list)) if tex_list else 0.0
+
+        description = dynamic_sentence(fully, partial, not_dry, avg_hue, avg_tex)
+
+        # ---------- RANDOM FOREST RECOMMENDATION ----------
+        extend = 0.0; temp = 45.0; fan = 3.0
+        if rf_model is not None:
             try:
-                inp = transform(crop).unsqueeze(0).to(device)
-                with torch.no_grad():
-                    s_pred = species_model(inp)
-                    species_idx = int(torch.argmax(s_pred, dim=1).item())
-                    species_name = str(species_idx)
+                X = np.array([[fully, partial, not_dry, avg_hue, avg_tex]])
+                rec = rf_model.predict(X)[0]
+                extend = float(rec[0]); temp = float(rec[1]); fan = float(rec[2])
             except Exception:
-                species_name = "unknown"
+                pass
+        else:
+            # fallback rule
+            if not_dry > 0: extend = 15.0
+            elif partial > 0: extend = 8.0
 
-        detection_list.append({
-            "box": [x1,y1,x2,y2],
-            "score": score,
-            "type": "fish",
-            "dryness_class": int(dryness_class),
-            "species": species_name,
+        return jsonify({
+            "annotated_front": encode_image(annotated),
+            "detections": detections,
+            "fully_dried": fully,
+            "partially_dried": partial,
+            "not_dried": not_dry,
+            "total_fish": fully + partial + not_dry,
+            "color_index": avg_hue,
+            "texture_index": avg_tex,
+            "description": description,
+            "recommendation":{
+                "extend_minutes": extend,
+                "temperature": temp,
+                "fan_speed": fan
+            }
         })
 
-    avg_hue = float(np.mean(hue_list)) if hue_list else 0.0
-    avg_texture = float(np.mean(texture_list)) if texture_list else 0.0
+    except Exception as e:
+        print("SERVER ERROR:", e)
+        return jsonify({"error": str(e)}), 500
 
-    features = np.array([[fully, partial, not_dry, avg_hue, avg_texture]])
-
-    recommendation = [0.0, 0.0, 0.0]
-    if rf_model is not None:
-        try:
-            recommendation = rf_model.predict(features)[0]
-        except Exception:
-            recommendation = [0.0, 0.0, 0.0]
-
-    return jsonify({
-        "fully_dried": int(fully),
-        "partially_dried": int(partial),
-        "not_dried": int(not_dry),
-        "unknown_objects": int(unknown),
-        "total_fish": int(total),
-        "color_index": avg_hue,
-        "texture_index": avg_texture,
-        "detections": detection_list,
-        "recommendation": {
-            "extend_minutes": float(recommendation[0]) if len(recommendation)>0 else 0.0,
-            "temperature": float(recommendation[1]) if len(recommendation)>1 else 0.0,
-            "fan_speed": float(recommendation[2]) if len(recommendation)>2 else 0.0,
-        }
-    })
-
+@app.route("/")
+def home():
+    return "AI server running"
 
 if __name__ == "__main__":
     app.run(debug=True)

@@ -12,7 +12,7 @@ export default function UserOverview() {
   const [hardwareStatuses, setHardwareStatuses] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  useEffect(() => {.
     fetchOverview();
   }, []);
 

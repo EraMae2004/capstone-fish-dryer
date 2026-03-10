@@ -145,26 +145,36 @@ export default function OverviewControlPanel({ session }: any) {
     const backData = await uriToDataUrl(batch.backImage);
 
     try {
-      const res = await fetch("http://localhost:5000/analyze", {
+      // hit Laravel API which forwards to AI server
+      const res = await fetch("http://localhost:8000/api/ai/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ front: frontData, back: backData }),
       });
       const data = await res.json();
 
+      if (data.success === false && data.message) {
+        console.error("AI analyze error:", data.message);
+        return;
+      }
+
       // attach analysis results to batch
       setBatches(prev => {
         const upd = [...prev];
         upd[index] = {
           ...upd[index],
-          appearance: `ColorIdx:${data.color_index.toFixed(1)}`,
-          color: String(data.color_index),
-          texture: String(data.texture_index),
-          description: `Total:${data.total_fish} unknown:${data.unknown_objects}`,
+          // Prefer annotated images (already have boxes + labels drawn)
+          frontImage: data.annotated_front || upd[index].frontImage,
+          backImage: data.annotated_back || upd[index].backImage,
+          appearance: data.appearance || upd[index].appearance,
+          color: data.color_text || upd[index].color,
+          texture: data.texture_text || upd[index].texture,
+          description: data.description || upd[index].description,
           fully_dried: String(data.fully_dried),
           partially_dried: String(data.partially_dried),
           not_dried: String(data.not_dried),
-          detections: data.detections || [],
+          // If we show annotated image, don't double-overlay boxes
+          detections: data.annotated_front ? [] : (data.detections || []),
           recommendation: data.recommendation || {},
         };
         return upd;
@@ -172,7 +182,12 @@ export default function OverviewControlPanel({ session }: any) {
 
       // autofill controls preview with recommendation (not applied yet)
       const rec = data.recommendation || {};
-      setControls(c => ({ ...c, target_temperature: rec.temperature || c.target_temperature, fan_speed: rec.fan_speed || c.fan_speed }));
+      setControls(c => ({
+        ...c,
+        target_temperature: rec.temperature ?? c.target_temperature,
+        fan_speed: rec.fan_speed ?? c.fan_speed,
+        planned_duration_minutes: rec.extend_minutes ?? c.planned_duration_minutes,
+      }));
 
     } catch (err) {
       console.error(err);
@@ -343,6 +358,7 @@ export default function OverviewControlPanel({ session }: any) {
         </View>
 
       </View>
+      
 
       {/* RECOMMENDATION CARD (outside batch evaluation) */}
       <View style={styles.card}>
@@ -483,11 +499,16 @@ function DetectionImage({ uri, detections }: any) {
         const height = Math.max(2, (box[3] - box[1]) * scaleY);
 
         const borderColor = d.type === 'unknown' ? 'purple' : (d.dryness_class === 0 ? 'green' : (d.dryness_class === 1 ? 'yellow' : 'red'));
+        const drynessLabel =
+          d.dryness_label ||
+          (d.dryness_class === 0 ? 'Dry' : d.dryness_class === 1 ? 'Partial' : d.dryness_class === 2 ? 'Not Dry' : '');
 
         return (
           <View key={i} style={{ position: 'absolute', left, top, width, height, borderWidth: 2, borderColor, borderRadius: 4 }}>
             <View style={{ backgroundColor: '#00000066', paddingHorizontal: 4 }}>
-              <Text style={{ color: '#fff', fontSize: 11 }}>{d.type === 'unknown' ? 'Unknown' : (d.species || 'Fish')}</Text>
+              <Text style={{ color: '#fff', fontSize: 11 }}>
+                {d.type === 'unknown' ? 'Unknown' : `${d.species || 'Fish'}${drynessLabel ? ' | ' + drynessLabel : ''}`}
+              </Text>
             </View>
           </View>
         );

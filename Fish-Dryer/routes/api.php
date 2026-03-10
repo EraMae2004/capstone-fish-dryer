@@ -5,13 +5,13 @@ use App\Http\Controllers\Mobile\AuthController as MobileAuthController;
 use App\Http\Controllers\Mobile\DryingController as MobileDryingController;
 use App\Http\Controllers\DryingController;
 
-
+// API Routes for Mobile App
 
 Route::post('/mobile/register', [MobileAuthController::class, 'register']);
 Route::post('/mobile/login', [MobileAuthController::class, 'login']);
 Route::post('/mobile/verify-identity', [MobileAuthController::class, 'verifyIdentity']);
 Route::post('/mobile/reset-password', [MobileAuthController::class, 'resetPassword']);
-Route::post('/ai/detect', [DryingController::class, 'detectFish']);
+Route::post('/ai/analyze', [DryingController::class, 'analyzeBatch']);
 
 Route::get('/mobile/overview', [MobileDryingController::class, 'overview']);
 Route::get('/mobile/user/{id}', [MobileAuthController::class, 'getUser']);

@@ -48,7 +48,7 @@ Route::post('/logout', function () {
 Route::middleware(['auth', 'role:user'])->group(function () {
 
     Route::get('/overview', [DryingController::class, 'overview'])->name('user.overview');
-    Route::post('/batch/analyze', [DryingController::class, 'analyzeBatch']);
+    Route::post('/batch/analyze',[DryingController::class,'analyzeBatch']);
 
     Route::get('/history', [DryingController::class, 'history'])->name('user.history');
 

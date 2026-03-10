@@ -255,13 +255,46 @@ document.addEventListener("DOMContentLoaded", function () {
             batchItem.querySelector(".fully-dried").innerText = data.fully_dried;
             batchItem.querySelector(".partially-dried").innerText = data.partially_dried;
             batchItem.querySelector(".not-dried").innerText = data.not_dried;
-            batchItem.querySelector(".description").innerText = `Total detected: ${data.total_fish}, unknowns: ${data.unknown_objects}`;
+            const speciesCounts = data.species_counts || {};
+            const topSpecies = Object.entries(speciesCounts)
+                .sort((a,b) => (b[1] || 0) - (a[1] || 0))
+                .slice(0, 3)
+                .map(([k,v]) => `${k}:${v}`)
+                .join(", ");
+            batchItem.querySelector(".description").innerText =
+                `Total detected: ${data.total_fish}, unknowns: ${data.unknown_objects}` +
+                (topSpecies ? ` | Types: ${topSpecies}` : "");
 
             // store recommendation on the batch DOM for apply button
             const rec = data.recommendation || {};
-            batchItem.dataset.extendMinutes = rec.extend_minutes || rec.extendMinutes || rec.extend_minutes || rec.extendMinutes || 0;
+            batchItem.dataset.extendMinutes = rec.extend_minutes || 0;
             batchItem.dataset.suggestedTemp = rec.temperature || rec.temp || 0;
             batchItem.dataset.suggestedFan = rec.fan_speed || rec.fan || 0;
+
+            // Update the global recommendation box (Overview left panel)
+            const recCard = document.querySelector('.recommendation-card');
+            if (recCard) {
+                const ps = recCard.querySelectorAll('p');
+                if (ps && ps.length >= 3) {
+                    ps[0].innerHTML = `<strong>Extend Drying Time:</strong> ${Number(rec.extend_minutes || 0).toFixed(1)} minutes`;
+                    ps[1].innerHTML = `<strong>Suggested Temperature:</strong> ${Number(rec.temperature || 0).toFixed(1)} °C`;
+                    ps[2].innerHTML = `<strong>Suggested Fan Speed:</strong> Level ${Number(rec.fan_speed || 0).toFixed(0)}`;
+                }
+            }
+
+            // If AI returned annotated images (with boxes + labels drawn), prefer those for display.
+            if (data.annotated_front) {
+                const frontFrame = batchItem.querySelector(".front-frame");
+                if (frontFrame) {
+                    frontFrame.innerHTML = `<img src="${data.annotated_front}" />`;
+                }
+            }
+            if (data.annotated_back) {
+                const backFrame = batchItem.querySelector(".back-frame");
+                if (backFrame) {
+                    backFrame.innerHTML = `<img src="${data.annotated_back}" />`;
+                }
+            }
 
             // build boxes for drawing
             const boxes = (data.detections || []).map(d => {
@@ -271,7 +304,8 @@ document.addEventListener("DOMContentLoaded", function () {
             });
 
             batchItem.dataset.boxes = JSON.stringify(boxes);
-            drawBoxesForBatch(batchItem);
+            // Only overlay boxes if we are still showing the raw image (no annotated image returned).
+            if (!data.annotated_front) drawBoxesForBatch(batchItem);
 
         } catch (err) {
             console.error(err);
