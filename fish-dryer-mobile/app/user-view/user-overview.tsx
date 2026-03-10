@@ -2,8 +2,7 @@ import React, { useEffect, useState } from "react";
 import { View, TouchableOpacity, Text, StyleSheet, ActivityIndicator } from "react-native";
 import OverviewStatus from "./overview-status";
 import OverviewControlPanel from "./overview-batch";
-
-const API_URL = "http://10.246.103.15:8000/api/mobile/overview";
+import { API_BASE_URL } from "@/config/api";
 
 export default function UserOverview() {
   const [activeTab, setActiveTab] = useState<"status" | "control">("status");
@@ -18,7 +17,7 @@ export default function UserOverview() {
 
   const fetchOverview = async () => {
     try {
-      const res = await fetch(API_URL, {
+      const res = await fetch(`${API_BASE_URL}/api/mobile/overview`, {
         headers: {
           Accept: "application/json"
         }

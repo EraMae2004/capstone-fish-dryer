@@ -13,8 +13,8 @@ import {
 import { Ionicons, FontAwesome } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
+import { API_BASE_URL } from "@/config/api";
 
-const BASE_URL = "http://10.246.103.15:8000";
 
 export default function UserProfile() {
   const [user, setUser] = useState<any>(null);
@@ -50,7 +50,7 @@ export default function UserProfile() {
       const parsed = JSON.parse(storedUser);
 
       const response = await fetch(
-        `${BASE_URL}/api/mobile/user/${parsed.id}`
+        `${API_BASE_URL}/mobile/user/${parsed.id}`
       );
       const data = await response.json();
 
@@ -136,7 +136,7 @@ export default function UserProfile() {
     }
 
     const response = await fetch(
-      `${BASE_URL}/api/mobile/update-profile/${user.id}`,
+      `${API_BASE_URL}/mobile/update-profile/${user.id}`,
       {
         method: "POST",
         body: formData,
@@ -191,7 +191,7 @@ export default function UserProfile() {
       return Alert.alert("Passwords do not match");
 
     const response = await fetch(
-      `${BASE_URL}/api/mobile/change-password/${user.id}`,
+      `${API_BASE_URL}/mobile/change-password/${user.id}`,
       {
         method: "POST",
         headers: {
@@ -243,7 +243,7 @@ export default function UserProfile() {
             ) : !removeImageFlag && user?.profile_picture ? (
               <Image
                 source={{
-                  uri: `${BASE_URL}/storage/${user.profile_picture}`,
+                  uri: `${API_BASE_URL.replace('/api','')}/storage/${user.profile_picture}`,
                 }}
                 style={styles.image}
               />

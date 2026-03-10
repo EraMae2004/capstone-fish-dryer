@@ -12,8 +12,8 @@ import {
 } from 'react-native';
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import { API_BASE_URL } from "../../config/api";
 
-const BASE_URL = "http://10.246.103.15:8000";
 
 export default function ResetPassword() {
   const router = useRouter();
@@ -31,7 +31,7 @@ export default function ResetPassword() {
     }
 
     try {
-      const response = await fetch(`${BASE_URL}/api/mobile/reset-password`, {
+      const response = await fetch(`${API_BASE_URL}/api/mobile/reset-password`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -13,6 +13,7 @@ import {
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { API_BASE_URL } from "../../config/api";
 
 export default function Login() {
   const router = useRouter();
@@ -23,7 +24,6 @@ export default function Login() {
   const [remember, setRemember] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const BASE_URL = 'http://10.246.103.15:8000';
 
   const handleLogin = async () => {
     if (!email || !password) {
@@ -34,7 +34,7 @@ export default function Login() {
     try {
       setLoading(true);
 
-      const response = await fetch(`${BASE_URL}/api/mobile/login`, {
+      const response = await fetch(`${API_BASE_URL}/mobile/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -9,8 +9,7 @@ import {
 } from 'react-native';
 import { FontAwesome } from '@expo/vector-icons';
 import { Stack } from 'expo-router';
-
-const BASE_URL = 'https://spinproof-brineless-marleen.ngrok-free.dev';
+import { API_BASE_URL } from "@/config/api";
 
 export default function UserHistory({ navigation }: any) {
 
@@ -24,7 +23,7 @@ export default function UserHistory({ navigation }: any) {
 
   const fetchHistory = async () => {
     try {
-      const res = await fetch(`${BASE_URL}/api/mobile/drying-sessions`);
+      const res = await fetch(`${API_BASE_URL}/api/mobile/drying-sessions`);
       const data = await res.json();
 
       if (data.success) {

@@ -15,8 +15,9 @@ import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { useRouter, Stack } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { API_BASE_URL } from "../../config/api";
 
-const BASE_URL = "http://10.246.103.15:8000";
+
 
 export default function Registration() {
   const router = useRouter();
@@ -81,7 +82,7 @@ export default function Registration() {
         } as any);
       }
 
-      const response = await fetch(`${BASE_URL}/api/mobile/register`, {
+      const response = await fetch(`${API_BASE_URL}/mobile/register`, {
         method: "POST",
         headers: { Accept: 'application/json' },
         body: formData,

@@ -21,11 +21,10 @@ import UserProfile from './user-profile';
 import HardwareStatus from './hardware-status';
 import UserHistory from './user-history';
 import UserNotifications from './user-notifications';
+import { API_BASE_URL } from '@/config/api';
 
 const { width } = Dimensions.get('window');
 
-// 🔥 YOUR NGROK URL
-const BASE_URL = 'http://10.246.103.15:8000';
 
 export default function UserView() {
   const router = useRouter();
@@ -125,7 +124,7 @@ export default function UserView() {
           <View style={styles.profileCircle}>
             {user?.profile_picture ? (
               <Image
-                source={{ uri: `${BASE_URL}/storage/${user.profile_picture}` }}
+                source={{ uri: `${API_BASE_URL.replace('/api','')}/storage/${user.profile_picture}` }}
                 style={styles.profileImage}
               />
             ) : (
