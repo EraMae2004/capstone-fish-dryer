@@ -14,16 +14,9 @@ class DryingSession extends Model
         'machine_id',
         'user_id',
         'fish_type',
-        'quantity',
-        'quantity_unit',
-        'initial_temperature',
-        'initial_humidity',
-        'initial_target_moisture',
-        'fan_speed',
-        'initial_duration_minutes',
+        'total_fish',
+        'drying_time_minutes',
         'extension_minutes',
-        'total_duration_minutes',
-        'recommendation_applied',
         'status',
         'started_at',
         'ended_at',
@@ -56,3 +49,4 @@ class DryingSession extends Model
         return $this->hasMany(Notification::class);
     }
 }
+

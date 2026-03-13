@@ -50,11 +50,11 @@ services:
 
   ml-api:
     build:
-      context: ./ml
+      context: ./ai-server
     container_name: fish-dryer-ml
     restart: unless-stopped
     volumes:
-      - ./ml:/app
+      - ./ai-server:/app
     ports:
       - "5000:5000"
     networks:
