@@ -20,3 +20,6 @@ Route::get('/drying-sessions/{id}', [MobileDryingController::class, 'show']);
 Route::post('/mobile/update-profile/{id}', [MobileAuthController::class, 'updateProfile']);
 Route::post('/mobile/change-password/{id}', [MobileAuthController::class, 'changePassword']);
 
+// ESP32 heartbeat endpoint for hardware status
+Route::post('/hardware/esp32/status', [DryingController::class, 'esp32Heartbeat']);
+
