@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Mobile;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http;
 use App\Models\Machine;
 use App\Models\DryingSession;
 use App\Models\MachineHardwareStatus;
@@ -39,6 +40,68 @@ class DryingController extends Controller
             'message' => null
         ]);
     }
+
+
+    public function analyzeBatch(Request $request)
+    {
+        try {
+
+            $image = $request->input('image');
+
+            if (!$image) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No image received'
+                ], 400);
+            }
+
+            $response = Http::post('http://127.0.0.1:8001/api/ai/analyze', [
+                'image' => $image,
+                'drying_time_minutes' => $request->input('drying_time_minutes', 0)
+            ]);
+
+
+            if (!$response->successful()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'AI server error',
+                    'response' => $response->body()
+                ], 500);
+            }
+
+            $data = $response->json();
+
+            return response()->json([
+                'annotated_image' => $data['annotated_image'] ?? null,
+                'fish_species' => $data['fish_species'] ?? '--',
+                'fish_counts' => $data['fish_counts'] ?? 0,
+                'duration' => $data['duration'] ?? '--',
+
+                'appearance' => $data['appearance'] ?? '--',
+                'color_text' => $data['color_text'] ?? '--',
+                'texture_text' => $data['texture_text'] ?? '--',
+
+                'fully_dried' => $data['fully_dried'] ?? 0,
+                'partially_dried' => $data['partially_dried'] ?? 0,
+                'not_dried' => $data['not_dried'] ?? 0,
+
+                'recommendation' => $data['recommendation'] ?? [
+                    'description' => 'No recommendation available.'
+                ]
+
+            ]);
+
+        } catch (\Exception $e) {
+
+            return response()->json([
+                'success' => false,
+                'message' => 'AI detection failed',
+                'error' => $e->getMessage()
+            ], 500);
+
+        }
+    }
+
 
     public function getMachines()
     {

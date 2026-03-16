@@ -1,0 +1,53 @@
+
+<annotation>
+<filename>tamban_dried_0010.jpg</filename>
+
+<size>
+<width>1959</width>
+<height>3699</height>
+<depth>3</depth>
+</size>
+
+
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>655</xmin>
+                <ymin>1564</ymin>
+                <xmax>881</xmax>
+                <ymax>1771</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>512</xmin>
+                <ymin>1544</ymin>
+                <xmax>629</xmax>
+                <ymax>1827</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>480</xmin>
+                <ymin>627</ymin>
+                <xmax>756</xmax>
+                <ymax>1372</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>594</xmin>
+                <ymin>117</ymin>
+                <xmax>1501</xmax>
+                <ymax>3658</ymax>
+            </bndbox>
+        </object>
+        
+
+</annotation>

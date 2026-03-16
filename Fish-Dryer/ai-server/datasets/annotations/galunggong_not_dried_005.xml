@@ -1,0 +1,23 @@
+
+<annotation>
+<filename>galunggong_not_dried_005.jpg</filename>
+
+<size>
+<width>1496</width>
+<height>2983</height>
+<depth>3</depth>
+</size>
+
+
+        <object>
+            <name>galunggong_not_dried</name>
+            <bndbox>
+                <xmin>467</xmin>
+                <ymin>114</ymin>
+                <xmax>1066</xmax>
+                <ymax>2862</ymax>
+            </bndbox>
+        </object>
+        
+
+</annotation>

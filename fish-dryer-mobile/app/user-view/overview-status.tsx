@@ -68,11 +68,6 @@ export default function OverviewStatus({
             ? session.final_temperature + "°C"
             : null
         )}
-        {renderRow("Target Temp",
-          session?.target_temperature
-            ? session.target_temperature + "°C"
-            : null
-        )}
         {renderRow("Humidity",
           session?.final_humidity
             ? session.final_humidity + "%"
@@ -81,11 +76,6 @@ export default function OverviewStatus({
         {renderRow("Current Moisture",
           session?.final_moisture
             ? session.final_moisture + "%"
-            : null
-        )}
-        {renderRow("Target Moisture",
-          session?.target_moisture
-            ? session.target_moisture + "%"
             : null
         )}
         {renderRow("Fan Speed",

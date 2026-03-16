@@ -1,0 +1,93 @@
+
+<annotation>
+<filename>sap_sap_dried_0010.jpg</filename>
+
+<size>
+<width>1678</width>
+<height>3809</height>
+<depth>3</depth>
+</size>
+
+
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>0</xmin>
+                <ymin>3605</ymin>
+                <xmax>147</xmax>
+                <ymax>3809</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>1500</xmin>
+                <ymin>2748</ymin>
+                <xmax>1623</xmax>
+                <ymax>2914</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>397</xmin>
+                <ymin>2332</ymin>
+                <xmax>680</xmax>
+                <ymax>2723</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>1458</xmin>
+                <ymin>2247</ymin>
+                <xmax>1549</xmax>
+                <ymax>2436</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>394</xmin>
+                <ymin>2045</ymin>
+                <xmax>586</xmax>
+                <ymax>2428</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>569</xmin>
+                <ymin>1990</ymin>
+                <xmax>714</xmax>
+                <ymax>2087</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>648</xmin>
+                <ymin>1653</ymin>
+                <xmax>750</xmax>
+                <ymax>1850</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>0</xmin>
+                <ymin>0</ymin>
+                <xmax>1678</xmax>
+                <ymax>2386</ymax>
+            </bndbox>
+        </object>
+        
+
+</annotation>

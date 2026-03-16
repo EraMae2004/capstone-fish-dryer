@@ -1,0 +1,83 @@
+
+<annotation>
+<filename>sap_sap_dried_009.jpg</filename>
+
+<size>
+<width>1736</width>
+<height>3717</height>
+<depth>3</depth>
+</size>
+
+
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>0</xmin>
+                <ymin>3490</ymin>
+                <xmax>165</xmax>
+                <ymax>3717</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>1486</xmin>
+                <ymin>2703</ymin>
+                <xmax>1614</xmax>
+                <ymax>2794</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>1440</xmin>
+                <ymin>2117</ymin>
+                <xmax>1579</xmax>
+                <ymax>2353</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>410</xmin>
+                <ymin>2049</ymin>
+                <xmax>703</xmax>
+                <ymax>2714</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>621</xmin>
+                <ymin>1998</ymin>
+                <xmax>723</xmax>
+                <ymax>2086</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>658</xmin>
+                <ymin>1761</ymin>
+                <xmax>729</xmax>
+                <ymax>1853</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>0</xmin>
+                <ymin>0</ymin>
+                <xmax>1736</xmax>
+                <ymax>2535</ymax>
+            </bndbox>
+        </object>
+        
+
+</annotation>

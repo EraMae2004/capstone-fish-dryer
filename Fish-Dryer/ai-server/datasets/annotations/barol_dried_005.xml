@@ -1,0 +1,23 @@
+
+<annotation>
+<filename>barol_dried_005.jpg</filename>
+
+<size>
+<width>1535</width>
+<height>3715</height>
+<depth>3</depth>
+</size>
+
+
+        <object>
+            <name>barol_dried_</name>
+            <bndbox>
+                <xmin>39</xmin>
+                <ymin>65</ymin>
+                <xmax>1476</xmax>
+                <ymax>3715</ymax>
+            </bndbox>
+        </object>
+        
+
+</annotation>

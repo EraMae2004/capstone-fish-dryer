@@ -1,0 +1,23 @@
+
+<annotation>
+<filename>sap_sap_not_dried_006.jpg</filename>
+
+<size>
+<width>1620</width>
+<height>1988</height>
+<depth>3</depth>
+</size>
+
+
+        <object>
+            <name>sap_sap_not_dried</name>
+            <bndbox>
+                <xmin>433</xmin>
+                <ymin>79</ymin>
+                <xmax>1339</xmax>
+                <ymax>1909</ymax>
+            </bndbox>
+        </object>
+        
+
+</annotation>

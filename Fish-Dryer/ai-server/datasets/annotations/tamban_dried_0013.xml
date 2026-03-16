@@ -1,0 +1,93 @@
+
+<annotation>
+<filename>tamban_dried_0013.jpg</filename>
+
+<size>
+<width>2327</width>
+<height>3899</height>
+<depth>3</depth>
+</size>
+
+
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>292</xmin>
+                <ymin>2585</ymin>
+                <xmax>392</xmax>
+                <ymax>2689</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>807</xmin>
+                <ymin>1913</ymin>
+                <xmax>1025</xmax>
+                <ymax>2142</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>1254</xmin>
+                <ymin>1767</ymin>
+                <xmax>1316</xmax>
+                <ymax>1986</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>980</xmin>
+                <ymin>1712</ymin>
+                <xmax>1041</xmax>
+                <ymax>1841</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>1268</xmin>
+                <ymin>1526</ymin>
+                <xmax>1521</xmax>
+                <ymax>1993</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>759</xmin>
+                <ymin>1379</ymin>
+                <xmax>949</xmax>
+                <ymax>1942</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>777</xmin>
+                <ymin>1035</ymin>
+                <xmax>940</xmax>
+                <ymax>1278</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>0</xmin>
+                <ymin>0</ymin>
+                <xmax>2327</xmax>
+                <ymax>2469</ymax>
+            </bndbox>
+        </object>
+        
+
+</annotation>

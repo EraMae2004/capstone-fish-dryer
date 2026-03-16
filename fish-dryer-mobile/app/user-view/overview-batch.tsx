@@ -1,79 +1,219 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import {
   ScrollView,
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
-  Image,
+  Image
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter, useLocalSearchParams, useFocusEffect } from "expo-router";
 
+/* TYPES */
+
+type Batch = {
+  image: string | null;
+
+  fish_species: string;
+  fish_counts: string;
+  duration: string;
+
+  appearance: string;
+  color: string;
+  texture: string;
+
+  fully_dried: string;
+  partially_dried: string;
+  not_dried: string;
+
+  detections: any[];
+
+  recommendation: {
+    description?: string;
+    [key: string]: any;
+  };
+};
 
 export default function OverviewBatch({ session }: any) {
 
   const router = useRouter();
   const params = useLocalSearchParams();
 
-  function createEmptyBatch() {
+  const [machineStatus, setMachineStatus] = useState("Stopped");
+  const [machineName, setMachineName] = useState("");
+
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [duration, setDuration] = useState("00:00:00");
+
+
+  useEffect(() => {
+
+    const loadStartTime = async () => {
+
+      const stored = await AsyncStorage.getItem("dryer_start_time");
+
+      if (stored) {
+        setStartTime(Number(stored));
+        setMachineStatus("Drying");
+      }
+
+    };
+
+    loadStartTime();
+
+  }, []);
+
+
+  useEffect(() => {
+
+    if (!startTime) return;
+
+    const timer = setInterval(() => {
+
+      const diff = Date.now() - startTime;
+
+      const totalSeconds = Math.floor(diff / 1000);
+
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+
+      const formatted =
+        String(hours).padStart(2, "0") + ":" +
+        String(minutes).padStart(2, "0") + ":" +
+        String(seconds).padStart(2, "0");
+
+      setDuration(formatted);
+
+    }, 1000);
+
+    return () => clearInterval(timer);
+
+  }, [startTime]);
+
+  function getCurrentDuration() {
+
+    if (!startTime) return "00:00:00";
+
+    const diff = Date.now() - startTime;
+
+    const totalSeconds = Math.floor(diff / 1000);
+
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    return (
+      String(hours).padStart(2,"0") + ":" +
+      String(minutes).padStart(2,"0") + ":" +
+      String(seconds).padStart(2,"0")
+    );
+
+  }
+
+  const [imageRatios, setImageRatios] = useState<{[key:number]:number}>({});
+
+  function createEmptyBatch(): Batch {
     return {
-      image: null as string | null,
+      image: null,
+      fish_species: "--",
+      fish_counts: "--",
+      duration: "--",
       appearance: "--",
       color: "--",
       texture: "--",
-      description: "--",
       fully_dried: "--",
       partially_dried: "--",
       not_dried: "--",
-      detections: [] as any[],
-      recommendation: {} as any,
+      detections: [],
+      recommendation: {}
     };
   }
 
-  const [batches, setBatches] = useState([createEmptyBatch()]);
+  const [batches, setBatches] = useState<Batch[]>([createEmptyBatch()]);
 
-  /* RECEIVE IMAGE FROM CAMERA */
+  /* MACHINE CONTROLS */
+
+  const startMachine = async () => {
+
+    const now = Date.now();
+
+    setMachineStatus("Drying");
+    setStartTime(now);
+
+    await AsyncStorage.setItem("dryer_start_time", now.toString());
+
+  };
+
+  const pauseMachine = () => {
+    setMachineStatus("Paused");
+  };
+
+  const stopMachine = async () => {
+
+    setMachineStatus("Stopped");
+    setStartTime(null);
+    setDuration("00:00:00");
+
+    await AsyncStorage.removeItem("dryer_start_time");
+
+  };
+
+
+  /* RECEIVE IMAGE */
 
   useFocusEffect(
     useCallback(() => {
 
-      if (params.image && params.batchIndex !== undefined) {
+      const imageParam = params.image;
+      const batchIndexParam = params.batchIndex;
 
-        const index = Number(params.batchIndex);
+      if (!imageParam || batchIndexParam === undefined) return;
 
-        const img =
-          Array.isArray(params.image)
-            ? params.image[0]
-            : params.image;
+      const index = Number(batchIndexParam);
 
-        setBatches((prev) => {
+      const img = Array.isArray(imageParam)
+        ? imageParam[0]
+        : imageParam;
 
-          const updated = [...prev];
+      if (!img) return;
 
-          if (!updated[index]) return prev;
+      /* GET IMAGE RATIO */
 
-          updated[index] = {
-            ...updated[index],
-            image: img,
-          };
+      Image.getSize(img, (width, height) => {
 
-          setTimeout(() => {
-            if (updated[index]?.image) {
-              analyzeBatch(index);
-            }
-          }, 50);
+        const ratio = height / width;
 
-          return updated;
+        setImageRatios(prev => ({
+          ...prev,
+          [index]: ratio
+        }));
 
-        });
+      });
 
-      }
+      setBatches(prev => {
 
-    }, [params])
+        const updated = [...prev];
+
+        if (!updated[index]) return prev;
+
+        updated[index] = {
+          ...updated[index],
+          image: img
+        };
+
+        return updated;
+
+      });
+
+      analyzeBatch(index, img);
+
+    }, [params.image, params.batchIndex])
   );
 
   const addBatch = () => {
-    setBatches((prev) => [...prev, createEmptyBatch()]);
+    setBatches(prev => [...prev, createEmptyBatch()]);
   };
 
   const removeBatch = (index: number) => {
@@ -88,8 +228,8 @@ export default function OverviewBatch({ session }: any) {
       pathname: "/user-view/camera-view",
       params: {
         mode: "capture",
-        batchIndex: index,
-      },
+        batchIndex: index
+      }
     });
 
   };
@@ -100,69 +240,78 @@ export default function OverviewBatch({ session }: any) {
       pathname: "/user-view/camera-view",
       params: {
         mode: "upload",
-        batchIndex: index,
-      },
+        batchIndex: index
+      }
     });
 
   };
 
   async function uriToDataUrl(uri: string) {
+
     try {
+
       const resp = await fetch(uri);
       const blob = await resp.blob();
 
-      return await new Promise((res, rej) => {
+      return await new Promise<string>((res, rej) => {
+
         const reader = new FileReader();
+
         reader.onloadend = () => res(reader.result as string);
         reader.onerror = rej;
+
         reader.readAsDataURL(blob);
+
       });
 
-    } catch (e) {
+    } catch {
       return null;
     }
+
   }
 
-  /* AI ANALYSIS */
+  const analyzeBatch = async (index: number, imageUri: string) => {
 
-  const analyzeBatch = async (index: number) => {
+    const imageData = await uriToDataUrl(imageUri);
+    if (!imageData) return;
 
-    const batch = batches[index];
-
-    if (!batch.image) return;
-
-    const imageData = await uriToDataUrl(batch.image);
+    const capturedDuration = getCurrentDuration();
 
     try {
 
       const res = await fetch("http://10.246.103.15:8000/api/ai/analyze", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           image: imageData,
-        }),
+          drying_time_minutes: startTime
+            ? Math.floor((Date.now() - startTime) / 60000)
+            : 0
+        })
       });
 
       const data = await res.json();
 
-      setBatches((prev) => {
+      setBatches(prev => {
 
         const updated = [...prev];
 
         updated[index] = {
           ...updated[index],
-          image: data.annotated_image || updated[index].image,
+          image: data.annotated_image
+            ? `data:image/jpeg;base64,${data.annotated_image}`
+            : updated[index].image,
+          fish_species: data.fish_species || "--",
+          fish_counts: data.fish_counts || "--",
+          duration: capturedDuration,
           appearance: data.appearance || "--",
           color: data.color_text || "--",
           texture: data.texture_text || "--",
-          description: data.description || "--",
           fully_dried: String(data.fully_dried ?? "--"),
           partially_dried: String(data.partially_dried ?? "--"),
           not_dried: String(data.not_dried ?? "--"),
           detections: data.annotated_image ? [] : (data.detections || []),
-          recommendation: data.recommendation || {},
+          recommendation: data.recommendation || {}
         };
 
         return updated;
@@ -181,13 +330,11 @@ export default function OverviewBatch({ session }: any) {
 
       await fetch("http://localhost:8000/api/apply-recommendation", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           session_id: session?.id,
-          recommendation: batches[0]?.recommendation,
-        }),
+          recommendation: batches[0]?.recommendation
+        })
       });
 
     } catch (err) {
@@ -198,11 +345,51 @@ export default function OverviewBatch({ session }: any) {
 
   return (
 
-    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 120 }}>
+    <ScrollView
+      style={{ flex: 1 }}
+      contentContainerStyle={styles.container}
+      showsVerticalScrollIndicator={false}
+    >
 
       <Text style={styles.pageTitle}>OVERVIEW</Text>
 
-      {/* BATCH EVALUATION */}
+      <View style={styles.machineHeader}>
+
+        <View style={styles.statusRowHeader}>
+
+          <Text style={styles.machineStatus}>
+            Machine Status: <Text style={styles.greenDot}>●</Text> {machineStatus}
+          </Text>
+
+          <Text style={styles.timerText}>
+            {duration}
+          </Text>
+
+        </View>
+
+        <TouchableOpacity style={styles.machineDropdown}>
+          <Text>{machineName || "Select Machine"} ▼</Text>
+        </TouchableOpacity>
+
+
+        <View style={styles.machineButtonsRow}>
+
+          <TouchableOpacity style={styles.startBtn} onPress={startMachine}>
+            <Text style={styles.controlText}>▶ Start</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.pauseBtn} onPress={pauseMachine}>
+            <Text style={styles.pauseIcon}>||</Text>
+            <Text style={styles.pauseLabel}> Pause</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.stopBtn} onPress={stopMachine}>
+            <Text style={styles.controlText}>■ Stop</Text>
+          </TouchableOpacity>
+
+        </View>
+
+      </View>
 
       <View style={styles.card}>
 
@@ -216,46 +403,48 @@ export default function OverviewBatch({ session }: any) {
 
         </View>
 
-        {batches.map((batch, index) => (
+        {batches.map((batch, index) => {
 
-          <View key={index} style={styles.batchCard}>
+          const ratio = imageRatios[index] || 1;
 
-            <View style={styles.batchTopBar}>
+          const dynamicHeight = Math.min(280, 320 * ratio);
 
-              <Text style={styles.batchTitle}>
-                Batch {index + 1}
-              </Text>
+          return (
+
+            <View key={index} style={styles.batchCard}>
+
+              <View style={styles.batchTopBar}>
+
+                <Text style={styles.batchTitle}>
+                  Batch {index + 1}
+                </Text>
+
+                <TouchableOpacity
+                  style={styles.removeBtn}
+                  onPress={() => removeBatch(index)}
+                >
+                  <Text style={styles.removeText}>Remove</Text>
+                </TouchableOpacity>
+
+              </View>
 
               <TouchableOpacity
-                style={styles.removeBtn}
-                onPress={() => removeBatch(index)}
+                style={styles.captureBtn}
+                onPress={() => captureTray(index)}
               >
-                <Text style={styles.removeText}>Remove</Text>
+                <Text style={styles.btnText}>Capture Tray</Text>
               </TouchableOpacity>
 
-            </View>
+              <TouchableOpacity
+                style={styles.uploadBtn}
+                onPress={() => uploadImage(index)}
+              >
+                <Text style={styles.btnText}>Upload Image</Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity
-              style={styles.captureBtn}
-              onPress={() => captureTray(index)}
-            >
-              <Text style={styles.btnText}>Capture Tray</Text>
-            </TouchableOpacity>
+              <View style={[styles.imageBox,{height:dynamicHeight}]}>
 
-            <TouchableOpacity
-              style={styles.uploadBtn}
-              onPress={() => uploadImage(index)}
-            >
-              <Text style={styles.btnText}>Upload Image</Text>
-            </TouchableOpacity>
-
-            {/* IMAGE */}
-
-            <View style={styles.imageBox}>
-
-              {batch.image ? (
-
-                <View style={{ width: "100%", height: "100%" }}>
+                {batch.image ? (
 
                   <Image
                     source={{ uri: batch.image }}
@@ -263,58 +452,46 @@ export default function OverviewBatch({ session }: any) {
                     resizeMode="cover"
                   />
 
-                  <DetectionImage
-                    uri={batch.image}
-                    detections={batch.detections || []}
-                  />
+                ) : (
 
-                </View>
+                  <Text style={styles.imageText}>Image</Text>
 
-              ) : (
+                )}
 
-                <Text style={styles.imageText}>Image</Text>
+              </View>
 
-              )}
+              <View style={styles.statusHeader}>
+                <Text style={styles.statusHeaderText}>Status</Text>
+              </View>
 
-            </View>
+              <View style={styles.statusContent}>
 
-            {/* STATUS */}
-
-            <View style={styles.statusHeader}>
-              <Text style={styles.statusHeaderText}>Status</Text>
-            </View>
-
-            <View style={styles.statusContent}>
-
-              <View style={styles.statusColumn}>
+                <StatusRow label="Fish Species" value={batch.fish_species} />
+                <StatusRow label="No. of Fishes" value={batch.fish_counts} />
+                <StatusRow label="Duration" value={batch.duration} />
                 <StatusRow label="Appearance" value={batch.appearance} />
                 <StatusRow label="Color" value={batch.color} />
                 <StatusRow label="Texture" value={batch.texture} />
-                <StatusRow label="Description" value={batch.description} />
-              </View>
-
-              <View style={styles.statusColumn}>
                 <StatusRow label="Fully Dried" value={batch.fully_dried} />
                 <StatusRow label="Partially Dried" value={batch.partially_dried} />
                 <StatusRow label="Not Dried" value={batch.not_dried} />
+
               </View>
 
             </View>
 
-          </View>
+          );
 
-        ))}
+        })}
 
       </View>
-
-      {/* RECOMMENDATIONS */}
 
       <View style={styles.card}>
 
         <Text style={styles.cardTitle}>Recommendations</Text>
 
         <Text style={styles.recommendationText}>
-          {batches[0]?.recommendation?.description ?? "No recommendation yet"}
+          {batches[0]?.recommendation?.description || "No recommendation yet"}
         </Text>
 
         <TouchableOpacity
@@ -334,278 +511,283 @@ export default function OverviewBatch({ session }: any) {
 
 }
 
-/* COMPONENTS */
-
 function StatusRow({ label, value }: any) {
 
   return (
 
     <View style={styles.statusRow}>
 
-      <Text style={styles.statusLabel}>
-        {label}:
-      </Text>
-
-      <Text style={styles.statusValue}>
-        {value}
-      </Text>
+      <Text style={styles.statusLabel}>{label}:</Text>
+      <Text style={styles.statusValue}>{value}</Text>
 
     </View>
 
   );
 
 }
-
-function DetectionImage({ uri, detections }: any) {
-
-  const [imgSize, setImgSize] = useState({ w: 1, h: 1 });
-  const [displaySize, setDisplaySize] = useState({ w: 1, h: 1 });
-
-  const onImageLoad = (e: any) => {
-
-    const s = e.nativeEvent.source || {};
-
-    if (s.width && s.height) {
-      setImgSize({
-        w: s.width,
-        h: s.height,
-      });
-    }
-
-  };
-
-  return (
-
-    <View
-      style={{ width: "100%", height: "100%", position: "absolute" }}
-      onLayout={(e) => {
-
-        const layout = e.nativeEvent.layout;
-
-        setDisplaySize({
-          w: layout.width,
-          h: layout.height,
-        });
-
-      }}
-    >
-
-      <Image
-        source={{ uri }}
-        style={styles.previewImage}
-        resizeMode="cover"
-        onLoad={onImageLoad}
-      />
-
-      {detections.map((d: any, i: number) => {
-
-        const box = d.box || [0, 0, 0, 0];
-
-        const scaleX = displaySize.w / imgSize.w;
-        const scaleY = displaySize.h / imgSize.h;
-
-        const left = box[0] * scaleX;
-        const top = box[1] * scaleY;
-        const width = (box[2] - box[0]) * scaleX;
-        const height = (box[3] - box[1]) * scaleY;
-
-        return (
-
-          <View
-            key={i}
-            style={{
-              position: "absolute",
-              left,
-              top,
-              width,
-              height,
-              borderWidth: 2,
-              borderColor: "green",
-            }}
-          />
-
-        );
-
-      })}
-
-    </View>
-
-  );
-
-}
-
-/* STYLES */
 
 const styles = StyleSheet.create({
 
-  container: {
-    flex: 1,
-    padding: 15,
-    backgroundColor: "#f2f4f7",
+  container:{
+    padding:15,
+    paddingBottom:10,
+    backgroundColor:"#f2f4f7",
+    flexGrow:1
   },
 
-  pageTitle: {
-    fontSize: 20,
-    fontWeight: "700",
-    marginBottom: 15,
-    color: "#1f3c5c",
+  pageTitle:{
+    fontSize:20,
+    fontWeight:"700",
+    marginBottom:15,
+    alignContent:"center",
+    color:"#1f3c5c"
   },
 
-  card: {
-    backgroundColor: "#fff",
-    borderRadius: 12,
-    padding: 15,
-    marginBottom: 20,
-    elevation: 3,
+  machineHeader:{
+    marginBottom:20
   },
 
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    marginBottom: 10,
-    color: "#1f3c5c",
+  machineStatus:{
+    fontWeight:"600"
   },
 
-  batchHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 10,
+  greenDot:{
+    color:"green"
   },
 
-  addBatchBtn: {
-    backgroundColor: "#0d3b66",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
+  machineDropdown:{
+    backgroundColor:"#fff",
+    padding:10,
+    borderRadius:8,
+    borderWidth:1,
+    borderColor:"#ddd",
+    marginBottom:20
   },
 
-  addBatchText: {
-    color: "#fff",
-    fontWeight: "600",
+  statusRowHeader:{
+    flexDirection:"row",
+    justifyContent:"space-between",
+    alignItems:"center",
+    width:"100%",
+    marginBottom:10
   },
 
-  batchCard: {
-    borderWidth: 1,
-    borderColor: "#dcdcdc",
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 20,
+  timerText:{
+    fontSize:15,
+    fontWeight:"700",
+    color:"#1f3c5c"
   },
 
-  batchTopBar: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 10,
+  timerRow:{
+    width:"100%",
+    alignItems:"flex-end",
+    marginBottom:10
   },
 
-  batchTitle: {
-    fontWeight: "600",
-    fontSize: 16,
+  machineButtonsRow:{
+    flexDirection:"row",
+    justifyContent:"space-between",
+    alignItems:"center",
+    gap:10
   },
 
-  removeBtn: {
-    backgroundColor: "#e74c3c",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 5,
+  startBtn:{
+    flex:1,
+    backgroundColor:"#2ecc71",
+    paddingVertical:10,
+    borderRadius:6,
+    alignItems:"center"
   },
 
-  removeText: {
-    color: "#fff",
+  pauseBtn:{
+    flex:1,
+    backgroundColor:"#ffc400",
+    flexDirection:"row",
+    justifyContent:"center",
+    alignItems:"center",
+    paddingVertical:10,
+    borderRadius:6
   },
 
-  captureBtn: {
-    backgroundColor: "#123d5a",
-    padding: 10,
-    borderRadius: 6,
-    alignItems: "center",
-    marginBottom: 8,
+  pauseIcon:{
+    color:"#fff",
+    fontWeight:"700"
   },
 
-  uploadBtn: {
-    backgroundColor: "#2f4f65",
-    padding: 10,
-    borderRadius: 6,
-    alignItems: "center",
-    marginBottom: 10,
+  pauseLabel:{
+    color:"#fff",
+    fontWeight:"600"
   },
 
-  btnText: {
-    color: "#fff",
-    fontWeight: "600",
+  stopBtn:{
+    flex:1,
+    backgroundColor:"#e74c3c",
+    paddingVertical:10,
+    borderRadius:6,
+    alignItems:"center"
   },
 
-  imageBox: {
-    height: 150,
-    backgroundColor: "#d9d9d9",
-    borderRadius: 6,
-    justifyContent: "center",
-    alignItems: "center",
-    overflow: "hidden",
-    marginBottom: 10,
+  controlText:{
+    color:"#fff",
+    fontWeight:"600"
   },
 
-  previewImage: {
-    width: "100%",
-    height: "100%",
+  card:{
+    backgroundColor:"#fff",
+    borderRadius:12,
+    padding:15,
+    marginTop:15,
+    marginBottom:20,
+    elevation:3
   },
 
-  imageText: {
-    color: "#555",
+  cardTitle:{
+    fontSize:16,
+    fontWeight:"700",
+    marginBottom:10,
+    color:"#1f3c5c"
   },
 
-  statusHeader: {
-    backgroundColor: "#e7d5a2",
-    paddingVertical: 8,
-    alignItems: "center",
-    borderRadius: 4,
+  batchHeader:{
+    flexDirection:"row",
+    justifyContent:"space-between",
+    marginBottom:15,
+    marginTop:15
   },
 
-  statusHeaderText: {
-    fontWeight: "600",
+  addBatchBtn:{
+    backgroundColor:"#0d3b66",
+    paddingHorizontal:12,
+    paddingVertical:6,
+    borderRadius:6
   },
 
-  statusContent: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginTop: 10,
+  addBatchText:{
+    color:"#fff",
+    fontWeight:"600"
   },
 
-  statusColumn: {
-    width: "48%",
+  batchCard:{
+    borderWidth:1,
+    borderColor:"#dcdcdc",
+    borderRadius:8,
+    padding:12,
+    marginBottom:20
   },
 
-  statusRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 6,
+  batchTopBar:{
+    flexDirection:"row",
+    justifyContent:"space-between",
+    marginBottom:15,
+    marginTop:15
   },
 
-  statusLabel: {
-    fontSize: 12,
+  batchTitle:{
+    fontWeight:"600",
+    fontSize:16
   },
 
-  statusValue: {
-    fontSize: 12,
-    fontWeight: "600",
+  removeBtn:{
+    backgroundColor:"#e74c3c",
+    paddingHorizontal:10,
+    paddingVertical:5,
+    borderRadius:5
   },
 
-  recommendationText: {
-    textAlign: "center",
-    marginVertical: 20,
-    color: "#555",
+  removeText:{
+    color:"#fff"
   },
 
-  applyBtn: {
-    backgroundColor: "#0d3b66",
-    padding: 12,
-    borderRadius: 8,
-    alignItems: "center",
+  captureBtn:{
+    backgroundColor:"#123d5a",
+    padding:10,
+    borderRadius:6,
+    alignItems:"center",
+    marginBottom:10
   },
 
-  applyText: {
-    color: "#fff",
-    fontWeight: "700",
+  uploadBtn:{
+    backgroundColor:"#2f4f65",
+    padding:10,
+    borderRadius:6,
+    alignItems:"center",
+    marginBottom:10
   },
+
+  btnText:{
+    color:"#fff",
+    fontWeight:"600"
+  },
+
+  imageBox:{
+    width:"100%",
+    backgroundColor:"#d9d9d9",
+    borderRadius:6,
+    overflow:"hidden",
+    marginBottom:10,
+    justifyContent:"center",
+    alignItems:"center"
+  },
+
+  previewImage:{
+    width:"100%",
+    height:"100%"
+  },
+
+  imageText:{
+    color:"#555",
+    fontWeight:"600"
+  },
+
+  statusHeader:{
+    backgroundColor:"#e7d5a2",
+    paddingVertical:8,
+    alignItems:"center",
+    borderRadius:4
+  },
+
+  statusHeaderText:{
+    fontWeight:"600"
+  },
+
+  statusContent:{
+    marginTop:10
+  },
+
+  statusRow:{
+    flexDirection:"row",
+    justifyContent:"space-between",
+    paddingVertical:6,
+    borderBottomWidth:0.5,
+    borderColor:"#ddd"
+  },
+
+  statusLabel:{
+    fontSize:13,
+    color:"#333"
+  },
+
+  statusValue:{
+    fontSize:13,
+    fontWeight:"600"
+  },
+
+  recommendationText:{
+    textAlign:"center",
+    marginVertical:20,
+    color:"#555"
+  },
+
+  applyBtn:{
+    backgroundColor:"#0d3b66",
+    padding:12,
+    borderRadius:8,
+    alignItems:"center"
+  },
+
+  applyText:{
+    color:"#fff",
+    fontWeight:"700"
+  }
 
 });

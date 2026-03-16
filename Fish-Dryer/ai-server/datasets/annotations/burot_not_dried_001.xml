@@ -1,0 +1,33 @@
+
+<annotation>
+<filename>burot_not_dried_001.jpg</filename>
+
+<size>
+<width>1244</width>
+<height>1749</height>
+<depth>3</depth>
+</size>
+
+
+        <object>
+            <name>burot_not_dried</name>
+            <bndbox>
+                <xmin>1200</xmin>
+                <ymin>1634</ymin>
+                <xmax>1244</xmax>
+                <ymax>1749</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>burot_not_dried</name>
+            <bndbox>
+                <xmin>1</xmin>
+                <ymin>316</ymin>
+                <xmax>879</xmax>
+                <ymax>1749</ymax>
+            </bndbox>
+        </object>
+        
+
+</annotation>

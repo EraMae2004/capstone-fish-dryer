@@ -1,0 +1,53 @@
+
+<annotation>
+<filename>sap_sap_dried_004.jpg</filename>
+
+<size>
+<width>1218</width>
+<height>2436</height>
+<depth>3</depth>
+</size>
+
+
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>188</xmin>
+                <ymin>1211</ymin>
+                <xmax>383</xmax>
+                <ymax>1424</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>346</xmin>
+                <ymin>1205</ymin>
+                <xmax>650</xmax>
+                <ymax>1607</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>455</xmin>
+                <ymin>887</ymin>
+                <xmax>547</xmax>
+                <ymax>1032</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>sap_sap_dried</name>
+            <bndbox>
+                <xmin>109</xmin>
+                <ymin>81</ymin>
+                <xmax>1115</xmax>
+                <ymax>2401</ymax>
+            </bndbox>
+        </object>
+        
+
+</annotation>

@@ -1,0 +1,33 @@
+
+<annotation>
+<filename>tamban_dried_006.jpg</filename>
+
+<size>
+<width>1958</width>
+<height>3900</height>
+<depth>3</depth>
+</size>
+
+
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>919</xmin>
+                <ymin>163</ymin>
+                <xmax>1026</xmax>
+                <ymax>291</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>tamban_dried_</name>
+            <bndbox>
+                <xmin>395</xmin>
+                <ymin>39</ymin>
+                <xmax>1424</xmax>
+                <ymax>3862</ymax>
+            </bndbox>
+        </object>
+        
+
+</annotation>

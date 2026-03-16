@@ -1,0 +1,43 @@
+
+<annotation>
+<filename>burot_dried_008.jpg</filename>
+
+<size>
+<width>1859</width>
+<height>4019</height>
+<depth>3</depth>
+</size>
+
+
+        <object>
+            <name>burot_dried_</name>
+            <bndbox>
+                <xmin>953</xmin>
+                <ymin>1721</ymin>
+                <xmax>1052</xmax>
+                <ymax>1865</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>burot_dried_</name>
+            <bndbox>
+                <xmin>621</xmin>
+                <ymin>720</ymin>
+                <xmax>851</xmax>
+                <ymax>861</ymax>
+            </bndbox>
+        </object>
+        
+        <object>
+            <name>burot_dried_</name>
+            <bndbox>
+                <xmin>0</xmin>
+                <ymin>0</ymin>
+                <xmax>1859</xmax>
+                <ymax>2709</ymax>
+            </bndbox>
+        </object>
+        
+
+</annotation>
