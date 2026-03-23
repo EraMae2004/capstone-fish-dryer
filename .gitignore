@@ -11,3 +11,7 @@ node_modules/
 
 # Environment
 .env
+
+datasets/
+*.jpg
+*.png

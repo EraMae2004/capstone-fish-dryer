@@ -279,7 +279,7 @@ export default function OverviewBatch({ session }: any) {
 
     try {
 
-      const res = await fetch("http://10.246.103.15:8000/api/ai/analyze", {
+      const res = await fetch("http://10.208.224.15:8000/api/ai/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

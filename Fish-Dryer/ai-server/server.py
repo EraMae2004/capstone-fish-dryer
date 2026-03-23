@@ -15,16 +15,39 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 CLASSES = [
 "background",
-
-"sap_sap_dried","sap_sap_partially_dried","sap_sap_not_dried","sap_sap_bad",
-"barol_dried","barol_partially_dried","barol_not_dried","barol_bad",
-"galunggong_dried","galunggong_partially_dried","galunggong_not_dried","galunggong_bad",
-"burot_dried","burot_partially_dried","burot_not_dried","burot_bad",
-"tamban_dried","tamban_partially_dried","tamban_not_dried","tamban_bad"
+"sap_sap_dried","sap_sap_partially_dried","sap_sap_not_dried",
+"barol_dried","barol_partially_dried","barol_not_dried",
+"galunggong_dried","galunggong_partially_dried","galunggong_not_dried",
+"burot_dried","burot_partially_dried","burot_not_dried",
+"tamban_dried","tamban_partially_dried","tamban_not_dried"
 ]
 
-model = torchvision.models.detection.fasterrcnn_mobilenet_v3_large_fpn(weights=None)
+DRYNESS_COLOR = {
+    "dried": (0,255,0),
+    "partially_dried": (0,255,255),
+    "not_dried": (0,0,255),
+    "bad": (128,128,128)
+}
 
+RULES = {
+    "dried": {
+        "color": ["Golden Brown","Brown","Dark Brown","Yellow Brown","Silvery-grey","Silvery-white"],
+        "appearance": ["Flattened","Wrinkled","Hard","Dry","Curled","Shrunk"],
+        "texture": ["Wrinkled","Hard","Dry"]
+    },
+    "not_dried": {
+        "color": ["Silver","Pink","Light Pink","Reddish","Pale Pink","Metallic Silver"],
+        "appearance": ["Glossy","Wet","Fresh-looking"],
+        "texture": ["Slippery","Soft","Smooth"]
+    },
+    "partially_dried": {
+        "color": ["Pale Yellow","Yellowish","Light Brown","Faded Pink","Light Golden","Dull White","Slightly Brown"],
+        "appearance": ["Meaty but matte","Slightly wrinkled","Slightly shrunk","Pale","Flattening"],
+        "texture": ["Slightly wrinkled","Semi-dry","Partly moist"]
+    }
+}
+
+model = torchvision.models.detection.fasterrcnn_mobilenet_v3_large_fpn(weights=None)
 in_features = model.roi_heads.box_predictor.cls_score.in_features
 model.roi_heads.box_predictor = FastRCNNPredictor(in_features,len(CLASSES))
 
@@ -39,76 +62,6 @@ app = FastAPI()
 class ImageRequest(BaseModel):
     image:str
     drying_time_minutes:int
-
-
-DRIED_COLORS=["Golden Brown","Brown","Dark Brown","Yellow Brown","Silvery-grey","Silvery-white"]
-NOT_COLORS=["Silver","Pink","Light Pink","Reddish","Pale Pink","Metallic Silver"]
-PARTIAL_COLORS=["Pale Yellow","Yellowish","Light Brown","Faded Pink","Light Golden","Dull White","Slightly Brown"]
-
-DRIED_APPEARANCE=["Flattened","Wrinkled","Hard","Dry","Curled","Shrunk"]
-PARTIAL_APPEARANCE=["Meaty but matte","Slightly wrinkled","Slightly shrunk","Pale","Flattening"]
-NOT_APPEARANCE=["Glossy","Wet","Fresh-looking"]
-
-DRIED_TEXTURE=["Wrinkled","Hard","Dry"]
-PARTIAL_TEXTURE=["Slightly wrinkled","Semi-dry","Partly moist"]
-NOT_TEXTURE=["Slippery","Soft","Smooth"]
-
-
-def generate_surface(total_dried,total_partial,total_not):
-
-    colors=[]
-    appearance=[]
-    texture=[]
-
-    if total_dried>0:
-        colors.append(random.choice(DRIED_COLORS))
-        appearance.append(random.choice(DRIED_APPEARANCE))
-        texture.append(random.choice(DRIED_TEXTURE))
-
-    if total_partial>0:
-        colors.append(random.choice(PARTIAL_COLORS))
-        appearance.append(random.choice(PARTIAL_APPEARANCE))
-        texture.append(random.choice(PARTIAL_TEXTURE))
-
-    if total_not>0:
-        colors.append(random.choice(NOT_COLORS))
-        appearance.append(random.choice(NOT_APPEARANCE))
-        texture.append(random.choice(NOT_TEXTURE))
-
-    return ", ".join(appearance), ", ".join(colors), ", ".join(texture)
-
-
-def generate_recommendation(minutes,not_dried,partial):
-
-    minutes=max(0,round(minutes,2))
-
-    if not_dried>0:
-
-        options=[
-        f"Several fish remain wet. Continue drying for about {minutes} minutes.",
-        f"The batch still contains undried fish. Extend drying approximately {minutes} minutes.",
-        f"Moisture is still present. Additional drying time of about {minutes} minutes is advised."
-        ]
-
-    elif partial>0:
-
-        options=[
-        f"Some fish are partially dried. Continue drying around {minutes} minutes.",
-        f"The fish are close to fully dried. Extend drying about {minutes} minutes.",
-        f"Remaining moisture detected. Drying for another {minutes} minutes should complete the process."
-        ]
-
-    else:
-
-        options=[
-        "All fish appear fully dried.",
-        "Drying process completed successfully.",
-        "The batch has reached the required dryness."
-        ]
-
-        minutes=0
-
-    return random.choice(options),minutes
 
 
 @app.post("/api/ai/analyze")
@@ -129,10 +82,7 @@ async def analyze(data:ImageRequest):
     with torch.no_grad():
         prediction=model([tensor])[0]
 
-    species_counts={}
-    dried_counts={}
-    partial_counts={}
-    not_counts={}
+    fish_details={}
 
     total_dried=0
     total_partial=0
@@ -144,108 +94,112 @@ async def analyze(data:ImageRequest):
         prediction["scores"]
     ):
 
-        if score<0.2:
+        if score < 0.5:
             continue
 
-        x1,y1,x2,y2=map(int,box)
+        x1,y1,x2,y2 = map(int,box)
 
         cls=CLASSES[int(label)]
-        parts=cls.split("_")
 
-        species="_".join(parts[:2])
-        state="_".join(parts[2:])
+        if cls.startswith("sap_sap_"):
+            species="sap_sap"
+            state=cls.replace("sap_sap_","")
+        else:
+            parts=cls.split("_")
+            species=parts[0]
+            state="_".join(parts[1:])
 
         species_name=species.replace("_"," ").title()
 
-        species_counts[species_name]=species_counts.get(species_name,0)+1
+        if species_name not in fish_details:
+            fish_details[species_name]={
+                "count":0,
+                "dried":0,
+                "partial":0,
+                "not":0,
+                "color_list":[],
+                "appearance_list":[],
+                "texture_list":[]
+            }
+
+        fish_details[species_name]["count"]+=1
 
         if state=="dried":
-
-            color=(0,255,0)
-
             total_dried+=1
-            dried_counts[species_name]=dried_counts.get(species_name,0)+1
-
+            fish_details[species_name]["dried"]+=1
         elif state=="partially_dried":
-
-            color=(0,255,255)
-
             total_partial+=1
-            partial_counts[species_name]=partial_counts.get(species_name,0)+1
-
+            fish_details[species_name]["partial"]+=1
         elif state=="not_dried":
-
-            color=(0,0,255)
-
             total_not+=1
-            not_counts[species_name]=not_counts.get(species_name,0)+1
+            fish_details[species_name]["not"]+=1
 
-        else:
+        rule = RULES.get(state, {})
 
-            color=(255,0,0)
+        fish_details[species_name]["color_list"].append(random.choice(rule.get("color",["Unknown"])))
+        fish_details[species_name]["appearance_list"].append(random.choice(rule.get("appearance",["Unknown"])))
+        fish_details[species_name]["texture_list"].append(random.choice(rule.get("texture",["Unknown"])))
 
-        cv2.rectangle(image,(x1,y1),(x2,y2),color,2)
+        # ===== FIXED DRAWING =====
+        box_color = DRYNESS_COLOR.get(state,(255,255,255))
 
-        cv2.putText(
-            image,
-            species_name,
-            (x1,y1-10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            color,
-            2
-        )
+        cv2.rectangle(image,(x1,y1),(x2,y2),box_color,4)
 
-    total_fish=total_dried+total_partial+total_not
+        label_text = species_name
+        font_scale = 1.0
+        thickness = 2
 
-    species_list=list(species_counts.keys())
-    fish_species_text=", ".join(species_list)
+        (tw,th),_=cv2.getTextSize(label_text,cv2.FONT_HERSHEY_SIMPLEX,font_scale,thickness)
 
-    fish_counts_text=" ".join([f"{k} - {v}" for k,v in species_counts.items()])
+        y_text = max(y1, th + 10)
 
-    features=[[total_fish,data.drying_time_minutes,total_dried,total_partial,total_not]]
+        cv2.rectangle(image,(x1,y_text-th-10),(x1+tw+10,y_text),box_color,-1)
 
-    predicted_minutes=float(rf_model.predict(features)[0])
+        cv2.putText(image,label_text,(x1+5,y_text-5),
+                    cv2.FONT_HERSHEY_SIMPLEX,font_scale,(255,255,255),thickness,cv2.LINE_AA)
 
-    appearance,color_text,texture_text=generate_surface(
-        total_dried,total_partial,total_not
-    )
+    for species in fish_details:
 
-    rec_text,extra_minutes=generate_recommendation(
-        predicted_minutes,total_not,total_partial
-    )
+        def majority(lst):
+            return max(set(lst), key=lst.count) if lst else "Unknown"
+
+        fish_details[species]["color"] = majority(fish_details[species].pop("color_list"))
+        fish_details[species]["appearance"] = majority(fish_details[species].pop("appearance_list"))
+        fish_details[species]["texture"] = majority(fish_details[species].pop("texture_list"))
+
+    total_fish = total_dried + total_partial + total_not
+
+    features_rf=[[total_fish,data.drying_time_minutes,total_dried,total_partial,total_not]]
+    predicted_minutes=float(rf_model.predict(features_rf)[0])
 
     _,buffer=cv2.imencode(".jpg",image)
     encoded=base64.b64encode(buffer).decode()
 
-    return{
-
-    "annotated_image":encoded,
-
-    "fish_species":fish_species_text,
-    "fish_counts":fish_counts_text,
-
-    "species_counts":species_counts,
-
-    "dried_counts":dried_counts,
-    "partial_counts":partial_counts,
-    "not_counts":not_counts,
-
-    "total_fish":total_fish,
-
-    "appearance":appearance,
-    "color_text":color_text,
-    "texture_text":texture_text,
-
-    "fully_dried":total_dried,
-    "partially_dried":total_partial,
-    "not_dried":total_not,
-
-    "duration":data.drying_time_minutes,
-
-    "recommendation":{
-    "description":rec_text,
-    "additional_minutes":extra_minutes
+    # ===== UI STRUCTURE FIX =====
+    status = {
+        "species": list(fish_details.keys()),
+        "count": {},
+        "fully_dried": {},
+        "partially_dried": {},
+        "not_dried": {},
+        "texture": {},
+        "appearance": {},
+        "color": {}
     }
 
+    for s,data_s in fish_details.items():
+        status["count"][s]=data_s["count"]
+        status["fully_dried"][s]=data_s["dried"]
+        status["partially_dried"][s]=data_s["partial"]
+        status["not_dried"][s]=data_s["not"]
+        status["texture"][s]=data_s["texture"]
+        status["appearance"][s]=data_s["appearance"]
+        status["color"][s]=data_s["color"]
+
+    return{
+        "annotated_image":encoded,
+        "status":status,
+        "total_fish":total_fish,
+        "duration":data.drying_time_minutes,
+        "predicted_additional_minutes":predicted_minutes
     }
