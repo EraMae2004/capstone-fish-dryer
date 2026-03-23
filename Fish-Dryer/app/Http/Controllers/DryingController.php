@@ -81,6 +81,23 @@ class DryingController extends Controller
 
 
     /* =========================================================
+       ESP32 HEARTBEAT API
+       - Called by microcontroller to mark itself as online
+    ========================================================= */
+    public function esp32Heartbeat(Request $request)
+    {
+        $deviceId = $request->input('device_id', 'esp32-1');
+
+        DB::table('microcontrollers')->updateOrInsert(
+            ['device_id' => $deviceId],
+            ['last_seen' => now()]
+        );
+
+        return response()->json(['success' => true]);
+    }
+
+
+    /* =========================================================
     ANALYZE BATCH (FRONT + BACK)
     ========================================================= */
     public function analyzeBatch(Request $request)

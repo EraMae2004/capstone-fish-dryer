@@ -49,3 +49,4 @@ class DryingSession extends Model
         return $this->hasMany(Notification::class);
     }
 }
+
