@@ -8,25 +8,25 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision.transforms import functional as F
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
+# DEVICE
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# ⚠️ ADJUST THIS BASED ON YOUR DATASET
 CLASSES = [
-"background",
-
-"sap_sap_dried","sap_sap_partially_dried","sap_sap_not_dried",
-"barol_dried","barol_partially_dried","barol_not_dried",
-"galunggong_dried","galunggong_partially_dried","galunggong_not_dried",
-"burot_dried","burot_partially_dried","burot_not_dried",
-"tamban_dried","tamban_partially_dried","tamban_not_dried"
+    "background",
+    "sap_sap_dried","sap_sap_not_dried",
+    "barol_dried","barol_not_dried",
+    "galunggong_dried","galunggong_not_dried",
+    "burot_dried","burot_not_dried",
+    "tamban_dried","tamban_not_dried"
 ]
 
-
+# ================= DATASET =================
 class FishDataset(Dataset):
 
-    def __init__(self, img_dir, ann_dir):
-        self.img_dir = img_dir
-        self.ann_dir = ann_dir
-        self.images = sorted([f for f in os.listdir(img_dir) if f.endswith(".jpg")])
+    def __init__(self, root):
+        self.root = root
+        self.images = sorted([f for f in os.listdir(root) if f.endswith(".jpg")])
 
     def __len__(self):
         return len(self.images)
@@ -35,17 +35,19 @@ class FishDataset(Dataset):
 
         img_name = self.images[idx]
 
-        img_path = os.path.join(self.img_dir, img_name)
-        ann_path = os.path.join(self.ann_dir, img_name.replace(".jpg",".xml"))
+        img_path = os.path.join(self.root, img_name)
+        ann_path = img_path.replace(".jpg", ".xml")
 
+        # Load image
         image = cv2.imread(img_path)
 
         if image is None:
-            return self.__getitem__((idx+1) % len(self.images))
+            raise ValueError(f"Image not found: {img_path}")
 
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         height, width = image.shape[:2]
 
+        # Load annotation
         tree = ET.parse(ann_path)
         root = tree.getroot()
 
@@ -61,11 +63,12 @@ class FishDataset(Dataset):
 
             bbox = obj.find("bndbox")
 
-            xmin = int(bbox.find("xmin").text)
-            ymin = int(bbox.find("ymin").text)
-            xmax = int(bbox.find("xmax").text)
-            ymax = int(bbox.find("ymax").text)
+            xmin = float(bbox.find("xmin").text)
+            ymin = float(bbox.find("ymin").text)
+            xmax = float(bbox.find("xmax").text)
+            ymax = float(bbox.find("ymax").text)
 
+            # Skip invalid boxes
             if xmax <= xmin or ymax <= ymin:
                 continue
 
@@ -75,9 +78,9 @@ class FishDataset(Dataset):
             boxes.append([xmin, ymin, xmax, ymax])
             labels.append(CLASSES.index(label))
 
+        # Skip images with no valid boxes
         if len(boxes) == 0:
-            boxes = torch.zeros((0,4), dtype=torch.float32)
-            labels = torch.zeros((0,), dtype=torch.int64)
+            return self.__getitem__((idx + 1) % len(self.images))
 
         boxes = torch.as_tensor(boxes, dtype=torch.float32)
         labels = torch.as_tensor(labels, dtype=torch.int64)
@@ -96,14 +99,16 @@ def collate_fn(batch):
     return tuple(zip(*batch))
 
 
+# ================= MAIN =================
 def main():
 
-    dataset = FishDataset("datasets/images","datasets/annotations")
+    # ⚠️ CHANGE THIS PATH IF NEEDED
+    dataset = FishDataset("datasets/train")
 
     train_size = int(0.8 * len(dataset))
     test_size = len(dataset) - train_size
 
-    train_dataset, test_dataset = random_split(dataset,[train_size,test_size])
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
     train_loader = DataLoader(
         train_dataset,
@@ -113,14 +118,7 @@ def main():
         num_workers=2
     )
 
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=2,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=2
-    )
-
+    # MODEL
     model = torchvision.models.detection.fasterrcnn_mobilenet_v3_large_fpn(weights="DEFAULT")
 
     num_classes = len(CLASSES)
@@ -130,9 +128,10 @@ def main():
 
     model.to(DEVICE)
 
+    # OPTIMIZER (safe learning rate)
     optimizer = torch.optim.SGD(
         model.parameters(),
-        lr=0.005,
+        lr=0.001,
         momentum=0.9
     )
 
@@ -140,14 +139,13 @@ def main():
 
     for epoch in range(epochs):
 
-        # ✅ TRAINING
         model.train()
         total_loss = 0
 
         for images, targets in train_loader:
 
             images = [img.to(DEVICE) for img in images]
-            targets = [{k:v.to(DEVICE) for k,v in t.items()} for t in targets]
+            targets = [{k: v.to(DEVICE) for k, v in t.items()} for t in targets]
 
             loss_dict = model(images, targets)
             loss = sum(loss for loss in loss_dict.values())
@@ -162,7 +160,7 @@ def main():
 
     torch.save(model.state_dict(), "fish_model.pth")
 
-    print("Training complete")
+    print("Training complete ✅")
 
 
 if __name__ == "__main__":

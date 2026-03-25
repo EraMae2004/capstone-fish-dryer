@@ -1,5 +1,6 @@
 import os
 import cv2
+import numpy as np
 
 images_folder = "datasets/images"
 annotations_folder = "datasets/annotations"
@@ -11,18 +12,18 @@ for filename in os.listdir(images_folder):
     if not filename.lower().endswith(".jpg"):
         continue
 
-    image_path = os.path.join(images_folder, filename)
-    img = cv2.imread(image_path)
+    path = os.path.join(images_folder, filename)
+    img = cv2.imread(path)
 
     if img is None:
         continue
 
-    height, width = img.shape[:2]
+    h, w = img.shape[:2]
 
     # =========================
-    # 🔥 LABEL FROM FILENAME
+    # LABEL FROM NAME
     # =========================
-    name = filename.lower().replace(".jpg","")
+    name = filename.lower().replace(".jpg", "")
 
     if "sap_sap" in name:
         species = "sap_sap"
@@ -35,34 +36,66 @@ for filename in os.listdir(images_folder):
     elif "tamban" in name:
         species = "tamban"
     else:
-        print(f"[WARNING] Unknown species: {filename}")
         continue
 
-    if "not_dried" in name:
-        dryness = "not_dried"
-    else:
-        dryness = "dried"
-
+    dryness = "not_dried" if "not_dried" in name else "dried"
     label = f"{species}_{dryness}"
 
     # =========================
-    # 🔥 MANUAL SPLIT (FIXED)
+    # 🔥 STEP 1: EDGE DETECTION
     # =========================
-    num_fish = 4  # <-- CHANGE if needed
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
 
-    section_height = height // num_fish
+    # =========================
+    # 🔥 STEP 2: HORIZONTAL PROJECTION (FIND ROWS)
+    # =========================
+    projection = np.sum(edges, axis=1)
 
+    rows = []
+    in_row = False
+    start = 0
+
+    for i, val in enumerate(projection):
+        if val > 1000 and not in_row:
+            in_row = True
+            start = i
+        elif val <= 1000 and in_row:
+            in_row = False
+            rows.append((start, i))
+
+    # =========================
+    # 🔥 STEP 3: SPLIT EACH ROW INTO FISH
+    # =========================
     objects_xml = ""
+    count = 0
 
-    for i in range(num_fish):
+    for (y1, y2) in rows:
 
-        ymin = i * section_height
-        ymax = (i + 1) * section_height
+        row_img = edges[y1:y2, :]
 
-        xmin = int(width * 0.2)
-        xmax = int(width * 0.8)
+        vertical_proj = np.sum(row_img, axis=0)
 
-        objects_xml += f"""
+        in_obj = False
+        x_start = 0
+
+        for x, val in enumerate(vertical_proj):
+            if val > 500 and not in_obj:
+                in_obj = True
+                x_start = x
+            elif val <= 500 and in_obj:
+                in_obj = False
+
+                xmin = x_start
+                xmax = x
+                ymin = y1
+                ymax = y2
+
+                # FILTER SMALL BOXES
+                if (xmax - xmin) < 50 or (ymax - ymin) < 50:
+                    continue
+
+                objects_xml += f"""
         <object>
             <name>{label}</name>
             <bndbox>
@@ -72,7 +105,11 @@ for filename in os.listdir(images_folder):
                 <ymax>{ymax}</ymax>
             </bndbox>
         </object>
-        """
+                """
+
+                count += 1
+
+    print(f"{filename} → detected fish: {count}")
 
     # =========================
     # SAVE XML
@@ -81,8 +118,8 @@ for filename in os.listdir(images_folder):
 <filename>{filename}</filename>
 
 <size>
-<width>{width}</width>
-<height>{height}</height>
+<width>{w}</width>
+<height>{h}</height>
 <depth>3</depth>
 </size>
 

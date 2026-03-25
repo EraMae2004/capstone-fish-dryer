@@ -1,59 +1,43 @@
 import os
-import cv2
 import xml.etree.ElementTree as ET
 
-images_folder = "datasets/images"
-annotations_folder = "datasets/annotations"
+folder = "datasets/train"  # 🔁 change if needed
 
-for filename in os.listdir(images_folder):
+nan_files = []
+total_objects = 0
+nan_count = 0
 
-    if not filename.endswith(".jpg"):
-        continue
+for file in os.listdir(folder):
+    if file.endswith(".xml"):
+        path = os.path.join(folder, file)
 
-    img_path = os.path.join(images_folder, filename)
-    xml_path = os.path.join(annotations_folder, filename.replace(".jpg",".xml"))
+        tree = ET.parse(path)
+        root = tree.getroot()
 
-    if not os.path.exists(xml_path):
-        continue
+        for obj in root.findall("object"):
+            bbox = obj.find("bndbox")
 
-    img = cv2.imread(img_path)
+            xmin = bbox.find("xmin").text
+            ymin = bbox.find("ymin").text
+            xmax = bbox.find("xmax").text
+            ymax = bbox.find("ymax").text
 
-    if img is None:
-        continue
+            total_objects += 1
 
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
+            values = [xmin, ymin, xmax, ymax]
 
-    for obj in root.findall("object"):
+            # Check for NaN or invalid values
+            if any(v is None or v.lower() == "nan" for v in values):
+                nan_files.append(file)
+                nan_count += 1
 
-        label = obj.find("name").text
+# RESULTS
+print("Total objects:", total_objects)
+print("NaN boxes found:", nan_count)
 
-        bbox = obj.find("bndbox")
-
-        xmin = int(bbox.find("xmin").text)
-        ymin = int(bbox.find("ymin").text)
-        xmax = int(bbox.find("xmax").text)
-        ymax = int(bbox.find("ymax").text)
-
-        # draw box
-        cv2.rectangle(img,(xmin,ymin),(xmax,ymax),(0,255,0),2)
-
-        # draw label
-        cv2.putText(
-            img,
-            label,
-            (xmin,ymin-10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0,255,0),
-            2
-        )
-
-    cv2.imshow("Check", img)
-
-    key = cv2.waitKey(0)
-
-    if key == 27:  # press ESC to exit
-        break
-
-cv2.destroyAllWindows()
+if nan_files:
+    print("\nFiles with NaN:")
+    for f in set(nan_files):
+        print(f)
+else:
+    print("\nNo NaN found ✅")

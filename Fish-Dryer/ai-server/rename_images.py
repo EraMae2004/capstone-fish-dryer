@@ -1,11 +1,11 @@
 import os
 
-prefix = "galunggong_not_dried"   # change this when needed
-folder = "datasets/augmented-images"
+prefix = "sap_sap_not_dried"   # change this when needed
+folder = "datasets/rename_images"
 
 files = sorted(os.listdir(folder))
 
-counter = 31
+counter = 1
 
 for file in files:
 
