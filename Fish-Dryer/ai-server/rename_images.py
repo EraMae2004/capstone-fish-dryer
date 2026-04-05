@@ -1,7 +1,7 @@
 import os
 
-prefix = "sap_sap_not_dried"   # change this when needed
-folder = "datasets/rename_images"
+prefix = "wrinkle_texture"   # change this when needed
+folder = "datasets/rename-images"
 
 files = sorted(os.listdir(folder))
 

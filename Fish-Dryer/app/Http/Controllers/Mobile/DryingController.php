@@ -77,9 +77,9 @@ class DryingController extends Controller
                 'fish_counts' => $data['fish_counts'] ?? 0,
                 'duration' => $data['duration'] ?? '--',
 
-                'appearance' => $data['appearance'] ?? '--',
-                'color_text' => $data['color_text'] ?? '--',
-                'texture_text' => $data['texture_text'] ?? '--',
+                'appearance_display' => $data['appearance_display'] ?? '--',
+                'color_display' => $data['color_display'] ?? '--',
+                'texture_display' => $data['texture_display'] ?? '--',
 
                 'fully_dried' => $data['fully_dried'] ?? 0,
                 'partially_dried' => $data['partially_dried'] ?? 0,

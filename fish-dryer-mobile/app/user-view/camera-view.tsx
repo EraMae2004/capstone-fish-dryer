@@ -1,3 +1,5 @@
+// camera-view.tsx
+
 import React, { useRef, useState, useEffect } from "react";
 import {
   View,
@@ -10,6 +12,7 @@ import {
 import { CameraView, Camera } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export default function CameraViewScreen() {
   const router = useRouter();
@@ -60,17 +63,13 @@ export default function CameraViewScreen() {
 
     if (!preview) return;
 
-    setAnalyzing(true);
-
-    setTimeout(() => {
-      router.replace({
-        pathname: "/user-view/overview-batch",
-        params: {
-          image: preview,
-          batchIndex,
-        },
-      });
-    }, 500);
+    router.replace({
+      pathname: "/user-view/user-view",
+      params: {
+        image: preview,
+        batchIndex,
+      },
+    });
 
   }
 

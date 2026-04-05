@@ -1,11 +1,14 @@
+//user-overview.tsx
+
 import React, { useEffect, useState } from "react";
 import { View, TouchableOpacity, Text, StyleSheet, ActivityIndicator } from "react-native";
 import OverviewStatus from "./overview-status";
 import OverviewControlPanel from "./overview-batch";
 import { API_BASE_URL } from "@/config/api";
 
+
 export default function UserOverview() {
-  const [activeTab, setActiveTab] = useState<"status" | "control">("status");
+  const [activeTab, setActiveTab] = useState<"status" | "control">("control");
   const [machine, setMachine] = useState<any>(null);
   const [session, setSession] = useState<any>(null);
   const [hardwareStatuses, setHardwareStatuses] = useState<any[]>([]);
@@ -42,7 +45,7 @@ export default function UserOverview() {
   }
 
   return (
-    <View style={{ flex: 1 }}>
+    <View style={{ flex: 1, paddingBottom: 70 }}>
       <View style={{ flex: 1 }}>
         {activeTab === "status" ? (
           <OverviewStatus
@@ -78,7 +81,14 @@ export default function UserOverview() {
 
 const styles = StyleSheet.create({
   center: { flex: 1, justifyContent: "center", alignItems: "center" },
-  bottomNav: { flexDirection: "row", backgroundColor: "#3a5166" },
+  bottomNav: {
+    flexDirection: "row",
+    backgroundColor: "#3a5166",
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+  },
   navBtn: { flex: 1, padding: 18, alignItems: "center" },
   active: { backgroundColor: "#2f4456" },
   navText: { color: "#fff", fontWeight: "600" }

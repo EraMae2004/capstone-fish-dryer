@@ -1,14 +1,20 @@
-import React, { useState, useCallback, useEffect } from "react";
+// overview-batch.tsx
+
+
+import React, { useState, useEffect, useRef } from "react";
 import {
   ScrollView,
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
-  Image
+  Image,
+  Dimensions
 } from "react-native";
+
+const BATCH_PAGE_WIDTH = Dimensions.get("window").width - 60;
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useRouter, useLocalSearchParams, useFocusEffect } from "expo-router";
+import { useRouter, useLocalSearchParams} from "expo-router";
 
 /* TYPES */
 
@@ -112,8 +118,6 @@ export default function OverviewBatch({ session }: any) {
 
   }
 
-  const [imageRatios, setImageRatios] = useState<{[key:number]:number}>({});
-
   function createEmptyBatch(): Batch {
     return {
       image: null,
@@ -132,6 +136,8 @@ export default function OverviewBatch({ session }: any) {
   }
 
   const [batches, setBatches] = useState<Batch[]>([createEmptyBatch()]);
+  const batchCarouselRef = useRef<ScrollView>(null);
+  const prevBatchCount = useRef(1);
 
   /* MACHINE CONTROLS */
 
@@ -163,58 +169,53 @@ export default function OverviewBatch({ session }: any) {
 
   /* RECEIVE IMAGE */
 
-  useFocusEffect(
-    useCallback(() => {
+  useEffect(() => {
 
-      const imageParam = params.image;
-      const batchIndexParam = params.batchIndex;
+    const imageParam = params.image;
+    const batchIndexParam = params.batchIndex;
 
-      if (!imageParam || batchIndexParam === undefined) return;
+    if (!imageParam || batchIndexParam === undefined) return;
 
-      const index = Number(batchIndexParam);
+    const index = Number(batchIndexParam);
 
-      const img = Array.isArray(imageParam)
-        ? imageParam[0]
-        : imageParam;
+    const img = Array.isArray(imageParam)
+      ? imageParam[0]
+      : imageParam;
 
-      if (!img) return;
+    if (!img) return;
 
-      /* GET IMAGE RATIO */
+    setBatches(prev => {
+      const updated = [...prev];
+      if (!updated[index]) return prev;
 
-      Image.getSize(img, (width, height) => {
+      updated[index] = {
+        ...updated[index],
+        image: img
+      };
 
-        const ratio = height / width;
+      return updated;
+    });
 
-        setImageRatios(prev => ({
-          ...prev,
-          [index]: ratio
-        }));
+    analyzeBatch(index, img);
 
-      });
-
-      setBatches(prev => {
-
-        const updated = [...prev];
-
-        if (!updated[index]) return prev;
-
-        updated[index] = {
-          ...updated[index],
-          image: img
-        };
-
-        return updated;
-
-      });
-
-      analyzeBatch(index, img);
-
-    }, [params.image, params.batchIndex])
-  );
+  }, [params.image]);
 
   const addBatch = () => {
     setBatches(prev => [...prev, createEmptyBatch()]);
   };
+
+  useEffect(() => {
+    if (batches.length > prevBatchCount.current) {
+      const lastIndex = batches.length - 1;
+      requestAnimationFrame(() => {
+        batchCarouselRef.current?.scrollTo({
+          x: lastIndex * BATCH_PAGE_WIDTH,
+          animated: true
+        });
+      });
+    }
+    prevBatchCount.current = batches.length;
+  }, [batches.length]);
 
   const removeBatch = (index: number) => {
     const updated = [...batches];
@@ -304,9 +305,9 @@ export default function OverviewBatch({ session }: any) {
           fish_species: data.fish_species || "--",
           fish_counts: data.fish_counts || "--",
           duration: capturedDuration,
-          appearance: data.appearance || "--",
-          color: data.color_text || "--",
-          texture: data.texture_text || "--",
+          appearance: data.appearance_display || "--",
+          color: data.color_display || "--",
+          texture: data.texture_display || "--",
           fully_dried: String(data.fully_dried ?? "--"),
           partially_dried: String(data.partially_dried ?? "--"),
           not_dried: String(data.not_dried ?? "--"),
@@ -347,7 +348,7 @@ export default function OverviewBatch({ session }: any) {
 
     <ScrollView
       style={{ flex: 1 }}
-      contentContainerStyle={styles.container}
+      contentContainerStyle={{ paddingBottom: 120 }} // 👈 ADD THIS
       showsVerticalScrollIndicator={false}
     >
 
@@ -403,86 +404,81 @@ export default function OverviewBatch({ session }: any) {
 
         </View>
 
-        {batches.map((batch, index) => {
+        <ScrollView
+          ref={batchCarouselRef}
+          horizontal
+          pagingEnabled
+          nestedScrollEnabled
+          showsHorizontalScrollIndicator
+          style={styles.batchCarousel}
+          keyboardShouldPersistTaps="handled"
+        >
+          {batches.map((batch, index) => {
+            const dynamicHeight = 320;
 
-          const ratio = imageRatios[index] || 1;
+            return (
+              <View key={index} style={{ width: BATCH_PAGE_WIDTH }}>
+                <View style={styles.batchCard}>
+                  <View style={styles.batchTopBar}>
+                    <Text style={styles.batchTitle}>Batch {index + 1}</Text>
 
-          const dynamicHeight = Math.min(280, 320 * ratio);
+                    <TouchableOpacity
+                      style={styles.removeBtn}
+                      onPress={() => removeBatch(index)}
+                    >
+                      <Text style={styles.removeText}>Remove</Text>
+                    </TouchableOpacity>
+                  </View>
 
-          return (
+                  <TouchableOpacity
+                    style={styles.captureBtn}
+                    onPress={() => captureTray(index)}
+                  >
+                    <Text style={styles.btnText}>Capture Tray</Text>
+                  </TouchableOpacity>
 
-            <View key={index} style={styles.batchCard}>
+                  <TouchableOpacity
+                    style={styles.uploadBtn}
+                    onPress={() => uploadImage(index)}
+                  >
+                    <Text style={styles.btnText}>Upload Image</Text>
+                  </TouchableOpacity>
 
-              <View style={styles.batchTopBar}>
+                  <View style={[styles.imageBox, { height: dynamicHeight }]}>
+                    {batch.image ? (
+                      <Image
+                        source={{ uri: batch.image }}
+                        style={styles.previewImage}
+                        resizeMode="cover"
+                      />
+                    ) : (
+                      <Text style={styles.imageText}>Image</Text>
+                    )}
+                  </View>
 
-                <Text style={styles.batchTitle}>
-                  Batch {index + 1}
-                </Text>
+                  <View style={styles.statusHeader}>
+                    <Text style={styles.statusHeaderText}>Status</Text>
+                  </View>
 
-                <TouchableOpacity
-                  style={styles.removeBtn}
-                  onPress={() => removeBatch(index)}
-                >
-                  <Text style={styles.removeText}>Remove</Text>
-                </TouchableOpacity>
-
+                  <View style={styles.statusContent}>
+                    <StatusRow label="Fish Species" value={batch.fish_species} />
+                    <StatusRow label="No. of Fishes" value={batch.fish_counts} />
+                    <StatusRow label="Duration" value={batch.duration} />
+                    <StatusRow label="Color" value={batch.color} />
+                    <StatusRow label="Appearance" value={batch.appearance} />
+                    <StatusRow label="Texture" value={batch.texture} />
+                    <StatusRow label="Fully Dried" value={batch.fully_dried} />
+                    <StatusRow
+                      label="Partially Dried"
+                      value={batch.partially_dried}
+                    />
+                    <StatusRow label="Not Dried" value={batch.not_dried} />
+                  </View>
+                </View>
               </View>
-
-              <TouchableOpacity
-                style={styles.captureBtn}
-                onPress={() => captureTray(index)}
-              >
-                <Text style={styles.btnText}>Capture Tray</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.uploadBtn}
-                onPress={() => uploadImage(index)}
-              >
-                <Text style={styles.btnText}>Upload Image</Text>
-              </TouchableOpacity>
-
-              <View style={[styles.imageBox,{height:dynamicHeight}]}>
-
-                {batch.image ? (
-
-                  <Image
-                    source={{ uri: batch.image }}
-                    style={styles.previewImage}
-                    resizeMode="cover"
-                  />
-
-                ) : (
-
-                  <Text style={styles.imageText}>Image</Text>
-
-                )}
-
-              </View>
-
-              <View style={styles.statusHeader}>
-                <Text style={styles.statusHeaderText}>Status</Text>
-              </View>
-
-              <View style={styles.statusContent}>
-
-                <StatusRow label="Fish Species" value={batch.fish_species} />
-                <StatusRow label="No. of Fishes" value={batch.fish_counts} />
-                <StatusRow label="Duration" value={batch.duration} />
-                <StatusRow label="Appearance" value={batch.appearance} />
-                <StatusRow label="Color" value={batch.color} />
-                <StatusRow label="Texture" value={batch.texture} />
-                <StatusRow label="Fully Dried" value={batch.fully_dried} />
-                <StatusRow label="Partially Dried" value={batch.partially_dried} />
-                <StatusRow label="Not Dried" value={batch.not_dried} />
-
-              </View>
-
-            </View>
-
-          );
-
-        })}
+            );
+          })}
+        </ScrollView>
 
       </View>
 
@@ -512,28 +508,22 @@ export default function OverviewBatch({ session }: any) {
 }
 
 function StatusRow({ label, value }: any) {
-
   return (
+    <View style={styles.statusRowClean}>
 
-    <View style={styles.statusRow}>
+      <Text style={styles.statusLabelClean}>
+        {label}
+      </Text>
 
-      <Text style={styles.statusLabel}>{label}:</Text>
-      <Text style={styles.statusValue}>{value}</Text>
+      <Text style={styles.statusValueClean}>
+        {value}
+      </Text>
 
     </View>
-
   );
-
 }
 
 const styles = StyleSheet.create({
-
-  container:{
-    padding:15,
-    paddingBottom:10,
-    backgroundColor:"#f2f4f7",
-    flexGrow:1
-  },
 
   pageTitle:{
     fontSize:20,
@@ -667,12 +657,16 @@ const styles = StyleSheet.create({
     fontWeight:"600"
   },
 
+  batchCarousel:{
+    width:BATCH_PAGE_WIDTH,
+    alignSelf:"center"
+  },
+
   batchCard:{
     borderWidth:1,
     borderColor:"#dcdcdc",
     borderRadius:8,
-    padding:12,
-    marginBottom:20
+    padding:12
   },
 
   batchTopBar:{
@@ -751,25 +745,51 @@ const styles = StyleSheet.create({
   },
 
   statusContent:{
-    marginTop:10
+    marginTop:12,
+    gap:12
   },
 
-  statusRow:{
-    flexDirection:"row",
-    justifyContent:"space-between",
-    paddingVertical:6,
-    borderBottomWidth:0.5,
-    borderColor:"#ddd"
+  statusRowClean:{
+    backgroundColor:"#ffffff",
+    borderRadius:10,
+    paddingVertical:12,
+    paddingHorizontal:14,
+    borderWidth:1,
+    borderColor:"#e5e7eb"
   },
 
-  statusLabel:{
-    fontSize:13,
-    color:"#333"
+  statusLabelClean:{
+    fontSize:12,
+    color:"#6b7280",
+    fontWeight:"600",
+    marginBottom:4,
+    textTransform:"uppercase",
+    letterSpacing:0.5
   },
 
-  statusValue:{
-    fontSize:13,
-    fontWeight:"600"
+  statusValueClean:{
+    fontSize:12,
+    color:"#073A61",
+    fontWeight:"500",
+    lineHeight:18
+  },
+
+  /* COLOR BADGES */
+
+  greenBadge:{
+    backgroundColor:"#d1fae5"
+  },
+
+  yellowBadge:{
+    backgroundColor:"#fef3c7"
+  },
+
+  redBadge:{
+    backgroundColor:"#fee2e2"
+  },
+
+  defaultBadge:{
+    backgroundColor:"#e5e7eb"
   },
 
   recommendationText:{

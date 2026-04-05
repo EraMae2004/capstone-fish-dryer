@@ -12,13 +12,14 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ⚠️ ADJUST THIS BASED ON YOUR DATASET
+# Must match server.py / evaluate_model.py or label indices will not align with fish_model.pth
 CLASSES = [
     "background",
-    "sap_sap_dried","sap_sap_not_dried",
-    "barol_dried","barol_not_dried",
-    "galunggong_dried","galunggong_not_dried",
-    "burot_dried","burot_not_dried",
-    "tamban_dried","tamban_not_dried"
+    "sap_sap_dried", "sap_sap_partially_dried", "sap_sap_not_dried",
+    "barol_dried", "barol_partially_dried", "barol_not_dried",
+    "galunggong_dried", "galunggong_partially_dried", "galunggong_not_dried",
+    "burot_dried", "burot_partially_dried", "burot_not_dried",
+    "tamban_dried", "tamban_partially_dried", "tamban_not_dried",
 ]
 
 # ================= DATASET =================

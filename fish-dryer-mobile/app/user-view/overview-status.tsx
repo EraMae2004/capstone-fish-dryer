@@ -34,10 +34,7 @@ export default function OverviewStatus({
   ];
 
   return (
-    <ScrollView
-      style={{ flex: 1, backgroundColor: "#f4f6f8" }}
-      contentContainerStyle={{ padding: 15, paddingBottom: 120 }}
-    >
+    <ScrollView>
       {/* OVERVIEW TITLE */}
       <Text style={styles.title}>OVERVIEW</Text>
 
