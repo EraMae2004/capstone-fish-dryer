@@ -3,20 +3,17 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
-use App\Models\DryingSession;
 
-class Machine extends Model
+class Microcontroller extends Model
 {
     protected $fillable = [
-        'name',
-        'status',
-        'last_used_at',
-        'overall_health',
+        'device_id',
+        'last_seen',
         'created_by',
     ];
 
     protected $casts = [
-        'last_used_at' => 'datetime',
+        'last_seen' => 'datetime',
     ];
 
     public function creator()
@@ -26,16 +23,16 @@ class Machine extends Model
 
     public function hardwareStatuses()
     {
-        return $this->hasMany(MachineHardwareStatus::class);
+        return $this->hasMany(MachineHardwareStatus::class, 'microcontroller_id');
     }
 
     public function dryingSessions()
     {
-        return $this->hasMany(DryingSession::class);
+        return $this->hasMany(DryingSession::class, 'microcontroller_id');
     }
 
     public function notifications()
     {
-        return $this->hasMany(Notification::class);
+        return $this->hasMany(Notification::class, 'microcontroller_id');
     }
 }

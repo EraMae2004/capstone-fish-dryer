@@ -11,7 +11,7 @@ class DryingSession extends Model
 
     protected $fillable = [
         'session_code',
-        'machine_id',
+        'microcontroller_id',
         'user_id',
 
         'fish_type',
@@ -51,7 +51,7 @@ class DryingSession extends Model
 
     public function machine()
     {
-        return $this->belongsTo(Machine::class);
+        return $this->belongsTo(Microcontroller::class);
     }
 
     public function user()

@@ -12,6 +12,7 @@ return new class extends Migration
             $table->id();
             $table->string('device_id')->unique();
             $table->timestamp('last_seen')->nullable();
+            $table->foreignId('created_by')->constrained('users')->onDelete('cascade');
             $table->timestamps();
         });
     }

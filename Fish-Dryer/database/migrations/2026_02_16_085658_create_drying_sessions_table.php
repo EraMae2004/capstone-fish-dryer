@@ -12,7 +12,7 @@ return new class extends Migration
         Schema::create('drying_sessions', function (Blueprint $table) {
             $table->id();
             $table->string('session_code')->unique();
-            $table->foreignId('machine_id')->constrained('machines')->onDelete('cascade');
+            $table->foreignId('microcontroller_id')->constrained('microcontrollers')->onDelete('cascade');
             $table->foreignId('user_id')->constrained('users')->onDelete('cascade');
             $table->string('fish_type')->nullable();
             $table->integer('total_fish')->nullable();

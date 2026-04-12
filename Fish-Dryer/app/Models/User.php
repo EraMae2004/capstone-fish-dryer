@@ -35,7 +35,7 @@ class User extends Authenticatable
 
     public function machines()
     {
-        return $this->hasMany(Machine::class, 'created_by');
+        return $this->hasMany(Microcontroller::class, 'created_by');
     }
 
     public function dryingSessions()

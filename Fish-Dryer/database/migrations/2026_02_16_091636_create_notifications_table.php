@@ -11,7 +11,7 @@ return new class extends Migration
     {
         Schema::create('notifications', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('machine_id')->nullable()->constrained('machines')->onDelete('cascade');
+            $table->foreignId('microcontroller_id')->constrained('microcontrollers')->onDelete('cascade');
             $table->foreignId('user_id')->nullable()->constrained('users')->onDelete('cascade');
             $table->foreignId('drying_session_id')->nullable()->constrained('drying_sessions')->onDelete('cascade');
             $table->enum('type', ['critical', 'warning', 'info']);

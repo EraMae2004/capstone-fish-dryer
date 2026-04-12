@@ -24,3 +24,6 @@ Route::post('/mobile/change-password/{id}', [MobileAuthController::class, 'chang
 // ESP32 heartbeat endpoint for hardware status
 Route::post('/hardware/esp32/status', [DryingController::class, 'esp32Heartbeat']);
 
+ Route::get('/hardware', [DryingController::class, 'hardware'])->name('user.hardware');
+    Route::get('/detect-esp', [DryingController::class, 'detectEsp'])
+    ->name('user.detect.esp');
