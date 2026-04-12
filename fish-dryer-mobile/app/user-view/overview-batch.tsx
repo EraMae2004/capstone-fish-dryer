@@ -11,6 +11,7 @@ import {
   Image,
   Dimensions
 } from "react-native";
+import OverviewParameters from "./overview-parameters";
 
 const BATCH_PAGE_WIDTH = Dimensions.get("window").width - 60;
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -51,6 +52,10 @@ export default function OverviewBatch({ session }: any) {
 
   const [startTime, setStartTime] = useState<number | null>(null);
   const [duration, setDuration] = useState("00:00:00");
+
+  const [temperature, setTemperature] = useState("");
+  const [fanSpeed, setFanSpeed] = useState("");
+  const [durationInput, setDurationInput] = useState("");
 
 
   useEffect(() => {
@@ -348,7 +353,7 @@ export default function OverviewBatch({ session }: any) {
 
     <ScrollView
       style={{ flex: 1 }}
-      contentContainerStyle={{ paddingBottom: 120 }} // 👈 ADD THIS
+      contentContainerStyle={{ paddingBottom: 10 }} // 👈 ADD THIS
       showsVerticalScrollIndicator={false}
     >
 
@@ -373,24 +378,19 @@ export default function OverviewBatch({ session }: any) {
         </TouchableOpacity>
 
 
-        <View style={styles.machineButtonsRow}>
-
-          <TouchableOpacity style={styles.startBtn} onPress={startMachine}>
-            <Text style={styles.controlText}>▶ Start</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.pauseBtn} onPress={pauseMachine}>
-            <Text style={styles.pauseIcon}>||</Text>
-            <Text style={styles.pauseLabel}> Pause</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.stopBtn} onPress={stopMachine}>
-            <Text style={styles.controlText}>■ Stop</Text>
-          </TouchableOpacity>
-
-        </View>
-
       </View>
+
+      <OverviewParameters
+          temperature={temperature}
+          setTemperature={setTemperature}
+          fanSpeed={fanSpeed}
+          setFanSpeed={setFanSpeed}
+          duration={durationInput}
+          setDuration={setDurationInput}
+          startMachine={startMachine}
+          pauseMachine={pauseMachine}
+          stopMachine={stopMachine}
+        />
 
       <View style={styles.card}>
 
@@ -524,6 +524,7 @@ function StatusRow({ label, value }: any) {
 }
 
 const styles = StyleSheet.create({
+
 
   pageTitle:{
     fontSize:20,

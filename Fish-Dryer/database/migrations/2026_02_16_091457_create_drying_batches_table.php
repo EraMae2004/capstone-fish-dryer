@@ -13,11 +13,10 @@ return new class extends Migration
             $table->id();
             $table->foreignId('drying_session_id')->constrained('drying_sessions')->onDelete('cascade');
             $table->integer('tray_number');
+            $table->float('final_moisture')->nullable();
             $table->enum('final_status', ['fully_dried','partially_dried','not_dried'])->nullable();
             $table->timestamps();
         });
-
-
     }
 
     public function down(): void

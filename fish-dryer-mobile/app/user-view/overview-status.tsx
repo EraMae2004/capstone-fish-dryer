@@ -23,14 +23,26 @@ export default function OverviewStatus({
       ? "Stopped"
       : "Idle";
 
+  // ✅ FINAL HARDWARE LIST (MATCHES YOUR SYSTEM EXACTLY)
   const hardwareComponents = [
-    "esp32",
-    "lcd",
-    "fan",
-    "buzzer",
-    "led",
-    "temp_humidity_sensor",
-    "moisture_sensor",
+    { key: "esp32", label: "ESP32 Controller" },
+    { key: "solar_panel", label: "Solar Panel" },
+
+    { key: "heater_fan_1", label: "Heater Fan 1" },
+    { key: "heater_fan_2", label: "Heater Fan 2" },
+    { key: "ventilation_fan", label: "Ventilation Fan" },
+
+    { key: "buzzer", label: "Buzzer" },
+
+    { key: "heater_1", label: "Heater 1" },
+    { key: "heater_2", label: "Heater 2" },
+
+    { key: "led_1", label: "LED 1" },
+    { key: "led_2", label: "LED 2" },
+    { key: "led_3", label: "LED 3" },
+
+    { key: "temp_humidity_sensor", label: "Temperature & Humidity Sensor" },
+    { key: "moisture_sensor", label: "Moisture Sensor" },
   ];
 
   return (
@@ -38,59 +50,67 @@ export default function OverviewStatus({
       {/* OVERVIEW TITLE */}
       <Text style={styles.title}>OVERVIEW</Text>
 
-      {/* STATUS LINE */}
+      {/* STATUS */}
       <View style={styles.statusRow}>
         <Text style={styles.label}>Machine Status:</Text>
         <View style={[styles.dot, { backgroundColor: dotColor }]} />
         <Text style={styles.bold}>{statusText}</Text>
       </View>
 
-      {/* DROPDOWN */}
+      {/* MACHINE NAME */}
       <View style={styles.dropdown}>
         <Text>{machine?.name ?? "No Machine"}</Text>
       </View>
 
-      {/* CURRENT DETAILS */}
+      {/* ✅ CURRENT DETAILS (FIXED) */}
       <View style={styles.card}>
         <Text style={styles.cardHeader}>Current Details</Text>
 
-        {renderRow("Type of Fish", session?.fish_type)}
-        {renderRow("No. of Fish",
-          session?.quantity
-            ? session.quantity + " " + session.quantity_unit
-            : null
-        )}
         {renderRow("Current Temp",
           session?.final_temperature
             ? session.final_temperature + "°C"
             : null
         )}
+
+        {renderRow("Target Temp",
+          session?.target_temperature
+            ? session.target_temperature + "°C"
+            : null
+        )}
+
         {renderRow("Humidity",
           session?.final_humidity
             ? session.final_humidity + "%"
             : null
         )}
+
         {renderRow("Current Moisture",
           session?.final_moisture
             ? session.final_moisture + "%"
             : null
         )}
+
         {renderRow("Fan Speed",
           session?.fan_speed
             ? "Level " + session.fan_speed
             : null
         )}
-        {renderRow("Remaining Time", session?.remaining_time)}
+
+        {renderRow("Drying Time",
+          session?.drying_time_minutes
+            ? session.drying_time_minutes + " mins"
+            : null
+        )}
       </View>
 
-      {/* HARDWARE STATUS — ALWAYS VISIBLE */}
+      {/* ✅ HARDWARE STATUS */}
       <View style={styles.card}>
         <Text style={styles.cardHeader}>Hardware Status</Text>
 
         {hardwareComponents.map((component, index) => {
 
           const found = hardware_statuses?.find(
-            (item: any) => item.component_name === component
+            (item: any) => item.component_name === component.key
           );
 
           const statusValue = found?.status ?? null;
@@ -104,9 +124,7 @@ export default function OverviewStatus({
 
           return (
             <View key={index} style={styles.row}>
-              <Text style={styles.label}>
-                {component.replaceAll("_", " ").toUpperCase()}
-              </Text>
+              <Text style={styles.label}>{component.label}</Text>
 
               <View style={{ flexDirection: "row", alignItems: "center" }}>
                 <View style={[styles.dotSmall, { backgroundColor: color }]} />
@@ -117,9 +135,7 @@ export default function OverviewStatus({
             </View>
           );
         })}
-
       </View>
-
     </ScrollView>
   );
 }
@@ -134,7 +150,6 @@ function renderRow(label: string, value: any) {
 }
 
 const styles = StyleSheet.create({
-
   title: {
     fontSize: 20,
     fontWeight: "700",

@@ -73,9 +73,9 @@ class DryingController extends Controller
 
             return response()->json([
                 'annotated_image' => $data['annotated_image'] ?? null,
+
                 'fish_species' => $data['fish_species'] ?? '--',
                 'fish_counts' => $data['fish_counts'] ?? 0,
-                'duration' => $data['duration'] ?? '--',
 
                 'appearance_display' => $data['appearance_display'] ?? '--',
                 'color_display' => $data['color_display'] ?? '--',
@@ -85,10 +85,11 @@ class DryingController extends Controller
                 'partially_dried' => $data['partially_dried'] ?? 0,
                 'not_dried' => $data['not_dried'] ?? 0,
 
-                'recommendation' => $data['recommendation'] ?? [
-                    'description' => 'No recommendation available.'
-                ]
-
+                // ✅ FIXED STRUCTURE
+                'recommended_temperature' => $data['recommendation']['temperature'] ?? null,
+                'recommended_fan_speed' => $data['recommendation']['fan_speed'] ?? null,
+                'suggested_additional_hours' => $data['recommendation']['time'] ?? null,
+                'recommendation_text' => $data['recommendation']['description'] ?? null,
             ]);
 
         } catch (\Exception $e) {
@@ -99,6 +100,56 @@ class DryingController extends Controller
                 'error' => $e->getMessage()
             ], 500);
 
+        }
+    }
+
+    public function applyRecommendation($captureId)
+    {
+        try {
+            $capture = \App\Models\CaptureSession::findOrFail($captureId);
+
+            $batch = $capture->dryingBatch;
+            $session = $batch->dryingSession;
+
+            // ❗ VALIDATION (important)
+            if (
+                !$capture->recommended_temperature ||
+                !$capture->recommended_fan_speed ||
+                !$capture->suggested_additional_hours
+            ) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No valid recommendation available'
+                ], 400);
+            }
+
+            // Convert hours → minutes
+            $duration = $capture->suggested_additional_hours * 60;
+
+            // Update drying session (CONTROL PANEL AUTO-FILL)
+            $session->update([
+                'target_temperature' => $capture->recommended_temperature,
+                'fan_speed' => $capture->recommended_fan_speed,
+                'set_duration_minutes' => $duration,
+                'recommendation_applied' => true
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Recommendation applied successfully',
+                'data' => [
+                    'temperature' => $capture->recommended_temperature,
+                    'fan_speed' => $capture->recommended_fan_speed,
+                    'duration' => $duration
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to apply recommendation',
+                'error' => $e->getMessage()
+            ], 500);
         }
     }
 

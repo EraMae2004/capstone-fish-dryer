@@ -19,8 +19,6 @@ class Machine extends Model
         'last_used_at' => 'datetime',
     ];
 
-
-
     public function creator()
     {
         return $this->belongsTo(User::class, 'created_by');

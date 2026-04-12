@@ -9,6 +9,7 @@ class DryingBatch extends Model
     protected $fillable = [
         'drying_session_id',
         'tray_number',
+        'final_moisture',
         'final_status',
     ];
 
