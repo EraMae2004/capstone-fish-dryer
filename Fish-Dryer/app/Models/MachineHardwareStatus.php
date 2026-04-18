@@ -19,7 +19,7 @@ class MachineHardwareStatus extends Model
         'last_checked_at' => 'datetime',
     ];
 
-    public function machine()
+    public function microcontroller()
     {
         return $this->belongsTo(Microcontroller::class);
     }

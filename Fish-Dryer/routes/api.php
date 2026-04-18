@@ -15,9 +15,11 @@ Route::post('/ai/analyze', [DryingController::class, 'analyzeBatch']);
 
 
 Route::get('/mobile/overview', [MobileDryingController::class, 'overview']);
+Route::get('/mobile/recommendation', [MobileDryingController::class, 'recommendation']);
 Route::get('/mobile/user/{id}', [MobileAuthController::class, 'getUser']);
 Route::get('/drying-sessions', [MobileDryingController::class, 'index']);
 Route::get('/drying-sessions/{id}', [MobileDryingController::class, 'show']);
+Route::delete('/drying-sessions/{id}', [MobileDryingController::class, 'destroy']);
 Route::post('/mobile/update-profile/{id}', [MobileAuthController::class, 'updateProfile']);
 Route::post('/mobile/change-password/{id}', [MobileAuthController::class, 'changePassword']);
 

@@ -19,20 +19,14 @@ return new class extends Migration
             $table->float('target_temperature')->nullable();
             $table->integer('fan_speed')->nullable();
             $table->integer('set_duration_minutes')->nullable();
-            $table->float('final_temperature')->nullable();
-            $table->float('final_humidity')->nullable();
-            $table->float('final_moisture')->nullable();
             $table->integer('drying_time_minutes')->default(0);
-            $table->integer('extension_minutes')->default(0);
-            $table->enum('status', ['running','paused','extended','completed','stopped','discarded'])->default('running');
+            $table->enum('status', ['running','paused','completed','stopped'])->default('running');
+            $table->enum('final_status', ['fully_dried', 'semi_dried', 'not_dried'])->nullable();
             $table->timestamp('started_at');
             $table->timestamp('ended_at')->nullable();
-            $table->boolean('recommendation_applied')->default(false);
             $table->softDeletes();
             $table->timestamps();
         });
-
-
     }
 
     public function down(): void

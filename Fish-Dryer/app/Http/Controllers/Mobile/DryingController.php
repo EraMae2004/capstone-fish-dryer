@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Mobile;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Carbon;
 use App\Models\Machine;
 use App\Models\DryingSession;
 use App\Models\MachineHardwareStatus;
@@ -14,6 +15,235 @@ use Illuminate\Support\Facades\DB;
 
 class DryingController extends Controller
 {
+    public function index(Request $request)
+    {
+        $range = $request->query('range', '3months');
+        $now = now();
+        $startDate = match ($range) {
+            'weekly' => $now->copy()->subDays(7),
+            'monthly' => $now->copy()->subMonth(),
+            default => $now->copy()->subMonths(3),
+        };
+
+        $sessions = DryingSession::query()
+            ->whereIn('status', ['completed', 'stopped'])
+            ->where(function ($query) use ($startDate) {
+                $query->whereNotNull('ended_at')->where('ended_at', '>=', $startDate)
+                    ->orWhere(function ($sub) use ($startDate) {
+                        $sub->whereNull('ended_at')->where('created_at', '>=', $startDate);
+                    });
+            })
+            ->with(['sensorLogs:id,drying_session_id,temperature,humidity,moisture,fan_speed,recorded_at'])
+            ->latest('ended_at')
+            ->latest('id')
+            ->get();
+
+        $rows = $sessions->map(function (DryingSession $session) {
+            return $this->transformSessionForHistory($session);
+        })->values();
+
+        return response()->json([
+            'range' => $range,
+            'sessions' => $rows,
+            'summary' => [
+                'total_batches' => $rows->count(),
+                'avg_duration_minutes' => round((float) $rows->avg('duration_minutes'), 2),
+                'avg_temperature' => round((float) $rows->avg('avg_temperature'), 2),
+                'avg_humidity' => round((float) $rows->avg('avg_humidity'), 2),
+                'avg_moisture' => round((float) $rows->avg('avg_moisture'), 2),
+            ],
+        ]);
+    }
+
+    public function show(int $id)
+    {
+        $session = DryingSession::with(['sensorLogs:id,drying_session_id,temperature,humidity,moisture,fan_speed,recorded_at'])
+            ->findOrFail($id);
+
+        return response()->json([
+            'data' => $this->transformSessionForHistory($session),
+        ]);
+    }
+
+    public function destroy(int $id)
+    {
+        $session = DryingSession::findOrFail($id);
+        $session->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Drying session deleted successfully.',
+        ]);
+    }
+
+    public function recommendation()
+    {
+        $currentSession = DryingSession::query()
+            ->whereIn('status', ['running', 'paused'])
+            ->latest('started_at')
+            ->first();
+
+        if (!$currentSession) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No active session available for recommendation.',
+            ], 404);
+        }
+
+        $currentLog = $currentSession->sensorLogs()->latest('recorded_at')->first();
+        if (!$currentLog) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No sensor readings available for the active session.',
+            ], 404);
+        }
+
+        $candidates = DryingSession::query()
+            ->where('id', '!=', $currentSession->id)
+            ->where('status', 'completed')
+            ->where('final_status', 'fully_dried')
+            ->with(['sensorLogs:id,drying_session_id,temperature,humidity,moisture,fan_speed,recorded_at'])
+            ->get()
+            ->filter(fn (DryingSession $session) => $session->sensorLogs->isNotEmpty())
+            ->map(function (DryingSession $session) {
+                $logs = $session->sensorLogs;
+                return [
+                    'session' => $session,
+                    'avg_temperature' => (float) ($logs->avg('temperature') ?? 0),
+                    'avg_humidity' => (float) ($logs->avg('humidity') ?? 0),
+                    'avg_moisture' => (float) ($logs->avg('moisture') ?? 0),
+                    'avg_fan_speed' => (float) ($logs->avg('fan_speed') ?? ($session->fan_speed ?? 0)),
+                    'duration_minutes' => (float) ($session->drying_time_minutes ?? $session->set_duration_minutes ?? 0),
+                ];
+            })
+            ->values();
+
+        if ($candidates->isEmpty()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Not enough successful history for KNN recommendation.',
+            ], 404);
+        }
+
+        $currentVector = [
+            (float) $currentLog->temperature,
+            (float) $currentLog->humidity,
+            (float) $currentLog->moisture,
+            (float) ($currentLog->fan_speed ?? $currentSession->fan_speed ?? 0),
+        ];
+
+        // Prefer "successful" sessions, but fall back to any completed sessions if needed.
+        $successful = $candidates->filter(fn (array $c) => ($c['session']->final_status ?? null) === 'fully_dried')->values();
+        $pool = $successful->isNotEmpty() ? $successful : $candidates;
+
+        // Normalize features so distance isn't dominated by units (°C vs % vs fan level).
+        $mins = [
+            't' => (float) $pool->min('avg_temperature'),
+            'h' => (float) $pool->min('avg_humidity'),
+            'm' => (float) $pool->min('avg_moisture'),
+            'f' => (float) $pool->min('avg_fan_speed'),
+        ];
+        $maxs = [
+            't' => (float) $pool->max('avg_temperature'),
+            'h' => (float) $pool->max('avg_humidity'),
+            'm' => (float) $pool->max('avg_moisture'),
+            'f' => (float) $pool->max('avg_fan_speed'),
+        ];
+        $norm = function (float $x, float $min, float $max): float {
+            $range = $max - $min;
+            if ($range <= 0.000001) return 0.0;
+            return ($x - $min) / $range;
+        };
+
+        $currentNorm = [
+            $norm($currentVector[0], $mins['t'], $maxs['t']),
+            $norm($currentVector[1], $mins['h'], $maxs['h']),
+            $norm($currentVector[2], $mins['m'], $maxs['m']),
+            $norm($currentVector[3], $mins['f'], $maxs['f']),
+        ];
+
+        $nearest = $pool
+            ->map(function (array $candidate) use ($currentNorm, $currentSession, $norm, $mins, $maxs) {
+                $fishPenalty = (
+                    !empty($candidate['session']->fish_type) &&
+                    !empty($currentSession->fish_type) &&
+                    strcasecmp($candidate['session']->fish_type, $currentSession->fish_type) !== 0
+                ) ? 5 : 0;
+
+                $candNorm = [
+                    $norm((float) $candidate['avg_temperature'], $mins['t'], $maxs['t']),
+                    $norm((float) $candidate['avg_humidity'], $mins['h'], $maxs['h']),
+                    $norm((float) $candidate['avg_moisture'], $mins['m'], $maxs['m']),
+                    $norm((float) $candidate['avg_fan_speed'], $mins['f'], $maxs['f']),
+                ];
+
+                // Euclidean distance in normalized sensor-feature space (KNN).
+                $distance = sqrt(
+                    (($candNorm[0] - $currentNorm[0]) ** 2) +
+                    (($candNorm[1] - $currentNorm[1]) ** 2) +
+                    (($candNorm[2] - $currentNorm[2]) ** 2) +
+                    (($candNorm[3] - $currentNorm[3]) ** 2)
+                ) + $fishPenalty;
+
+                $candidate['distance'] = $distance;
+                return $candidate;
+            })
+            ->sortBy('distance')
+            ->take(3)
+            ->values();
+
+        $recommendedTemperature = round((float) $nearest->avg('avg_temperature'), 1);
+        $recommendedFanSpeed = (int) max(1, min(5, round((float) $nearest->avg('avg_fan_speed'))));
+        $recommendedDuration = (int) max(1, round((float) $nearest->avg('duration_minutes')));
+
+        return response()->json([
+            'success' => true,
+            'algorithm' => 'KNN',
+            'k' => $nearest->count(),
+            'recommendation' => [
+                'temperature' => $recommendedTemperature,
+                'fan_speed' => $recommendedFanSpeed,
+                'duration_minutes' => $recommendedDuration,
+                'description' => $successful->isNotEmpty()
+                    ? 'Recommended from the nearest successful drying sessions using sensor-based KNN similarity.'
+                    : 'Recommended from the nearest past drying sessions using sensor-based KNN similarity (no labeled successful sessions yet).',
+            ],
+        ]);
+    }
+
+    private function transformSessionForHistory(DryingSession $session): array
+    {
+        $logs = $session->sensorLogs;
+        $lastLog = $logs->last();
+
+        $duration = $session->drying_time_minutes
+            ?? $session->set_duration_minutes
+            ?? (
+                $session->started_at && $session->ended_at
+                    ? Carbon::parse($session->ended_at)->diffInMinutes(Carbon::parse($session->started_at))
+                    : 0
+            );
+
+        return [
+            'id' => $session->id,
+            'session_code' => $session->session_code,
+            'date' => optional($session->ended_at ?? $session->created_at)->toDateTimeString(),
+            'fish_type' => $session->fish_type ?? 'Unknown',
+            'status' => $session->status,
+            'duration_minutes' => (int) ($duration ?? 0),
+            'temperature' => $lastLog?->temperature !== null ? (float) $lastLog->temperature : null,
+            'humidity' => $lastLog?->humidity !== null ? (float) $lastLog->humidity : null,
+            'moisture' => $lastLog?->moisture !== null ? (float) $lastLog->moisture : null,
+            'fan_speed' => $lastLog?->fan_speed ?? $session->fan_speed,
+            'avg_temperature' => round((float) ($logs->avg('temperature') ?? 0), 2),
+            'avg_humidity' => round((float) ($logs->avg('humidity') ?? 0), 2),
+            'avg_moisture' => round((float) ($logs->avg('moisture') ?? 0), 2),
+            'avg_fan_speed' => round((float) ($logs->avg('fan_speed') ?? ($session->fan_speed ?? 0)), 2),
+            'started_at' => optional($session->started_at)->toDateTimeString(),
+            'ended_at' => optional($session->ended_at)->toDateTimeString(),
+        ];
+    }
+
     public function overview()
     {
         $machine = Machine::first();

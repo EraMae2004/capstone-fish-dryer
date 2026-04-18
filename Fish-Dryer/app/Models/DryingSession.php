@@ -3,7 +3,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
-use App\Models\DryingBatch;
+
 
 class DryingSession extends Model
 {
@@ -13,43 +13,26 @@ class DryingSession extends Model
         'session_code',
         'microcontroller_id',
         'user_id',
-
         'fish_type',
         'total_fish',
-
-        // CONTROL PANEL
         'target_temperature',
         'fan_speed',
         'set_duration_minutes',
-
-        // FINAL SNAPSHOT
-        'final_temperature',
-        'final_humidity',
-        'final_moisture',
-
         'drying_time_minutes',
-        'extension_minutes',
-        
-
         'status',
+        'final_status',
         'started_at',
         'ended_at',
-        'recommendation_applied',
     ];
 
     protected $casts = [
         'started_at' => 'datetime',
         'ended_at' => 'datetime',
-
-
         'target_temperature' => 'float',
-        'final_temperature' => 'float',
-        'final_humidity' => 'float',
-        'final_moisture' => 'float',
-        'recommendation_applied' => 'boolean',
+        'final_status' => 'string',
     ];
 
-    public function machine()
+    public function microcontroller()
     {
         return $this->belongsTo(Microcontroller::class);
     }
@@ -59,11 +42,6 @@ class DryingSession extends Model
         return $this->belongsTo(User::class);
     }
 
-    public function dryingBatches()
-    {
-        return $this->hasMany(DryingBatch::class);
-    }
-
     public function notifications()
     {
         return $this->hasMany(Notification::class);
@@ -71,6 +49,13 @@ class DryingSession extends Model
 
     public function sensorLogs()
     {
-        return $this->hasMany(SensorLog::class); // ✅ NEW
+        return $this->hasMany(SensorLog::class)->orderBy('recorded_at');
+    }
+
+    public function latestLogs()
+    {
+        return $this->hasMany(SensorLog::class)
+            ->latest('recorded_at')
+            ->limit(5);
     }
 }

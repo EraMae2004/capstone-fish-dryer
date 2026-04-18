@@ -33,9 +33,9 @@ class User extends Authenticatable
         'birthdate' => 'date',
     ];
 
-    public function machines()
+    public function microcontroller()
     {
-        return $this->hasMany(Microcontroller::class, 'created_by');
+        return $this->belongsTo(Microcontroller::class);
     }
 
     public function dryingSessions()

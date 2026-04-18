@@ -23,87 +23,76 @@ export default function OverviewStatus({
       ? "Stopped"
       : "Idle";
 
-  // ✅ FINAL HARDWARE LIST (MATCHES YOUR SYSTEM EXACTLY)
-  const hardwareComponents = [
-    { key: "esp32", label: "ESP32 Controller" },
-    { key: "solar_panel", label: "Solar Panel" },
+  const latestLog =
+    session?.sensor_logs?.[session.sensor_logs.length - 1];
 
+  const remainingTime =
+    session?.set_duration_minutes && session?.drying_time_minutes
+      ? session.set_duration_minutes - session.drying_time_minutes
+      : null;
+
+  const hardwareComponents = [
+    { key: "esp32", label: "ESP32" },
+    { key: "solar_panel", label: "Solar Panel" },
     { key: "heater_fan_1", label: "Heater Fan 1" },
     { key: "heater_fan_2", label: "Heater Fan 2" },
     { key: "ventilation_fan", label: "Ventilation Fan" },
-
     { key: "buzzer", label: "Buzzer" },
-
     { key: "heater_1", label: "Heater 1" },
     { key: "heater_2", label: "Heater 2" },
-
     { key: "led_1", label: "LED 1" },
     { key: "led_2", label: "LED 2" },
     { key: "led_3", label: "LED 3" },
-
-    { key: "temp_humidity_sensor", label: "Temperature & Humidity Sensor" },
+    { key: "temp_humidity_sensor", label: "Temp & Humidity Sensor" },
     { key: "moisture_sensor", label: "Moisture Sensor" },
   ];
 
   return (
     <ScrollView>
-      {/* OVERVIEW TITLE */}
+
       <Text style={styles.title}>OVERVIEW</Text>
 
-      {/* STATUS */}
       <View style={styles.statusRow}>
         <Text style={styles.label}>Machine Status:</Text>
         <View style={[styles.dot, { backgroundColor: dotColor }]} />
         <Text style={styles.bold}>{statusText}</Text>
       </View>
 
-      {/* MACHINE NAME */}
       <View style={styles.dropdown}>
         <Text>{machine?.name ?? "No Machine"}</Text>
       </View>
 
-      {/* ✅ CURRENT DETAILS (FIXED) */}
       <View style={styles.card}>
         <Text style={styles.cardHeader}>Current Details</Text>
 
+        {renderRow("Type of Fish", session?.fish_type)}
+        {renderRow("No. of Fish", session?.total_fish)}
+
         {renderRow("Current Temp",
-          session?.final_temperature
-            ? session.final_temperature + "°C"
-            : null
+          latestLog?.temperature ? latestLog.temperature + "°C" : null
         )}
 
         {renderRow("Target Temp",
-          session?.target_temperature
-            ? session.target_temperature + "°C"
-            : null
+          session?.target_temperature ? session.target_temperature + "°C" : null
         )}
 
         {renderRow("Humidity",
-          session?.final_humidity
-            ? session.final_humidity + "%"
-            : null
+          latestLog?.humidity ? latestLog.humidity + "%" : null
         )}
 
         {renderRow("Current Moisture",
-          session?.final_moisture
-            ? session.final_moisture + "%"
-            : null
+          latestLog?.moisture ? latestLog.moisture + "%" : null
         )}
 
         {renderRow("Fan Speed",
-          session?.fan_speed
-            ? "Level " + session.fan_speed
-            : null
+          session?.fan_speed ? "Level " + session.fan_speed : null
         )}
 
-        {renderRow("Drying Time",
-          session?.drying_time_minutes
-            ? session.drying_time_minutes + " mins"
-            : null
+        {renderRow("Remaining Time",
+          remainingTime ? remainingTime + " mins" : null
         )}
       </View>
 
-      {/* ✅ HARDWARE STATUS */}
       <View style={styles.card}>
         <Text style={styles.cardHeader}>Hardware Status</Text>
 
@@ -136,6 +125,7 @@ export default function OverviewStatus({
           );
         })}
       </View>
+
     </ScrollView>
   );
 }
@@ -154,7 +144,6 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: "700",
     marginBottom: 15,
-    color: "#1f2d3d",
   },
 
   statusRow: {
@@ -164,13 +153,8 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
 
-  label: {
-    color: "#444",
-  },
-
-  bold: {
-    fontWeight: "600",
-  },
+  label: { color: "#444" },
+  bold: { fontWeight: "600" },
 
   dot: {
     width: 8,
@@ -199,7 +183,6 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 15,
     marginBottom: 20,
-    elevation: 2,
   },
 
   cardHeader: {

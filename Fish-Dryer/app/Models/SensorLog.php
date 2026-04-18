@@ -7,13 +7,15 @@ use Illuminate\Database\Eloquent\Model;
 
 class SensorLog extends Model
 {
+    const CREATED_AT = 'recorded_at';
+    const UPDATED_AT = null;
+
     protected $fillable = [
         'drying_session_id',
         'temperature',
         'humidity',
         'moisture',
         'fan_speed',
-        'power_source',
         'recorded_at',
     ];
 

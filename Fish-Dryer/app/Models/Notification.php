@@ -20,7 +20,7 @@ class Notification extends Model
         'is_read' => 'boolean',
     ];
 
-    public function machine()
+    public function microcontroller()
     {
         return $this->belongsTo(Microcontroller::class);
     }

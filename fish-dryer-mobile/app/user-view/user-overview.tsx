@@ -1,18 +1,26 @@
-//user-overview.tsx
-
 import React, { useEffect, useState } from "react";
 import { View, TouchableOpacity, Text, StyleSheet, ActivityIndicator } from "react-native";
 import OverviewStatus from "./overview-status";
-import OverviewControlPanel from "./overview-batch";
+import OverviewParameters from "./overview-parameters";
 import { API_BASE_URL } from "@/config/api";
 
-
 export default function UserOverview() {
+
+  // ✅ DEFAULT = PARAMETERS
   const [activeTab, setActiveTab] = useState<"status" | "control">("control");
+
   const [machine, setMachine] = useState<any>(null);
   const [session, setSession] = useState<any>(null);
   const [hardwareStatuses, setHardwareStatuses] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // PARAMETERS STATE
+  const [fishType, setFishType] = useState("");
+  const [totalFish, setTotalFish] = useState("");
+  const [temperature, setTemperature] = useState("");
+  const [fanSpeed, setFanSpeed] = useState("");
+  const [duration, setDuration] = useState("");
+  const [recommendation, setRecommendation] = useState<any>(null);
 
   useEffect(() => {
     fetchOverview();
@@ -20,20 +28,40 @@ export default function UserOverview() {
 
   const fetchOverview = async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/mobile/overview`, {
-        headers: {
-          Accept: "application/json"
-        }
+      const res = await fetch(`${API_BASE_URL}/mobile/overview`, {
+        headers: { Accept: "application/json" }
       });
+
       const data = await res.json();
+
       setMachine(data.machine);
       setSession(data.session);
       setHardwareStatuses(data.hardware_statuses);
+
+      const recRes = await fetch(`${API_BASE_URL}/mobile/recommendation`, {
+        headers: { Accept: "application/json" }
+      });
+      const recData = await recRes.json();
+      if (recData?.success) {
+        setRecommendation(recData.recommendation);
+      }
+
     } catch (err) {
       console.log(err);
     } finally {
       setLoading(false);
     }
+  };
+
+  // MACHINE ACTIONS (CONNECT TO API LATER)
+  const startMachine = () => {};
+  const pauseMachine = () => {};
+  const stopMachine = () => {};
+  const applyRecommendation = () => {
+    if (!recommendation) return;
+    setTemperature(String(recommendation.temperature ?? ""));
+    setFanSpeed(String(recommendation.fan_speed ?? ""));
+    setDuration(String(recommendation.duration_minutes ?? ""));
   };
 
   if (loading) {
@@ -46,6 +74,7 @@ export default function UserOverview() {
 
   return (
     <View style={{ flex: 1, paddingBottom: 70 }}>
+
       <View style={{ flex: 1 }}>
         {activeTab === "status" ? (
           <OverviewStatus
@@ -54,12 +83,30 @@ export default function UserOverview() {
             hardware_statuses={hardwareStatuses}
           />
         ) : (
-          <OverviewControlPanel
-            session={session}
+          <OverviewParameters
+            fishType={fishType}
+            setFishType={setFishType}
+            totalFish={totalFish}
+            setTotalFish={setTotalFish}
+            temperature={temperature}
+            setTemperature={setTemperature}
+            fanSpeed={fanSpeed}
+            setFanSpeed={setFanSpeed}
+            duration={duration}
+            setDuration={setDuration}
+            startMachine={startMachine}
+            pauseMachine={pauseMachine}
+            stopMachine={stopMachine}
+            machineStatus={session?.status ?? machine?.status ?? "idle"}
+            machineName={machine?.name ?? "Machine"}
+            timer={session?.drying_time_minutes ? `${session.drying_time_minutes} mins` : "--"}
+            recommendation={recommendation}
+            applyRecommendation={applyRecommendation}
           />
         )}
       </View>
 
+      {/* ✅ KEEP BUTTONS */}
       <View style={styles.bottomNav}>
         <TouchableOpacity
           style={[styles.navBtn, activeTab === "status" && styles.active]}
@@ -75,12 +122,18 @@ export default function UserOverview() {
           <Text style={styles.navText}>Control Panel</Text>
         </TouchableOpacity>
       </View>
+
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  center: { flex: 1, justifyContent: "center", alignItems: "center" },
+  center: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center"
+  },
+
   bottomNav: {
     flexDirection: "row",
     backgroundColor: "#3a5166",
@@ -89,7 +142,19 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
   },
-  navBtn: { flex: 1, padding: 18, alignItems: "center" },
-  active: { backgroundColor: "#2f4456" },
-  navText: { color: "#fff", fontWeight: "600" }
+
+  navBtn: {
+    flex: 1,
+    padding: 18,
+    alignItems: "center"
+  },
+
+  active: {
+    backgroundColor: "#2f4456"
+  },
+
+  navText: {
+    color: "#fff",
+    fontWeight: "600"
+  }
 });

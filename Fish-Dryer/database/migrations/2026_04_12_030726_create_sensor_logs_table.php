@@ -14,17 +14,11 @@ return new class extends Migration
         Schema::create('sensor_logs', function (Blueprint $table) {
             $table->id();
             $table->foreignId('drying_session_id')->constrained('drying_sessions')->onDelete('cascade');
-
             $table->float('temperature');
             $table->float('humidity');
             $table->float('moisture');
             $table->integer('fan_speed');
-
-            // POWER SOURCE (IMPORTANT)
-            $table->enum('power_source', ['grid', 'solar'])->default('grid');
-
             $table->timestamp('recorded_at');
-            $table->timestamps();
         });
     }
 
