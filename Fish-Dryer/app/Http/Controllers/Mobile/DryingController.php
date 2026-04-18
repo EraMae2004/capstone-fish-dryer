@@ -76,22 +76,31 @@ class DryingController extends Controller
         ]);
     }
 
-    public function recommendation()
+    public function recommendation(Request $request)
     {
         $currentSession = DryingSession::query()
-            ->whereIn('status', ['running', 'paused'])
+            ->whereIn('status', ['running', 'paused', 'completed'])
             ->latest('started_at')
             ->first();
 
-        if (!$currentSession) {
+        $inputFishType = trim((string) $request->query('fish_type', ''));
+        $inputTemperature = $request->query('temperature');
+        $inputHumidity = $request->query('humidity');
+        $inputMoisture = $request->query('moisture');
+        $inputFanSpeed = $request->query('fan_speed');
+        $inputElapsedMinutes = $request->query('elapsed_minutes');
+
+        $hasInputVector = $inputTemperature !== null || $inputHumidity !== null || $inputMoisture !== null || $inputFanSpeed !== null;
+
+        if (!$currentSession && !$hasInputVector) {
             return response()->json([
                 'success' => false,
-                'message' => 'No active session available for recommendation.',
+                'message' => 'No active session or input data available for recommendation.',
             ], 404);
         }
 
-        $currentLog = $currentSession->sensorLogs()->latest('recorded_at')->first();
-        if (!$currentLog) {
+        $currentLog = $currentSession?->sensorLogs()->latest('recorded_at')->first();
+        if (!$currentLog && !$hasInputVector) {
             return response()->json([
                 'success' => false,
                 'message' => 'No sensor readings available for the active session.',
@@ -126,10 +135,10 @@ class DryingController extends Controller
         }
 
         $currentVector = [
-            (float) $currentLog->temperature,
-            (float) $currentLog->humidity,
-            (float) $currentLog->moisture,
-            (float) ($currentLog->fan_speed ?? $currentSession->fan_speed ?? 0),
+            (float) ($inputTemperature ?? $currentLog?->temperature ?? $currentSession?->target_temperature ?? 0),
+            (float) ($inputHumidity ?? $currentLog?->humidity ?? 0),
+            (float) ($inputMoisture ?? $currentLog?->moisture ?? 0),
+            (float) ($inputFanSpeed ?? $currentLog?->fan_speed ?? $currentSession?->fan_speed ?? 0),
         ];
 
         // Prefer "successful" sessions, but fall back to any completed sessions if needed.
@@ -163,11 +172,12 @@ class DryingController extends Controller
         ];
 
         $nearest = $pool
-            ->map(function (array $candidate) use ($currentNorm, $currentSession, $norm, $mins, $maxs) {
+            ->map(function (array $candidate) use ($currentNorm, $currentSession, $inputFishType, $norm, $mins, $maxs) {
+                $activeFishType = $inputFishType !== '' ? $inputFishType : ($currentSession?->fish_type ?? '');
                 $fishPenalty = (
                     !empty($candidate['session']->fish_type) &&
-                    !empty($currentSession->fish_type) &&
-                    strcasecmp($candidate['session']->fish_type, $currentSession->fish_type) !== 0
+                    !empty($activeFishType) &&
+                    strcasecmp($candidate['session']->fish_type, $activeFishType) !== 0
                 ) ? 5 : 0;
 
                 $candNorm = [
@@ -195,18 +205,32 @@ class DryingController extends Controller
         $recommendedTemperature = round((float) $nearest->avg('avg_temperature'), 1);
         $recommendedFanSpeed = (int) max(1, min(5, round((float) $nearest->avg('avg_fan_speed'))));
         $recommendedDuration = (int) max(1, round((float) $nearest->avg('duration_minutes')));
+        $elapsedMinutes = (int) (
+            $inputElapsedMinutes
+            ?? $currentSession?->drying_time_minutes
+            ?? 0
+        );
+        $targetDuration = (int) ($currentSession?->set_duration_minutes ?? 0);
+        $needsExtension = $targetDuration > 0 && $elapsedMinutes >= $targetDuration;
+        $extensionMinutes = $needsExtension ? (int) max(5, $recommendedDuration - $elapsedMinutes) : 0;
 
         return response()->json([
             'success' => true,
             'algorithm' => 'KNN',
             'k' => $nearest->count(),
+            'needs_extension' => $needsExtension,
             'recommendation' => [
                 'temperature' => $recommendedTemperature,
                 'fan_speed' => $recommendedFanSpeed,
                 'duration_minutes' => $recommendedDuration,
-                'description' => $successful->isNotEmpty()
-                    ? 'Recommended from the nearest successful drying sessions using sensor-based KNN similarity.'
-                    : 'Recommended from the nearest past drying sessions using sensor-based KNN similarity (no labeled successful sessions yet).',
+                'extension_minutes' => $extensionMinutes,
+                'description' => $needsExtension
+                    ? "Drying time finished. KNN recommends extending by {$extensionMinutes} minute(s) with updated parameters."
+                    : (
+                        $successful->isNotEmpty()
+                            ? 'Recommended from the nearest successful drying sessions using sensor-based KNN similarity.'
+                            : 'Recommended from the nearest past drying sessions using sensor-based KNN similarity (no labeled successful sessions yet).'
+                    ),
             ],
         ]);
     }

@@ -21,10 +21,18 @@ export default function UserOverview() {
   const [fanSpeed, setFanSpeed] = useState("");
   const [duration, setDuration] = useState("");
   const [recommendation, setRecommendation] = useState<any>(null);
+  const [needsExtension, setNeedsExtension] = useState(false);
 
   useEffect(() => {
     fetchOverview();
   }, []);
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      fetchRecommendation();
+    }, 350);
+    return () => clearTimeout(timeout);
+  }, [fishType, temperature, fanSpeed, duration]);
 
   const fetchOverview = async () => {
     try {
@@ -37,19 +45,34 @@ export default function UserOverview() {
       setMachine(data.machine);
       setSession(data.session);
       setHardwareStatuses(data.hardware_statuses);
-
-      const recRes = await fetch(`${API_BASE_URL}/mobile/recommendation`, {
-        headers: { Accept: "application/json" }
-      });
-      const recData = await recRes.json();
-      if (recData?.success) {
-        setRecommendation(recData.recommendation);
-      }
+      fetchRecommendation(data.session);
 
     } catch (err) {
       console.log(err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchRecommendation = async (sessionOverride?: any) => {
+    try {
+      const activeSession = sessionOverride ?? session;
+      const elapsed = Number(activeSession?.drying_time_minutes ?? 0);
+      const params = new URLSearchParams();
+      if (fishType) params.append("fish_type", fishType);
+      if (temperature) params.append("temperature", temperature);
+      if (fanSpeed) params.append("fan_speed", fanSpeed);
+      params.append("elapsed_minutes", String(elapsed));
+
+      const url = `${API_BASE_URL}/mobile/recommendation?${params.toString()}`;
+      const recRes = await fetch(url, { headers: { Accept: "application/json" } });
+      const recData = await recRes.json();
+      if (recData?.success) {
+        setRecommendation(recData.recommendation);
+        setNeedsExtension(Boolean(recData.needs_extension));
+      }
+    } catch (err) {
+      console.log(err);
     }
   };
 
@@ -61,7 +84,10 @@ export default function UserOverview() {
     if (!recommendation) return;
     setTemperature(String(recommendation.temperature ?? ""));
     setFanSpeed(String(recommendation.fan_speed ?? ""));
-    setDuration(String(recommendation.duration_minutes ?? ""));
+    const autoDuration = needsExtension
+      ? (recommendation.extension_minutes ?? recommendation.duration_minutes ?? "")
+      : (recommendation.duration_minutes ?? "");
+    setDuration(String(autoDuration));
   };
 
   if (loading) {
