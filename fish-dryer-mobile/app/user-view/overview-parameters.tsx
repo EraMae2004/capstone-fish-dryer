@@ -1,5 +1,6 @@
 import React from "react";
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView } from "react-native";
+import { userTypography } from "./userTypography";
 
 export default function OverviewParameters({
   fishType,
@@ -41,7 +42,7 @@ export default function OverviewParameters({
         </View>
 
         <TouchableOpacity style={styles.machineDropdown}>
-          <Text>{machineName || "Select Machine"} ▼</Text>
+          <Text style={styles.dropdownValue}>{machineName || "Select Machine"} ▼</Text>
         </TouchableOpacity>
       </View>
 
@@ -212,8 +213,7 @@ export default function OverviewParameters({
 const styles = StyleSheet.create({
 
   pageTitle:{
-    fontSize:20,
-    fontWeight:"700",
+    ...userTypography.pageTitle,
     marginBottom:15,
     color:"#1f3c5c"
   },
@@ -223,7 +223,7 @@ const styles = StyleSheet.create({
   },
 
   machineStatus:{
-    fontWeight:"600"
+    ...userTypography.bodyStrong,
   },
 
   greenDot:{
@@ -239,6 +239,10 @@ const styles = StyleSheet.create({
     marginBottom:20
   },
 
+  dropdownValue: {
+    ...userTypography.body,
+  },
+
   statusRowHeader:{
     flexDirection:"row",
     justifyContent:"space-between",
@@ -247,8 +251,7 @@ const styles = StyleSheet.create({
   },
 
   timerText:{
-    fontSize:15,
-    fontWeight:"700",
+    ...userTypography.emphasis,
     color:"#1f3c5c"
   },
 
@@ -261,8 +264,7 @@ const styles = StyleSheet.create({
   },
 
   cardTitle: {
-    fontSize: 16,
-    fontWeight: "700",
+    ...userTypography.cardTitle,
     marginBottom: 14,
     color: "#1f3c5c",
   },
@@ -274,6 +276,7 @@ const styles = StyleSheet.create({
     borderColor: "#ccc",
     padding: 12,
     minHeight: 48,
+    ...userTypography.body,
   },
 
   formField: {
@@ -300,7 +303,7 @@ const styles = StyleSheet.create({
     position:"absolute",
     right:12,
     top:12,
-    fontWeight:"600",
+    ...userTypography.bodyStrong,
     color:"#555"
   },
 
@@ -315,7 +318,7 @@ const styles = StyleSheet.create({
   },
 
   dropdownText:{
-    fontWeight:"600",
+    ...userTypography.bodyStrong,
     color:"#555"
   },
 
@@ -339,7 +342,7 @@ const styles = StyleSheet.create({
 
   dropdownItemText:{
     textAlign:"center",
-    fontWeight:"600"
+    ...userTypography.bodyStrong,
   },
 
   buttonRow: {
@@ -378,12 +381,13 @@ const styles = StyleSheet.create({
 
   btnText: {
     color: "#fff",
-    fontWeight: "600",
+    ...userTypography.bodyStrong,
   },
 
   recommendationText:{
     textAlign:"center",
     marginVertical:20,
+    ...userTypography.body,
     color:"#555"
   },
 
@@ -396,7 +400,8 @@ const styles = StyleSheet.create({
 
   applyText:{
     color:"#fff",
-    fontWeight:"700"
+    ...userTypography.bodyStrong,
+    fontWeight: "700",
   }
 
 });

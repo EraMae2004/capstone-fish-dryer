@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -12,31 +12,28 @@ import {
 import { FontAwesome } from '@expo/vector-icons';
 import { Stack } from 'expo-router';
 import { API_BASE_URL } from "@/config/api";
-import UserGraph from "./user-graph";
-
-type RangeFilter = 'weekly' | 'monthly' | '3months';
+import UserGraph from './user-graph';
+import { userTypography } from "./userTypography";
 
 export default function UserHistory() {
 
   const [sessions, setSessions] = useState<any[]>([]);
-  const [summary, setSummary] = useState<any>(null);
-  const [range, setRange] = useState<RangeFilter>('3months');
   const [selectedSession, setSelectedSession] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
+  const [range, setRange] = useState<'weekly' | 'monthly' | '3months'>('weekly');
 
   useEffect(() => {
     fetchHistory();
-  }, [range]);
+  }, []);
 
   const fetchHistory = async () => {
     try {
       setLoading(true);
-      const res = await fetch(`${API_BASE_URL}/drying-sessions?range=${range}`);
+      const res = await fetch(`${API_BASE_URL}/drying-sessions`);
       const data = await res.json();
 
       const rows = data?.sessions ?? data?.data ?? data ?? [];
       setSessions(Array.isArray(rows) ? rows : []);
-      setSummary(data?.summary ?? null);
 
     } catch (error) {
       console.log(error);
@@ -44,6 +41,25 @@ export default function UserHistory() {
       setLoading(false);
     }
   };
+
+  const filteredSessions = useMemo(() => {
+    if (!Array.isArray(sessions) || sessions.length === 0) return [];
+    const now = new Date();
+    const days =
+      range === 'weekly' ? 7 :
+      range === 'monthly' ? 30 :
+      90;
+    const start = new Date(now);
+    start.setDate(now.getDate() - days);
+
+    return sessions.filter((s) => {
+      const raw = s?.date ?? s?.ended_at ?? s?.created_at;
+      if (!raw) return false;
+      const d = new Date(raw);
+      if (Number.isNaN(d.getTime())) return false;
+      return d >= start && d <= now;
+    });
+  }, [sessions, range]);
 
   const handleViewDetails = async (id: number) => {
     try {
@@ -91,8 +107,12 @@ export default function UserHistory() {
       <Text style={styles.title}>History</Text>
 
       <ScrollView style={styles.container}>
-
-        <UserGraph sessions={sessions} summary={summary} range={range} onChangeRange={setRange} />
+        <UserGraph
+          sessions={filteredSessions}
+          summary={{ total_batches: filteredSessions.length }}
+          range={range}
+          onChangeRange={setRange}
+        />
 
         {/* TABLE HEADER */}
         <View style={styles.tableHeader}>
@@ -155,8 +175,7 @@ const styles = StyleSheet.create({
   },
 
   title: {
-    fontSize: 22,
-    fontWeight: '700',
+    ...userTypography.pageTitle,
     marginBottom: 20,
     color: '#1f3b57'
   },
@@ -168,8 +187,8 @@ const styles = StyleSheet.create({
   },
 
   headerText: {
-    fontWeight: '700',
-    fontSize: 12
+    ...userTypography.tableHeader,
+    color: '#1f3b57'
   },
 
   row: {
@@ -183,7 +202,7 @@ const styles = StyleSheet.create({
   },
 
   cell: {
-    fontSize: 12
+    ...userTypography.tableCell,
   },
 
   loader: {
@@ -211,14 +230,13 @@ const styles = StyleSheet.create({
   },
 
   modalTitle: {
-    fontSize: 18,
-    fontWeight: '700',
+    ...userTypography.cardTitle,
     marginBottom: 10,
     color: '#1f3b57'
   },
 
   detailRow: {
-    fontSize: 13,
+    ...userTypography.tableCell,
     marginBottom: 6,
     color: '#334155'
   },
@@ -233,7 +251,7 @@ const styles = StyleSheet.create({
 
   closeText: {
     color: '#fff',
-    fontWeight: '600'
+    ...userTypography.bodyStrong,
   }
 
 });

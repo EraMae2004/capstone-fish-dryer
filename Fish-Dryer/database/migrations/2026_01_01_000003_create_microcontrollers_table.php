@@ -11,6 +11,7 @@ return new class extends Migration
         Schema::create('microcontrollers', function (Blueprint $table) {
             $table->id();
             $table->string('device_id')->unique();
+            $table->string('display_name')->nullable();
             $table->timestamp('last_seen')->nullable();
             $table->foreignId('created_by')->constrained('users')->onDelete('cascade');
             $table->timestamps();

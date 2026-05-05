@@ -3,18 +3,770 @@
 namespace App\Http\Controllers\Mobile;
 
 use App\Http\Controllers\Controller;
+use App\Services\FirebaseRealtimeService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Carbon;
-use App\Models\Machine;
+use App\Models\Microcontroller;
 use App\Models\DryingSession;
 use App\Models\MachineHardwareStatus;
+use App\Models\Notification;
+use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 
 
 class DryingController extends Controller
 {
+    /**
+     * Heartbeat + detect use the same recency window so the app doesn't "lose" boards
+     * during short WiFi drops while still marking long-absent boards offline.
+     */
+    /** Heartbeat recency for "online" — wider window helps flaky campus Wi‑Fi / ESP reboots. */
+    private const ONLINE_LAST_SEEN_MINUTES = 180;
+
+    private function machineDisplayName(Microcontroller $machine): string
+    {
+        $display = trim((string) ($machine->display_name ?? ''));
+        return $display !== '' ? $display : (string) $machine->device_id;
+    }
+
+    /**
+     * Canonical component_name values we persist (must stay within DB enum).
+     *
+     * @return list<string>
+     */
+    private function canonicalHardwareComponentKeys(): array
+    {
+        return [
+            'esp32',
+            'solar_panel',
+            'heater_fan_1',
+            'heater_fan_2',
+            'ventilation_fan',
+            'heater_1',
+            'heater_2',
+            'buzzer',
+            'led_1',
+            'led_2',
+            'led_3',
+            'temp_humidity_sensor',
+            'moisture_sensor_1',
+            'moisture_sensor_2',
+        ];
+    }
+
+    private function coerceComponentStatus(mixed $status): string
+    {
+        if (is_bool($status)) {
+            return $status ? 'working' : 'not_working';
+        }
+        if (is_int($status) || is_float($status)) {
+            // Only treat binary 0/1 as hardware flags. Numeric telemetry (e.g. 32.4) must NOT become "working".
+            $n = (float) $status;
+            if (abs($n) <= 0.000001) {
+                return 'not_working';
+            }
+            if (abs($n - 1.0) <= 0.000001) {
+                return 'working';
+            }
+
+            return 'not_working';
+        }
+        if (is_array($status)) {
+            // Never infer "working" from arbitrary nested structures.
+            return 'not_working';
+        }
+
+        $value = strtolower(trim((string) $status));
+
+        return match ($value) {
+            'working', 'ok', 'on', 'online', 'connected', 'active', 'true', '1', 'yes', 'up', 'good', 'present', 'detected' => 'working',
+            'warning', 'warn', 'degraded' => 'warning',
+            'not_working', 'off', 'false', '0', 'no', 'error', 'fail', 'failed', 'disconnected', 'bad', 'offline', 'down', 'absent', 'missing' => 'not_working',
+            // Never guess "working" for unknown strings — that makes the UI look random/wrong.
+            default => 'not_working',
+        };
+    }
+
+    /**
+     * Map arbitrary ESP / frontend labels to a canonical DB component_name, or null if unknown.
+     */
+    private function normalizeHardwareComponentKey(string $raw): ?string
+    {
+        $key = strtolower((string) preg_replace('/[^a-z0-9]+/i', '_', trim($raw)));
+        $key = trim($key, '_');
+
+        $allowed = [
+            'esp32',
+            'solar_panel',
+            'heater_fan_1',
+            'heater_fan_2',
+            'ventilation_fan',
+            'heater_1',
+            'heater_2',
+            'buzzer',
+            'led_1',
+            'led_2',
+            'led_3',
+            'led_drying',
+            'led_pause',
+            'led_stop',
+            'temp_humidity_sensor',
+            'moisture_sensor',
+            'moisture_sensor_1',
+            'moisture_sensor_2',
+        ];
+
+        return match ($key) {
+            'esp32', 'esp_32', 'esp', 'controller', 'mcu', 'microcontroller' => 'esp32',
+
+            'solar_panel', 'solar', 'solarpanel', 'pv', 'panel', 'solar_panel_module' => 'solar_panel',
+
+            'buzzer', 'buzz', 'beep', 'beeper' => 'buzzer',
+
+            'heater_1', 'heater1', 'h1', 'heat1', 'heating_1', 'heating1', 'relay_1', 'relay1', 'rly1', 'ssr1' => 'heater_1',
+            'heater_2', 'heater2', 'h2', 'heat2', 'heating_2', 'heating2', 'relay_2', 'relay2', 'rly2', 'ssr2' => 'heater_2',
+
+            'heater_fan_1', 'fan1', 'fan_1', 'hf1', 'h_fan_1', 'drying_fan_1', 'hot_fan_1' => 'heater_fan_1',
+            'heater_fan_2', 'fan2', 'fan_2', 'hf2', 'h_fan_2', 'drying_fan_2', 'hot_fan_2' => 'heater_fan_2',
+            'ventilation_fan', 'fan3', 'fan_3', 'vf', 'vent_fan', 'exhaust', 'exhaust_fan', 'cooling_fan', 'vent_fan_1' => 'ventilation_fan',
+
+            'led_1', 'led1', 'led_drying', 'drying_led' => 'led_1',
+            'led_2', 'led2', 'led_pause', 'pause_led' => 'led_2',
+            'led_3', 'led3', 'led_stop', 'stop_led' => 'led_3',
+
+            'temp_humidity_sensor', 'dht22', 'dht11', 'dht', 'dht_22', 'dht_11',
+            'temperature_and_humidity_sensor', 'temp_sensor', 'humidity_sensor', 'temperature_sensor',
+            'temp_humidity', 'rh_temp', 'ambient', 'env_sensor' => 'temp_humidity_sensor',
+
+            'moisture_sensor_1', 'moisture1', 'moisture_1', 'loadcell1', 'loadcell_1', 'load_cell_1',
+            'lc1', 'hx711_1', 'hx711a', 'weight_1', 'scale_1' => 'moisture_sensor_1',
+            'moisture_sensor_2', 'moisture2', 'moisture_2', 'loadcell2', 'loadcell_2', 'load_cell_2',
+            'lc2', 'hx711_2', 'hx711b', 'weight_2', 'scale_2' => 'moisture_sensor_2',
+
+            'moisture_sensor', 'loadcell', 'hx711', 'weight', 'scale' => 'moisture_sensor_1',
+
+            default => in_array($key, $allowed, true) ? $key : null,
+        };
+    }
+
+    /**
+     * @return array<string, string> canonical component_name => working|warning|not_working
+     */
+    private function parseHeartbeatComponentPayload(mixed $incoming): array
+    {
+        if ($incoming === null) {
+            return [];
+        }
+        if (is_string($incoming)) {
+            $trim = trim($incoming);
+            if ($trim === '') {
+                return [];
+            }
+            // Double-encoded JSON string: "\"{\\\"heater_1\\\":\\\"ok\\\"}\""
+            if ($trim[0] === '"' && str_ends_with($trim, '"')) {
+                $once = json_decode($trim, true);
+                if (is_string($once)) {
+                    $twice = json_decode($once, true);
+                    if (is_array($twice)) {
+                        return $this->parseHeartbeatComponentPayload($twice);
+                    }
+                }
+            }
+            // Comma-separated names: "esp32,dht22,heater_1"
+            if ($trim[0] !== '{' && $trim[0] !== '[' && str_contains($trim, ',')) {
+                $parts = array_map('trim', explode(',', $trim));
+                $parts = array_values(array_filter($parts, fn ($p) => $p !== ''));
+
+                return $this->parseHeartbeatComponentPayload($parts);
+            }
+            $decoded = json_decode($trim, true);
+            if (is_array($decoded)) {
+                return $this->parseHeartbeatComponentPayload($decoded);
+            }
+
+            $single = $this->normalizeHardwareComponentKey($trim);
+
+            return $single !== null ? [$single => 'working'] : [];
+        }
+        if (! is_array($incoming)) {
+            return [];
+        }
+
+        $out = [];
+
+        if (array_is_list($incoming)) {
+            foreach ($incoming as $item) {
+                if (is_string($item) || is_int($item) || is_float($item)) {
+                    $canonical = $this->normalizeHardwareComponentKey((string) $item);
+                    if ($canonical !== null) {
+                        $out[$canonical] = 'working';
+                    }
+
+                    continue;
+                }
+                if (! is_array($item)) {
+                    continue;
+                }
+
+                $name = $item['name']
+                    ?? $item['component']
+                    ?? $item['component_name']
+                    ?? $item['id']
+                    ?? $item['type']
+                    ?? $item['key']
+                    ?? $item['sensor']
+                    ?? null;
+                if ($name === null) {
+                    continue;
+                }
+
+                $canonical = $this->normalizeHardwareComponentKey((string) $name);
+                if ($canonical === null) {
+                    continue;
+                }
+
+                $rawStatus = $item['status']
+                    ?? $item['state']
+                    ?? $item['value']
+                    ?? $item['connected']
+                    ?? $item['ok']
+                    ?? 'working';
+
+                $out[$canonical] = $this->coerceComponentStatus($rawStatus);
+            }
+
+            return $out;
+        }
+
+        foreach ($incoming as $name => $status) {
+            if (is_int($name) && (is_string($status) || is_int($status) || is_float($status))) {
+                $canonical = $this->normalizeHardwareComponentKey((string) $status);
+                if ($canonical !== null) {
+                    $out[$canonical] = 'working';
+                }
+
+                continue;
+            }
+            if (! is_string($name) && ! is_int($name)) {
+                continue;
+            }
+
+            $canonical = $this->normalizeHardwareComponentKey((string) $name);
+            if ($canonical === null) {
+                continue;
+            }
+
+            $out[$canonical] = $this->coerceComponentStatus($status);
+        }
+
+        return $out;
+    }
+
+    /**
+     * Some firmware posts hardware keys at the JSON root (not only under "components").
+     *
+     * @param  array<string, mixed>  $decodedRoot
+     * @param  array<string, string>  $statusMap
+     */
+    private function mergeRootLevelHardwareIntoStatusMap(array $decodedRoot, array $statusMap): array
+    {
+        $reserved = [
+            'device_id', 'created_by', 'components', 'component', 'hardware', 'sensors',
+            'parts', 'connected', 'hardwarelist',
+            'component_status', 'status', 'states', 'devices', 'readings',
+            'gpio_states', 'components_report', 'attached', 'detected',
+            'data', 'payload', 'body', 'result',
+            'success', 'message', 'timestamp', 'ts', 'token', 'api_key', 'user_id',
+            'microcontroller_id', 'mc_id', 'machine_id',
+        ];
+
+        $looksLikeTelemetryScalar = function (mixed $v): bool {
+            // Prevent "temperature": 32.4 from being interpreted as a component status.
+            if (is_int($v)) {
+                return $v !== 0 && $v !== 1;
+            }
+            if (is_float($v)) {
+                // Treat only strict 0.0/1.0 as boolean-ish hardware flags.
+                return abs($v) > 0.000001 && abs($v - 1.0) > 0.000001;
+            }
+            if (is_string($v)) {
+                $t = trim($v);
+                if ($t === '') {
+                    return false;
+                }
+                if ($t === '0' || $t === '1') {
+                    return false;
+                }
+                if (is_numeric($t)) {
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        foreach ($decodedRoot as $k => $v) {
+            if (! is_string($k) && ! is_int($k)) {
+                continue;
+            }
+            $key = strtolower((string) $k);
+            if (in_array($key, $reserved, true)) {
+                continue;
+            }
+
+            $canonical = $this->normalizeHardwareComponentKey((string) $k);
+            if ($canonical === null) {
+                continue;
+            }
+
+            // Never infer hardware presence from nested objects/arrays at the JSON root.
+            // Those are almost always telemetry blobs, not component state maps.
+            if (is_array($v)) {
+                continue;
+            }
+            if ($looksLikeTelemetryScalar($v)) {
+                continue;
+            }
+
+            if (! isset($statusMap[$canonical])) {
+                $statusMap[$canonical] = $this->coerceComponentStatus($v);
+            }
+        }
+
+        return $statusMap;
+    }
+
+    /**
+     * Merge raw JSON body with Laravel-parsed input (fixes empty json_decode when
+     * Content-Type is not JSON, form fields, or body already consumed into Request).
+     *
+     * @return array<string, mixed>
+     */
+    private function buildMergedHeartbeatPayloadTree(Request $request): array
+    {
+        $rawBody = (string) $request->getContent();
+        $fromJson = json_decode($rawBody, true);
+        if (! is_array($fromJson)) {
+            /**
+             * Some embedded HTTP stacks occasionally send extra bytes before/after JSON,
+             * or the body arrives with BOM/non-printable chars. Try to salvage the JSON
+             * object by extracting the outermost {...} or [...] segment.
+             */
+            $trim = trim($rawBody);
+            $salvaged = null;
+
+            $firstObj = strpos($trim, '{');
+            $lastObj = strrpos($trim, '}');
+            if ($firstObj !== false && $lastObj !== false && $lastObj > $firstObj) {
+                $candidate = substr($trim, $firstObj, $lastObj - $firstObj + 1);
+                $decoded = json_decode($candidate, true);
+                if (is_array($decoded)) {
+                    $salvaged = $decoded;
+                }
+            }
+
+            if ($salvaged === null) {
+                $firstArr = strpos($trim, '[');
+                $lastArr = strrpos($trim, ']');
+                if ($firstArr !== false && $lastArr !== false && $lastArr > $firstArr) {
+                    $candidate = substr($trim, $firstArr, $lastArr - $firstArr + 1);
+                    $decoded = json_decode($candidate, true);
+                    if (is_array($decoded)) {
+                        $salvaged = $decoded;
+                    }
+                }
+            }
+
+            $fromJson = is_array($salvaged) ? $salvaged : [];
+        }
+
+        $fromLaravel = $request->all();
+        if (! is_array($fromLaravel)) {
+            $fromLaravel = [];
+        }
+
+        // Prefer raw JSON body over $request->all() when keys overlap (avoids empty form fields
+        // shadowing a valid JSON "components" payload).
+        return array_replace($fromLaravel, $fromJson);
+    }
+
+    /**
+     * If a field is a JSON string (common from form posts / Arduino), decode it in-place
+     * for top-level keys and inside common wrapper objects.
+     *
+     * @param  array<string, mixed>  $tree
+     * @return array<string, mixed>
+     */
+    private function expandHeartbeatTreeJsonStringValues(array $tree): array
+    {
+        $decodeIfJsonString = function (mixed $v): mixed {
+            if (! is_string($v)) {
+                return $v;
+            }
+            $t = trim($v);
+            if ($t === '' || ($t[0] !== '{' && $t[0] !== '[')) {
+                return $v;
+            }
+            $d = json_decode($t, true);
+
+            return is_array($d) ? $d : $v;
+        };
+
+        $payloadKeys = [
+            'components', 'component', 'parts', 'connected', 'hardware', 'sensors',
+            'component_status', 'status', 'states', 'devices', 'readings',
+            'gpio_states', 'components_report', 'attached', 'detected',
+        ];
+
+        foreach ($payloadKeys as $k) {
+            if (array_key_exists($k, $tree)) {
+                $tree[$k] = $decodeIfJsonString($tree[$k]);
+            }
+        }
+
+        foreach (['data', 'payload', 'body', 'result'] as $wrap) {
+            if (! isset($tree[$wrap]) || ! is_array($tree[$wrap])) {
+                continue;
+            }
+            foreach ($payloadKeys as $k) {
+                if (array_key_exists($k, $tree[$wrap])) {
+                    $tree[$wrap][$k] = $decodeIfJsonString($tree[$wrap][$k]);
+                }
+            }
+        }
+
+        return $tree;
+    }
+
+    /**
+     * Collect every payload shape that might carry the component list.
+     *
+     * @param  array<string, mixed>  $tree
+     * @return list<mixed>
+     */
+    private function collectHeartbeatComponentPayloads(array $tree): array
+    {
+        $chunks = [];
+
+        $push = function (mixed $v) use (&$chunks): void {
+            if ($v === null || $v === '') {
+                return;
+            }
+            $chunks[] = $v;
+        };
+
+        $chunkKeys = [
+            'components', 'component', 'parts', 'connected', 'hardware', 'sensors',
+            'component_status', 'states', 'devices', 'readings',
+            'gpio_states', 'components_report', 'attached', 'detected',
+        ];
+
+        foreach ($chunkKeys as $k) {
+            if (array_key_exists($k, $tree)) {
+                $push($tree[$k]);
+            }
+        }
+
+        foreach (['data', 'payload', 'body', 'result'] as $wrap) {
+            if (! isset($tree[$wrap]) || ! is_array($tree[$wrap])) {
+                continue;
+            }
+            $inner = $tree[$wrap];
+            foreach ($chunkKeys as $k) {
+                if (array_key_exists($k, $inner)) {
+                    $push($inner[$k]);
+                }
+            }
+        }
+
+        return $chunks;
+    }
+
+    public function esp32Heartbeat(Request $request)
+    {
+        $userId = (int) ($request->input('created_by') ?? 0);
+        if ($userId <= 0) {
+            $userId = (int) (DB::table('users')->min('id') ?? 1);
+        }
+
+        // Build merged/expanded payload first so we can read device id keys even when firmware
+        // uses non-standard names or posts JSON as a string.
+        $decodedRoot = $this->expandHeartbeatTreeJsonStringValues(
+            $this->buildMergedHeartbeatPayloadTree($request)
+        );
+
+        $debugEnabled = (bool) (env('HEARTBEAT_DEBUG') ?: false);
+        $rawBody = $debugEnabled ? (string) $request->getContent() : '';
+        $decodedRootKeys = $debugEnabled ? array_keys($decodedRoot) : [];
+        $laravelAll = $debugEnabled ? $request->all() : [];
+
+        $readFirstNonEmptyString = function (array $tree, array $keys): ?string {
+            foreach ($keys as $k) {
+                if (!array_key_exists($k, $tree)) {
+                    continue;
+                }
+                $v = $tree[$k];
+                if ($v === null) {
+                    continue;
+                }
+                if (is_string($v)) {
+                    $t = trim($v);
+                    if ($t !== '') return $t;
+                } elseif (is_int($v) || is_float($v)) {
+                    return (string) $v;
+                }
+            }
+            return null;
+        };
+
+        // Accept common firmware keys for the hardware identity.
+        $deviceId = $readFirstNonEmptyString($decodedRoot, [
+            'device_id',
+            'deviceId',
+            'deviceID',
+            'DEVICE_ID',
+            'id',
+            'board_id',
+            'boardId',
+            'chip_id',
+            'chipId',
+            'mac',
+            'mac_address',
+            'macAddress',
+        ]);
+
+        // Fallback to Laravel input() for form-encoded posts.
+        if ($deviceId === null) {
+            $deviceId = (string) $request->input('device_id', '');
+            $deviceId = trim($deviceId);
+        }
+
+        // Last resort default (keeps older sketches working).
+        if ($deviceId === '') {
+            $deviceId = 'esp32-1';
+        }
+
+        // Prefer explicit DB row id from the app/firmware so heartbeats hit the same row
+        // the user "saved", even if device_id strings drift across sketches.
+        $machine = null;
+        $mcId = $request->input('microcontroller_id', $request->input('mc_id', $request->input('machine_id')));
+        if ($mcId !== null && $mcId !== '' && is_numeric($mcId) && (int) $mcId > 0) {
+            $candidate = Microcontroller::find((int) $mcId);
+            // Explicit numeric id always wins — do not require device_id to match (sketches
+            // often send a friendly label while DB still has a hardware id string).
+            if ($candidate) {
+                $machine = $candidate;
+            }
+        }
+
+        if (! $machine) {
+            $machine = Microcontroller::where('device_id', $deviceId)->first();
+        }
+
+        // Recovery fallback: if one board already exists and user renamed device_id,
+        // still treat incoming heartbeat as that board so online status keeps working.
+        if (!$machine) {
+            $count = Microcontroller::count();
+            if ($count === 1) {
+                $machine = Microcontroller::first();
+            }
+        }
+
+        // If firmware is frozen on default `device_id=esp32-1` but the saved row uses another
+        // string, bind heartbeats to an explicit DB row via .env (no firmware change).
+        if (! $machine) {
+            $fallbackId = (int) (env('HEARTBEAT_FALLBACK_MICROCONTROLLER_ID') ?: 0);
+            if ($fallbackId > 0) {
+                $machine = Microcontroller::find($fallbackId);
+            }
+        }
+
+        if (!$machine) {
+            $machine = Microcontroller::create([
+                'device_id' => $deviceId,
+                'created_by' => $userId,
+                'last_seen' => null,
+            ]);
+        }
+
+        $statusMap = [];
+        foreach ($this->collectHeartbeatComponentPayloads($decodedRoot) as $chunk) {
+            $statusMap = array_replace($statusMap, $this->parseHeartbeatComponentPayload($chunk));
+        }
+
+        // Nested objects some firmware uses: { "hardware": { "heater_1": "ok" } }
+        $nestedObjectKeys = [
+            'hardware', 'sensors', 'component_status', 'status', 'states', 'devices',
+            'readings', 'gpio_states', 'components_report', 'attached', 'detected',
+        ];
+        foreach ($nestedObjectKeys as $nestedKey) {
+            if (isset($decodedRoot[$nestedKey]) && is_array($decodedRoot[$nestedKey])) {
+                $statusMap = array_replace(
+                    $statusMap,
+                    $this->parseHeartbeatComponentPayload($decodedRoot[$nestedKey])
+                );
+            }
+        }
+
+        foreach (['data', 'payload', 'body', 'result'] as $wrap) {
+            if (! isset($decodedRoot[$wrap]) || ! is_array($decodedRoot[$wrap])) {
+                continue;
+            }
+            $inner = $decodedRoot[$wrap];
+            foreach ($nestedObjectKeys as $nestedKey) {
+                if (isset($inner[$nestedKey]) && is_array($inner[$nestedKey])) {
+                    $statusMap = array_replace(
+                        $statusMap,
+                        $this->parseHeartbeatComponentPayload($inner[$nestedKey])
+                    );
+                }
+            }
+        }
+
+        if ($decodedRoot !== []) {
+            $statusMap = $this->mergeRootLevelHardwareIntoStatusMap($decodedRoot, $statusMap);
+        }
+
+        $defaultComponents = $this->canonicalHardwareComponentKeys();
+
+        // Single-field sketches often map `moisture_sensor` → moisture_sensor_1 only.
+        // Mirror to moisture_sensor_2 so both UI rows stay in sync without firmware changes.
+        if (isset($statusMap['moisture_sensor_1']) && ! isset($statusMap['moisture_sensor_2'])) {
+            $statusMap['moisture_sensor_2'] = $statusMap['moisture_sensor_1'];
+        }
+
+        /**
+         * `esp32` row meaning in the mobile UI:
+         * - If firmware reports **no hardware components at all**, do NOT mark ESP32 as "working"
+         *   (users interpret that as "all hardware OK"). Heartbeat only proves Wi‑Fi/MQ stack is up.
+         * - If firmware reports at least one non-ESP component, ESP32 is treated as healthy/online.
+         */
+        $reportedNonEspKeys = array_values(array_filter(
+            array_keys($statusMap),
+            static fn ($k) => is_string($k) && $k !== '' && strtolower((string) $k) !== 'esp32'
+        ));
+
+        if ($reportedNonEspKeys === []) {
+            // No component payload → ESP is present but hardware is not validated yet.
+            $statusMap['esp32'] = 'warning';
+        } else {
+            // Default ESP32 to healthy when we have *some* component telemetry to pair it with.
+            if (! isset($statusMap['esp32'])) {
+                $statusMap['esp32'] = 'working';
+            }
+        }
+
+        /**
+         * Enforce deterministic "detection" semantics for the mobile UI:
+         * - If ESP reports a component key => WORKING/WARNING/NOT_WORKING (coerced)
+         * - If ESP does NOT report a component key => NOT_WORKING
+         *
+         * This requires the firmware to send a real component list/map. If it doesn't,
+         * everything except `esp32` will correctly show NOT_WORKING.
+         */
+        foreach ($defaultComponents as $componentName) {
+            $status = $statusMap[$componentName] ?? 'not_working';
+            if ($componentName === 'esp32') {
+                // Keep the computed ESP32 status (warning/working/etc.) from the payload rules above.
+                $status = $statusMap['esp32'] ?? $status;
+            }
+
+            MachineHardwareStatus::updateOrCreate(
+                [
+                    'microcontroller_id' => $machine->id,
+                    'component_name' => $componentName,
+                ],
+                [
+                    'status' => $status,
+                    'last_checked_at' => now(),
+                ]
+            );
+        }
+
+        // Bump presence only after hardware rows are written so `last_seen` ordering matches
+        // `last_checked_at` (avoids UI treating fresh rows as stale).
+        $machine->update(['last_seen' => now()]);
+
+        // Optional: mirror the latest snapshot to Firebase RTDB for realtime mobile UI.
+        try {
+            $firebase = app(FirebaseRealtimeService::class);
+            $firebase->setMachineHardwareStatus((int) $machine->id, [
+                'microcontroller_id' => (int) $machine->id,
+                'device_id' => (string) $machine->device_id,
+                'updated_at' => now()->toIso8601String(),
+                'components' => $statusMap,
+            ]);
+        } catch (\Throwable $e) {
+            // Firebase must never break the heartbeat/MySQL write path.
+        }
+
+        $resp = [
+            'success' => true,
+            'microcontroller_id' => $machine->id,
+            'device_id' => $machine->device_id,
+            'display_name' => $machine->display_name,
+            'name' => $this->machineDisplayName($machine),
+            'detected_components' => array_keys($statusMap),
+            'received_component_count' => count($statusMap),
+            'assumed_all_components' => false,
+            'missing_components' => array_values(array_diff($defaultComponents, array_keys($statusMap))),
+        ];
+
+        if ($debugEnabled) {
+            $componentsVal = $decodedRoot['components'] ?? null;
+            $resp['debug'] = [
+                'method' => $request->method(),
+                'content_type' => (string) ($request->header('content-type') ?? ''),
+                'content_length_header' => (string) ($request->header('content-length') ?? ''),
+                'raw_body_len' => strlen($rawBody),
+                'root_keys' => $decodedRootKeys,
+                'laravel_all_keys' => is_array($laravelAll) ? array_keys($laravelAll) : [],
+                'has_components_key' => array_key_exists('components', $decodedRoot),
+                'components_php_type' => is_array($componentsVal) ? 'array' : gettype($componentsVal),
+                'parsed_status_keys' => array_keys($statusMap),
+            ];
+        }
+
+        return response()->json($resp);
+    }
+
+    private function isMicrocontrollerOnline(Microcontroller $machine): bool
+    {
+        $raw = $machine->getAttributes()['last_seen'] ?? null;
+        if ($raw === null || $raw === '') {
+            return false;
+        }
+        $ls = $raw instanceof Carbon ? $raw : Carbon::parse($raw);
+
+        return $ls->gte(now()->subMinutes(self::ONLINE_LAST_SEEN_MINUTES));
+    }
+
+    private function componentAliases(string $componentName): array
+    {
+        $key = strtolower(str_replace([' ', '-'], '_', urldecode($componentName)));
+
+        return match ($key) {
+            'esp32' => ['esp32'],
+            'solar_panel' => ['solar_panel', 'solar'],
+            'buzzer' => ['buzzer'],
+            'heater_1' => ['heater_1', 'heater1', 'relay_1', 'relay1'],
+            'heater_2' => ['heater_2', 'heater2', 'relay_2', 'relay2'],
+            'heater_fan_1' => ['heater_fan_1', 'fan1', 'fan_1'],
+            'heater_fan_2' => ['heater_fan_2', 'fan2', 'fan_2'],
+            'ventilation_fan' => ['ventilation_fan', 'fan3', 'fan_3', 'exhaust_fan'],
+            'temp_humidity_sensor' => ['temp_humidity_sensor', 'dht22', 'dht11', 'dht'],
+            'led_1' => ['led_1', 'led_drying'],
+            'led_2' => ['led_2', 'led_pause'],
+            'led_3' => ['led_3', 'led_stop'],
+            'moisture_sensor_1' => ['moisture_sensor_1', 'loadcell_1', 'loadcell1', 'moisture_sensor'],
+            'moisture_sensor_2' => ['moisture_sensor_2', 'loadcell_2', 'loadcell2'],
+            default => [$key],
+        };
+    }
+
     public function index(Request $request)
     {
         $range = $request->query('range', '3months');
@@ -26,6 +778,9 @@ class DryingController extends Controller
         };
 
         $sessions = DryingSession::query()
+            ->when($request->filled('microcontroller_id'), function ($query) use ($request) {
+                $query->where('microcontroller_id', (int) $request->query('microcontroller_id'));
+            })
             ->whereIn('status', ['completed', 'stopped'])
             ->where(function ($query) use ($startDate) {
                 $query->whereNotNull('ended_at')->where('ended_at', '>=', $startDate)
@@ -74,6 +829,141 @@ class DryingController extends Controller
             'success' => true,
             'message' => 'Drying session deleted successfully.',
         ]);
+    }
+
+    public function destroyBatch(Request $request)
+    {
+        $data = $request->validate([
+            'ids' => 'required|array|min:1',
+            'ids.*' => 'integer|exists:drying_sessions,id',
+        ]);
+
+        DryingSession::whereIn('id', $data['ids'])->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Selected drying sessions deleted.',
+        ]);
+    }
+
+    /**
+     * Start / pause / stop drying session from mobile control panel.
+     */
+    public function sessionControl(Request $request)
+    {
+        $data = $request->validate([
+            'user_id' => 'required|integer|exists:users,id',
+            'microcontroller_id' => 'required|integer|exists:microcontrollers,id',
+            'action' => 'required|string|in:start,pause,stop',
+            'fish_type' => 'nullable|string|max:255',
+            'total_fish' => 'nullable|integer|min:0',
+            'target_temperature' => 'nullable|numeric',
+            'fan_speed' => 'nullable|integer|min:1|max:3',
+            'set_duration_minutes' => 'nullable|integer|min:1',
+        ]);
+
+        $mcId = (int) $data['microcontroller_id'];
+        $userId = (int) $data['user_id'];
+        $action = $data['action'];
+
+        try {
+            if ($action === 'start') {
+                foreach (['fish_type', 'total_fish', 'target_temperature', 'fan_speed', 'set_duration_minutes'] as $field) {
+                    if (! array_key_exists($field, $data) || $data[$field] === null || $data[$field] === '') {
+                        return response()->json([
+                            'success' => false,
+                            'message' => ucfirst(str_replace('_', ' ', $field)).' is required to start drying.',
+                        ], 422);
+                    }
+                }
+
+                $blocking = DryingSession::where('microcontroller_id', $mcId)
+                    ->whereIn('status', ['running', 'paused'])
+                    ->whereNull('ended_at')
+                    ->exists();
+
+                if ($blocking) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Pause or stop the active session before starting a new one.',
+                    ], 422);
+                }
+
+                $session = DryingSession::create([
+                    'session_code' => 'mob-'.Str::uuid()->toString(),
+                    'microcontroller_id' => $mcId,
+                    'user_id' => $userId,
+                    'fish_type' => $data['fish_type'],
+                    'total_fish' => (int) $data['total_fish'],
+                    'target_temperature' => (float) $data['target_temperature'],
+                    'fan_speed' => (int) $data['fan_speed'],
+                    'set_duration_minutes' => (int) $data['set_duration_minutes'],
+                    'drying_time_minutes' => 0,
+                    'status' => 'running',
+                    'started_at' => now(),
+                    'ended_at' => null,
+                ]);
+
+                return response()->json([
+                    'success' => true,
+                    'session' => $session,
+                ]);
+            }
+
+            if ($action === 'pause') {
+                $session = DryingSession::where('microcontroller_id', $mcId)
+                    ->where('status', 'running')
+                    ->whereNull('ended_at')
+                    ->latest('started_at')
+                    ->first();
+
+                if (! $session) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'No running session to pause.',
+                    ], 422);
+                }
+
+                $session->update(['status' => 'paused']);
+
+                return response()->json([
+                    'success' => true,
+                    'session' => $session->fresh(),
+                ]);
+            }
+
+            if ($action === 'stop') {
+                $session = DryingSession::where('microcontroller_id', $mcId)
+                    ->whereIn('status', ['running', 'paused'])
+                    ->whereNull('ended_at')
+                    ->latest('started_at')
+                    ->first();
+
+                if (! $session) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'No active session to stop.',
+                    ], 422);
+                }
+
+                $session->update([
+                    'status' => 'stopped',
+                    'ended_at' => now(),
+                ]);
+
+                return response()->json([
+                    'success' => true,
+                    'session' => $session->fresh(),
+                ]);
+            }
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 500);
+        }
+
+        return response()->json(['success' => false, 'message' => 'Unknown action'], 400);
     }
 
     public function recommendation(Request $request)
@@ -250,9 +1140,12 @@ class DryingController extends Controller
 
         return [
             'id' => $session->id,
+            'microcontroller_id' => $session->microcontroller_id,
             'session_code' => $session->session_code,
             'date' => optional($session->ended_at ?? $session->created_at)->toDateTimeString(),
             'fish_type' => $session->fish_type ?? 'Unknown',
+            'total_fish' => $session->total_fish !== null ? (int) $session->total_fish : null,
+            'target_temperature' => $session->target_temperature !== null ? (float) $session->target_temperature : null,
             'status' => $session->status,
             'duration_minutes' => (int) ($duration ?? 0),
             'temperature' => $lastLog?->temperature !== null ? (float) $lastLog->temperature : null,
@@ -268,9 +1161,23 @@ class DryingController extends Controller
         ];
     }
 
-    public function overview()
+    public function overview(Request $request)
     {
-        $machine = Machine::first();
+        $machine = null;
+        $requestedId = $request->query('machine_id');
+        if ($requestedId !== null && $requestedId !== '') {
+            $machine = Microcontroller::find((int) $requestedId);
+        }
+
+        if (!$machine) {
+            $candidates = Microcontroller::query()
+                ->orderByDesc('last_seen')
+                ->orderByDesc('id')
+                ->get();
+
+            $machine = $candidates->first(fn (Microcontroller $m) => $this->isMicrocontrollerOnline($m))
+                ?? $candidates->first();
+        }
 
         if (!$machine) {
             return response()->json([
@@ -281,14 +1188,26 @@ class DryingController extends Controller
             ]);
         }
 
-        $session = DryingSession::where('machine_id', $machine->id)
+        $session = DryingSession::where('microcontroller_id', $machine->id)
+            ->with(['sensorLogs:id,drying_session_id,temperature,humidity,moisture,fan_speed,recorded_at'])
             ->latest()
             ->first();
 
-        $hardwareStatuses = MachineHardwareStatus::where('machine_id', $machine->id)->get();
+        $hardwareStatuses = MachineHardwareStatus::where('microcontroller_id', $machine->id)->get();
+
+        $lastSeen = $machine->last_seen;
 
         return response()->json([
-            'machine' => $machine,
+            'machine' => [
+                'id' => $machine->id,
+                'name' => $this->machineDisplayName($machine),
+                'device_id' => $machine->device_id,
+                'display_name' => $machine->display_name,
+                'last_seen' => $lastSeen ? $lastSeen->toIso8601String() : null,
+                'status' => $this->isMicrocontrollerOnline($machine)
+                    ? 'online'
+                    : 'offline',
+            ],
             'session' => $session,
             'hardware_statuses' => $hardwareStatuses,
             'message' => null
@@ -411,13 +1330,29 @@ class DryingController extends Controller
     public function getMachines()
     {
         try {
-            $machines = Machine::where('created_by', Auth::id())
-                ->select('id', 'name', 'status', 'working', 'warning', 'not_working', 'health')
+            $machines = Microcontroller::query()
+                ->select('id', 'device_id', 'display_name', 'last_seen')
+                ->latest('last_seen')
                 ->get();
+
+            $data = $machines->map(function (Microcontroller $machine) {
+                $lastSeen = $machine->last_seen;
+
+                return [
+                    'id' => $machine->id,
+                    'name' => $this->machineDisplayName($machine),
+                    'device_id' => $machine->device_id,
+                    'display_name' => $machine->display_name,
+                    'last_seen' => $lastSeen ? $lastSeen->toIso8601String() : null,
+                    'status' => $this->isMicrocontrollerOnline($machine)
+                        ? 'online'
+                        : 'offline',
+                ];
+            })->values();
 
             return response()->json([
                 'success' => true,
-                'data' => $machines
+                'data' => $data->values()->all(),
             ]);
         } catch (\Exception $e) {
             return response()->json([
@@ -433,10 +1368,7 @@ class DryingController extends Controller
     public function getComponents($machineId)
     {
         try {
-            // Verify machine belongs to user
-            $machine = Machine::where('created_by', Auth::id())
-                ->where('id', $machineId)
-                ->first();
+            $machine = Microcontroller::find($machineId);
 
             if (!$machine) {
                 return response()->json([
@@ -445,48 +1377,106 @@ class DryingController extends Controller
                 ], 404);
             }
 
-            // Default components - ALWAYS VISIBLE (same as blade)
+            // Always return full hardware list expected by mobile UI.
             $defaultComponents = [
-                ['component_name' => 'ESP32 Controller', 'status' => null],
-                ['component_name' => 'LCD Display', 'status' => null],
-                ['component_name' => 'Buzzer', 'status' => null],
-                ['component_name' => 'Fan', 'status' => null],
-                ['component_name' => 'Moisture Sensor', 'status' => null],
-                ['component_name' => 'Temperature and Humidity Sensor', 'status' => null],
-                ['component_name' => 'LED', 'status' => null],
+                'esp32',
+                'solar_panel',
+                'heater_fan_1',
+                'heater_fan_2',
+                'ventilation_fan',
+                'buzzer',
+                'heater_1',
+                'heater_2',
+                'led_1',
+                'led_2',
+                'led_3',
+                'temp_humidity_sensor',
+                'moisture_sensor_1',
+                'moisture_sensor_2',
             ];
 
-            // Get saved status for this machine
-            $savedStatus = MachineHardwareStatus::where('machine_id', $machineId)
-                ->get()
-                ->keyBy('component_name');
+            $savedRows = MachineHardwareStatus::where('microcontroller_id', $machineId)->get();
 
-            // If machine is online, show saved status, otherwise show default/neutral
-            $components = collect($defaultComponents)->map(function ($component) use ($savedStatus, $machine) {
-                // Map component names to database format
-                $dbName = match($component['component_name']) {
-                    'ESP32 Controller' => 'esp32',
-                    'LCD Display' => 'lcd',
-                    'Buzzer' => 'buzzer',
-                    'Fan' => 'fan',
-                    'Moisture Sensor' => 'moisture_sensor',
-                    'Temperature and Humidity Sensor' => 'temp_humidity_sensor',
-                    'LED' => 'led',
-                    default => strtolower(str_replace(' ', '_', $component['component_name']))
-                };
+            $resolveRow = function (string $componentName) use ($savedRows): ?MachineHardwareStatus {
+                $aliases = $this->componentAliases($componentName);
+                $best = null;
+                foreach ($savedRows as $row) {
+                    $rowKey = (string) $row->component_name;
+                    if (! in_array($rowKey, $aliases, true)) {
+                        continue;
+                    }
+                    if ($best === null) {
+                        $best = $row;
 
-                if ($machine->status === 'online' && $savedStatus->has($dbName)) {
-                    $component['status'] = $savedStatus->get($dbName)->status;
-                } else {
-                    $component['status'] = 'neutral'; // Not Connected when machine is offline
+                        continue;
+                    }
+                    $a = $row->last_checked_at;
+                    $b = $best->last_checked_at;
+                    if ($a && $b && $a->gt($b)) {
+                        $best = $row;
+                    } elseif ($a && ! $b) {
+                        $best = $row;
+                    }
                 }
 
-                return $component;
-            });
+                return $best;
+            };
+
+            $isOnline = $this->isMicrocontrollerOnline($machine);
+
+            if ($savedRows->isEmpty()) {
+                $components = collect($defaultComponents)->map(function (string $componentName) use ($isOnline) {
+                    $status = $componentName === 'esp32'
+                        ? ($isOnline ? 'warning' : 'not_working')
+                        : 'not_working';
+
+                    return [
+                        'component_name' => $componentName,
+                        'status' => $status,
+                    ];
+                });
+            } else {
+                $components = collect($defaultComponents)->map(function (string $componentName) use ($resolveRow, $isOnline) {
+                    $found = $resolveRow($componentName);
+                    $stored = $found?->status;
+
+                    if ($isOnline) {
+                        if ($componentName === 'esp32') {
+                            $known = $found
+                                && $found->last_checked_at
+                                && in_array((string) $stored, ['working', 'warning', 'not_working'], true);
+
+                            // ESP32 row should reflect stored diagnostics (warning/working/etc.),
+                            // not blindly become "working" just because Wi‑Fi is up.
+                            $status = $known ? (string) $stored : 'warning';
+                        } else {
+                            $known = $found
+                                && $found->last_checked_at
+                                && in_array((string) $stored, ['working', 'warning', 'not_working'], true);
+
+                            $status = $known ? (string) $stored : 'not_working';
+                        }
+                    } else {
+                        if ($componentName === 'esp32') {
+                            $status = 'not_working';
+                        } elseif ($found && $found->last_checked_at && in_array((string) $stored, ['working', 'warning', 'not_working'], true)) {
+                            $status = (string) $stored;
+                        } else {
+                            $status = 'not_working';
+                        }
+                    }
+
+                    return [
+                        'component_name' => $componentName,
+                        'status' => $status,
+                    ];
+                });
+            }
 
             return response()->json([
                 'success' => true,
-                'data' => $components
+                // Force JSON array (never keyed object) so React Native always gets [].
+                'data' => $components->values()->all(),
             ]);
         } catch (\Exception $e) {
             return response()->json([
@@ -502,40 +1492,53 @@ class DryingController extends Controller
     public function addMachine(Request $request)
     {
         try {
+            $deviceIdRules = ['nullable', 'string', 'max:255'];
+            $deviceIdRules[] = $request->filled('selected_id')
+                ? Rule::unique('microcontrollers', 'device_id')->ignore((int) $request->input('selected_id'))
+                : Rule::unique('microcontrollers', 'device_id');
+
             $request->validate([
-                'name' => 'required|string|max:255',
-                'microcontrollers' => 'array'
+                // Friendly label (separate from hardware device_id)
+                'name' => 'nullable|string|max:255',
+                // Hardware identity sent by ESP32 heartbeats (ignore own row on rename/save)
+                'device_id' => $deviceIdRules,
+                'selected_id' => 'nullable|integer|exists:microcontrollers,id',
             ]);
 
-            // Create new machine
-            $machine = Machine::create([
-                'name' => $request->name,
-                'created_by' => Auth::id(),
-                'status' => 'offline',
-                'working' => 0,
-                'warning' => 0,
-                'not_working' => 0,
-                'health' => 100
-            ]);
+            if ($request->filled('selected_id')) {
+                $machine = Microcontroller::findOrFail((int) $request->selected_id);
+                // Never mutate hardware identity from the mobile "name" field.
+                $machine->update([
+                    'display_name' => $request->input('name'),
+                ]);
+            } else {
+                if (!$request->filled('device_id')) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'device_id is required when creating a new microcontroller record.',
+                    ], 422);
+                }
 
-            // Initialize default component status with neutral values
-            $defaultComponents = [
-                'esp32', 'lcd', 'buzzer', 'fan', 
-                'moisture_sensor', 'temp_humidity_sensor', 'led'
-            ];
-
-            foreach ($defaultComponents as $component) {
-                MachineHardwareStatus::create([
-                    'machine_id' => $machine->id,
-                    'component_name' => $component,
-                    'status' => 'neutral'
+                $machine = Microcontroller::create([
+                    'device_id' => (string) $request->device_id,
+                    'display_name' => $request->input('name'),
+                    'created_by' => Auth::id(),
+                    // Presence/online is determined by ESP heartbeats, not manual adds.
+                    'last_seen' => null,
                 ]);
             }
 
             return response()->json([
                 'success' => true,
-                'message' => 'Machine added successfully',
-                'data' => $machine
+                'message' => 'Microcontroller added successfully',
+                'data' => [
+                    'id' => $machine->id,
+                    'name' => $this->machineDisplayName($machine),
+                    'device_id' => $machine->device_id,
+                    'display_name' => $machine->display_name,
+                    'last_seen' => $machine->last_seen ? $machine->last_seen->toIso8601String() : null,
+                    'status' => $this->isMicrocontrollerOnline($machine) ? 'online' : 'offline',
+                ]
             ], 201);
         } catch (\Exception $e) {
             return response()->json([
@@ -551,10 +1554,7 @@ class DryingController extends Controller
     public function testComponent(Request $request, $machineId, $componentName)
     {
         try {
-            // Verify machine belongs to user
-            $machine = Machine::where('created_by', Auth::id())
-                ->where('id', $machineId)
-                ->first();
+            $machine = Microcontroller::find($machineId);
 
             if (!$machine) {
                 return response()->json([
@@ -563,29 +1563,11 @@ class DryingController extends Controller
                 ], 404);
             }
 
-            // Check if machine is online
-            if ($machine->status !== 'online') {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Machine is offline. Cannot test components.'
-                ], 400);
-            }
+            $isOnline = $this->isMicrocontrollerOnline($machine);
 
-            // Map display name to database name
-            $dbName = match($componentName) {
-                'ESP32 Controller' => 'esp32',
-                'LCD Display' => 'lcd',
-                'Buzzer' => 'buzzer',
-                'Fan' => 'fan',
-                'Moisture Sensor' => 'moisture_sensor',
-                'Temperature and Humidity Sensor' => 'temp_humidity_sensor',
-                'LED' => 'led',
-                default => strtolower(str_replace(' ', '_', $componentName))
-            };
-
-            // Get component
-            $component = MachineHardwareStatus::where('machine_id', $machineId)
-                ->where('component_name', $dbName)
+            $aliases = $this->componentAliases($componentName);
+            $component = MachineHardwareStatus::where('microcontroller_id', $machineId)
+                ->whereIn('component_name', $aliases)
                 ->first();
 
             if (!$component) {
@@ -595,36 +1577,27 @@ class DryingController extends Controller
                 ], 404);
             }
 
-            // Simulate testing - cycle through statuses
-            $newStatus = match($component->status) {
-                'working' => 'warning',
-                'warning' => 'not_working',
-                'not_working' => 'working',
-                default => 'working'
-            };
+            // Deterministic status: never randomize.
+            // ESP32 status follows connectivity; others keep last known hardware status.
+            $primaryAlias = $aliases[0] ?? '';
+            if ($primaryAlias === 'esp32') {
+                $newStatus = $isOnline ? 'working' : 'not_working';
+            } else {
+                $newStatus = in_array($component->status, ['working', 'warning', 'not_working'], true)
+                    ? $component->status
+                    : 'warning';
+            }
 
-            $component->update(['status' => $newStatus]);
-
-            // Update machine summary counts
-            $this->updateMachineSummary($machineId);
-
-            // Get updated component with display name
-            $displayName = match($dbName) {
-                'esp32' => 'ESP32 Controller',
-                'lcd' => 'LCD Display',
-                'buzzer' => 'Buzzer',
-                'fan' => 'Fan',
-                'moisture_sensor' => 'Moisture Sensor',
-                'temp_humidity_sensor' => 'Temperature and Humidity Sensor',
-                'led' => 'LED',
-                default => $componentName
-            };
+            $component->update([
+                'status' => $newStatus,
+                'last_checked_at' => now(),
+            ]);
 
             return response()->json([
                 'success' => true,
                 'message' => 'Component tested successfully',
                 'data' => [
-                    'component_name' => $displayName,
+                    'component_name' => $componentName,
                     'status' => $newStatus
                 ]
             ]);
@@ -642,10 +1615,7 @@ class DryingController extends Controller
     public function testAllComponents(Request $request, $machineId)
     {
         try {
-            // Verify machine belongs to user
-            $machine = Machine::where('created_by', Auth::id())
-                ->where('id', $machineId)
-                ->first();
+            $machine = Microcontroller::find($machineId);
 
             if (!$machine) {
                 return response()->json([
@@ -654,45 +1624,28 @@ class DryingController extends Controller
                 ], 404);
             }
 
-            // Check if machine is online
-            if ($machine->status !== 'online') {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Machine is offline. Cannot test components.'
-                ], 400);
-            }
+            $isOnline = $this->isMicrocontrollerOnline($machine);
 
-            // Test all components
-            $components = MachineHardwareStatus::where('machine_id', $machineId)->get();
+            $components = MachineHardwareStatus::where('microcontroller_id', $machineId)->get();
             
             foreach ($components as $component) {
-                // Simulate testing - random status for demo
-                $statuses = ['working', 'warning', 'not_working', 'working', 'working'];
-                $newStatus = $statuses[array_rand($statuses)];
-                $component->update(['status' => $newStatus]);
+                $newStatus = $component->component_name === 'esp32'
+                    ? ($isOnline ? 'working' : 'not_working')
+                    : (in_array($component->status, ['working', 'warning', 'not_working'], true)
+                        ? $component->status
+                        : 'warning');
+
+                $component->update([
+                    'status' => $newStatus,
+                    'last_checked_at' => now(),
+                ]);
             }
 
-            // Update machine summary
-            $this->updateMachineSummary($machineId);
-
-            // Get updated components with display names
-            $updatedComponents = MachineHardwareStatus::where('machine_id', $machineId)->get()
-                ->map(function($comp) {
-                    $displayName = match($comp->component_name) {
-                        'esp32' => 'ESP32 Controller',
-                        'lcd' => 'LCD Display',
-                        'buzzer' => 'Buzzer',
-                        'fan' => 'Fan',
-                        'moisture_sensor' => 'Moisture Sensor',
-                        'temp_humidity_sensor' => 'Temperature and Humidity Sensor',
-                        'led' => 'LED',
-                        default => $comp->component_name
-                    };
-                    return [
-                        'component_name' => $displayName,
-                        'status' => $comp->status
-                    ];
-                });
+            $updatedComponents = MachineHardwareStatus::where('microcontroller_id', $machineId)->get()
+                ->map(fn($comp) => [
+                    'component_name' => $comp->component_name,
+                    'status' => $comp->status
+                ]);
 
             return response()->json([
                 'success' => true,
@@ -713,22 +1666,33 @@ class DryingController extends Controller
     public function detectMicrocontrollers()
     {
         try {
-            // Get microcontrollers that sent data in last 10 seconds
+            // List ALL boards so the app can always show something to pick.
+            // `recent` / `status` reflect the same heartbeat window as getMachines().
             $activeESP = DB::table('microcontrollers')
-                ->where('last_seen', '>=', now()->subSeconds(10))
-                ->select('id', 'device_id as name')
+                ->select('id', 'device_id', 'display_name', 'last_seen')
+                ->orderByDesc('last_seen')
                 ->get()
-                ->map(function($item) {
+                ->map(function ($item) {
+                    $display = trim((string) ($item->display_name ?? ''));
+                    $label = $display !== '' ? $display : (string) $item->device_id;
+                    $lastSeen = $item->last_seen ? Carbon::parse($item->last_seen) : null;
+                    $recent = (bool) ($lastSeen && $lastSeen->gte(now()->subMinutes(self::ONLINE_LAST_SEEN_MINUTES)));
+
                     return [
-                        'id' => (string)$item->id,
-                        'name' => $item->name,
-                        'selected' => false
+                        'id' => (string) $item->id,
+                        'name' => $label,
+                        'device_id' => $item->device_id,
+                        'display_name' => $item->display_name,
+                        'last_seen' => $item->last_seen,
+                        'recent' => $recent,
+                        'status' => $recent ? 'online' : 'offline',
+                        'selected' => false,
                     ];
                 });
 
             return response()->json([
                 'success' => true,
-                'data' => $activeESP
+                'data' => $activeESP->values()->all(),
             ]);
         } catch (\Exception $e) {
             return response()->json([
@@ -739,36 +1703,87 @@ class DryingController extends Controller
         }
     }
 
-    /**
-     * Update machine summary counts based on component status
-     */
-    private function updateMachineSummary($machineId)
+    public function notificationsIndex(Request $request)
     {
-        $components = MachineHardwareStatus::where('machine_id', $machineId)->get();
-        
-        $working = $components->where('status', 'working')->count();
-        $warning = $components->where('status', 'warning')->count();
-        $notWorking = $components->where('status', 'not_working')->count();
-        
-        // Calculate health percentage
-        $total = $components->count();
-        $health = $total > 0 ? round((($working + ($warning * 0.5)) / $total) * 100) : 100;
+        $request->validate([
+            'user_id' => 'required|integer|exists:users,id',
+            'microcontroller_id' => 'nullable|integer|exists:microcontrollers,id',
+            'per_page' => 'nullable|integer|min:1|max:50',
+        ]);
 
-        // Determine overall status
-        $status = 'online';
-        if ($notWorking > 2) {
-            $status = 'offline';
-        } elseif ($warning > 0 || $notWorking > 0) {
-            $status = 'warning';
+        $userId = (int) $request->query('user_id');
+        $perPage = (int) ($request->query('per_page', 15));
+
+        $query = Notification::query()
+            ->where(function ($sub) use ($userId) {
+                $sub->where('user_id', $userId)->orWhereNull('user_id');
+            })
+            ->orderByDesc('created_at');
+
+        if ($request->filled('microcontroller_id')) {
+            $query->where('microcontroller_id', (int) $request->query('microcontroller_id'));
         }
 
-        Machine::where('id', $machineId)->update([
-            'working' => $working,
-            'warning' => $warning,
-            'not_working' => $notWorking,
-            'health' => $health,
-            'status' => $status,
-            'updated_at' => now()
+        return response()->json($query->paginate($perPage));
+    }
+
+    public function notificationsMarkRead(Request $request)
+    {
+        $data = $request->validate([
+            'user_id' => 'required|integer|exists:users,id',
+            'ids' => 'required|array|min:1',
+            'ids.*' => 'integer|exists:notifications,id',
+            'is_read' => 'nullable|boolean',
         ]);
+
+        $read = array_key_exists('is_read', $data) ? (bool) $data['is_read'] : true;
+
+        Notification::whereIn('id', $data['ids'])
+            ->where(function ($q) use ($data) {
+                $q->where('user_id', $data['user_id'])->orWhereNull('user_id');
+            })
+            ->update(['is_read' => $read]);
+
+        return response()->json(['success' => true]);
+    }
+
+    public function notificationsDestroyBatch(Request $request)
+    {
+        $data = $request->validate([
+            'user_id' => 'required|integer|exists:users,id',
+            'ids' => 'required|array|min:1',
+            'ids.*' => 'integer|exists:notifications,id',
+        ]);
+
+        Notification::whereIn('id', $data['ids'])
+            ->where(function ($q) use ($data) {
+                $q->where('user_id', $data['user_id'])->orWhereNull('user_id');
+            })
+            ->delete();
+
+        return response()->json(['success' => true]);
+    }
+
+    public function deleteMachine($machineId)
+    {
+        try {
+            $machine = Microcontroller::find($machineId);
+            if (!$machine) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Machine not found'
+                ], 404);
+            }
+            $machine->delete();
+            return response()->json([
+                'success' => true,
+                'message' => 'Microcontroller deleted successfully',
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Error deleting machine'
+            ], 500);
+        }
     }
 }

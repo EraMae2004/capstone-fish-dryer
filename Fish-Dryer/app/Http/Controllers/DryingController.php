@@ -87,13 +87,105 @@ class DryingController extends Controller
     public function esp32Heartbeat(Request $request)
     {
         $deviceId = $request->input('device_id', 'esp32-1');
+        $userId = (int) ($request->input('created_by') ?? 0);
+        if ($userId <= 0) {
+            $userId = (int) (DB::table('users')->min('id') ?? 1);
+        }
 
-        DB::table('microcontrollers')->updateOrInsert(
-            ['device_id' => $deviceId],
-            ['last_seen' => now()]
-        );
+        $micro = DB::table('microcontrollers')->where('device_id', $deviceId)->first();
+        if ($micro) {
+            DB::table('microcontrollers')
+                ->where('id', $micro->id)
+                ->update(['last_seen' => now(), 'updated_at' => now()]);
+            $microId = (int) $micro->id;
+        } else {
+            $microId = (int) DB::table('microcontrollers')->insertGetId([
+                'device_id' => $deviceId,
+                'created_by' => $userId,
+                'last_seen' => now(),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
 
-        return response()->json(['success' => true]);
+        // Supports two payloads:
+        // 1) components: { "heater_1": "working", "buzzer": "not_working" }
+        // 2) components: ["heater_1", "buzzer"] => auto-marked as working
+        $incoming = $request->input('components', []);
+        $componentStatusMap = [];
+
+        if (is_array($incoming)) {
+            $isAssoc = array_keys($incoming) !== range(0, count($incoming) - 1);
+            if ($isAssoc) {
+                foreach ($incoming as $name => $status) {
+                    $key = strtolower(str_replace([' ', '-'], '_', (string) $name));
+                    $value = strtolower((string) $status);
+                    $componentStatusMap[$key] = in_array($value, ['working', 'warning', 'not_working'], true)
+                        ? $value
+                        : 'working';
+                }
+            } else {
+                foreach ($incoming as $name) {
+                    $key = strtolower(str_replace([' ', '-'], '_', (string) $name));
+                    $componentStatusMap[$key] = 'working';
+                }
+            }
+        }
+
+        // Keep names compatible with current DB enum values.
+        $knownComponents = [
+            'esp32',
+            'solar_panel',
+            'heater_fan_1',
+            'heater_fan_2',
+            'ventilation_fan',
+            'heater_1',
+            'heater_2',
+            'buzzer',
+            'led_drying',
+            'led_pause',
+            'led_stop',
+            'temp_humidity_sensor',
+            'moisture_sensor',
+        ];
+
+        if (! array_key_exists('esp32', $componentStatusMap)) {
+            $componentStatusMap['esp32'] = 'working';
+        }
+
+        foreach ($knownComponents as $componentName) {
+            $status = $componentStatusMap[$componentName] ?? 'warning';
+
+            $existing = DB::table('machine_hardware_status')
+                ->where('microcontroller_id', $microId)
+                ->where('component_name', $componentName)
+                ->first();
+
+            if ($existing) {
+                DB::table('machine_hardware_status')
+                    ->where('id', $existing->id)
+                    ->update([
+                        'status' => $status,
+                        'last_checked_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+            } else {
+                DB::table('machine_hardware_status')->insert([
+                    'microcontroller_id' => $microId,
+                    'component_name' => $componentName,
+                    'status' => $status,
+                    'last_checked_at' => now(),
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'microcontroller_id' => $microId,
+            'detected_components' => array_keys($componentStatusMap),
+        ]);
     }
 
 

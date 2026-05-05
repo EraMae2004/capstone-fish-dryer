@@ -12,7 +12,26 @@ return new class extends Migration
         Schema::create('machine_hardware_status', function (Blueprint $table) {
             $table->id();
             $table->foreignId('microcontroller_id')->constrained('microcontrollers')->onDelete('cascade');
-            $table->enum('component_name', ['esp32','solar_panel','heater_fan_1', 'heater_fan_2', 'ventilation_fan', 'heater_1', 'heater_2', 'buzzer','led_drying', 'led_pause', 'led_stop', 'temp_humidity_sensor','moisture_sensor']);
+            $table->enum('component_name', [
+                'esp32',
+                'solar_panel',
+                'heater_fan_1',
+                'heater_fan_2',
+                'ventilation_fan',
+                'heater_1',
+                'heater_2',
+                'buzzer',
+                'led_1',
+                'led_2',
+                'led_3',
+                'led_drying',
+                'led_pause',
+                'led_stop',
+                'temp_humidity_sensor',
+                'moisture_sensor',
+                'moisture_sensor_1',
+                'moisture_sensor_2',
+            ]);
             $table->enum('status', ['working','warning','not_working'])->default('working');
             $table->timestamp('last_checked_at')->nullable();
             $table->timestamps();

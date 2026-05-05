@@ -8,6 +8,7 @@ class Microcontroller extends Model
 {
     protected $fillable = [
         'device_id',
+        'display_name',
         'last_seen',
         'created_by',
     ];

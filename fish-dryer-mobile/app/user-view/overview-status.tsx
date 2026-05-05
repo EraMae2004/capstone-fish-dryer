@@ -1,30 +1,63 @@
 import React from "react";
 import { ScrollView, View, Text, StyleSheet } from "react-native";
+import { userTypography } from "./userTypography";
 
 export default function OverviewStatus({
   machine,
   session,
   hardware_statuses,
+  /** When set, machine + hardware rows treat RTDB+API combined “live” (from parent). */
+  hardwareStreamFresh,
 }: any) {
+  const normalizeKey = (value: string) =>
+    String(value ?? "")
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_")
+      .trim();
 
-  const status = session?.status;
+  const normalizeStatus = (value: string) => {
+    const raw = String(value ?? "").toLowerCase();
+    if (["working", "ok", "online", "pass", "passed"].includes(raw)) return "working";
+    if (["not_working", "error", "offline", "fail", "failed"].includes(raw)) return "not_working";
+    if (raw === "warning") return "warning";
+    if (raw === "unknown") return "unknown";
+    return raw || "--";
+  };
 
-  const dotColor =
-    status === "running"
-      ? "#2ecc71"
-      : status === "stopped"
-      ? "#e74c3c"
-      : "#95a5a6";
+  /**
+   * UI "live" is stricter than the API's long heartbeat window.
+   * If we only trust `machine.status=online` while `last_seen` is stale, the UI looks fake.
+   */
+  const LIVE_LAST_SEEN_MS = 90_000;
+  const parseIsoMs = (iso: unknown): number | null => {
+    if (!iso) return null;
+    const d = new Date(String(iso));
+    const t = d.getTime();
+    return Number.isFinite(t) ? t : null;
+  };
 
-  const statusText =
-    status === "running"
-      ? "Drying"
-      : status === "stopped"
-      ? "Stopped"
-      : "Idle";
+  const lastSeenMs = parseIsoMs(machine?.last_seen);
+  const seenRecently =
+    lastSeenMs !== null ? Date.now() - lastSeenMs <= LIVE_LAST_SEEN_MS : false;
 
-  const latestLog =
-    session?.sensor_logs?.[session.sensor_logs.length - 1];
+  const rawMc = String(machine?.status ?? "")
+    .trim()
+    .toLowerCase();
+  const apiOnline = rawMc === "online" || rawMc === "true" || rawMc === "1";
+  const mcOnline = Boolean(machine) && apiOnline && seenRecently;
+  const overviewLive =
+    typeof hardwareStreamFresh === "boolean" ? hardwareStreamFresh : mcOnline;
+  const mcDotColor = overviewLive ? "#2ecc71" : machine ? "#e74c3c" : "#95a5a6";
+  const mcStatusText = machine
+    ? overviewLive
+      ? "Online"
+      : apiOnline && !seenRecently
+        ? "Offline (stale)"
+        : "Offline"
+    : "—";
+
+  const logs = session?.sensor_logs;
+  const latestLog = Array.isArray(logs) && logs.length > 0 ? logs[logs.length - 1] : null;
 
   const remainingTime =
     session?.set_duration_minutes && session?.drying_time_minutes
@@ -44,7 +77,8 @@ export default function OverviewStatus({
     { key: "led_2", label: "LED 2" },
     { key: "led_3", label: "LED 3" },
     { key: "temp_humidity_sensor", label: "Temp & Humidity Sensor" },
-    { key: "moisture_sensor", label: "Moisture Sensor" },
+    { key: "moisture_sensor_1", label: "Moisture Sensor 1" },
+    { key: "moisture_sensor_2", label: "Moisture Sensor 2" },
   ];
 
   return (
@@ -53,9 +87,9 @@ export default function OverviewStatus({
       <Text style={styles.title}>OVERVIEW</Text>
 
       <View style={styles.statusRow}>
-        <Text style={styles.label}>Machine Status:</Text>
-        <View style={[styles.dot, { backgroundColor: dotColor }]} />
-        <Text style={styles.bold}>{statusText}</Text>
+        <Text style={styles.label}>Machine status:</Text>
+        <View style={[styles.dot, { backgroundColor: mcDotColor }]} />
+        <Text style={styles.bold}>{mcStatusText}</Text>
       </View>
 
       <View style={styles.dropdown}>
@@ -98,17 +132,48 @@ export default function OverviewStatus({
 
         {hardwareComponents.map((component, index) => {
 
-          const found = hardware_statuses?.find(
-            (item: any) => item.component_name === component.key
-          );
+          const found = hardware_statuses?.find((item: any) => {
+            const key = normalizeKey(item.component_name);
+            const componentKey = normalizeKey(component.key);
+            if (key === componentKey) return true;
 
-          const statusValue = found?.status ?? null;
+            if (componentKey === "moisture_sensor_1" && [
+              "moisture_sensor_1",
+              "moisture1",
+              "loadcell_1",
+              "loadcell1",
+              "load_cell_1",
+              "weight_sensor_1",
+            ].includes(key)) {
+              return true;
+            }
+
+            if (componentKey === "moisture_sensor_2" && [
+              "moisture_sensor_2",
+              "moisture2",
+              "loadcell_2",
+              "loadcell2",
+              "load_cell_2",
+              "weight_sensor_2",
+            ].includes(key)) {
+              return true;
+            }
+
+            return false;
+          });
+
+          const rawStatus = !overviewLive ? "not_working" : (found?.status ?? "--");
+          const statusValue = normalizeStatus(rawStatus);
 
           const color =
             statusValue === "working"
               ? "#2ecc71"
               : statusValue === "not_working"
               ? "#e74c3c"
+              : statusValue === "warning"
+              ? "#f59e0b"
+              : statusValue === "unknown"
+              ? "#95a5a6"
               : "#95a5a6";
 
           return (
@@ -141,8 +206,7 @@ function renderRow(label: string, value: any) {
 
 const styles = StyleSheet.create({
   title: {
-    fontSize: 20,
-    fontWeight: "700",
+    ...userTypography.pageTitle,
     marginBottom: 15,
   },
 
@@ -153,8 +217,8 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
 
-  label: { color: "#444" },
-  bold: { fontWeight: "600" },
+  label: { ...userTypography.body, color: "#444" },
+  bold: { ...userTypography.bodyStrong, color: "#444" },
 
   dot: {
     width: 8,
@@ -186,7 +250,7 @@ const styles = StyleSheet.create({
   },
 
   cardHeader: {
-    fontWeight: "600",
+    ...userTypography.cardTitle,
     marginBottom: 10,
   },
 
