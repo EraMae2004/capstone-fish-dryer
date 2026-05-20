@@ -45,5 +45,94 @@ class FirebaseRealtimeService
             ->withBody(json_encode($payload, JSON_THROW_ON_ERROR), 'application/json')
             ->put($url);
     }
+
+    /**
+     * ESP32 polls RTDB `assignments/{macSafe}` — keep it in sync when Laravel resolves the board by MAC.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    public function setDeviceAssignment(string $macSafe, array $payload): void
+    {
+        if (! $this->isEnabled()) {
+            return;
+        }
+
+        $macSafe = strtolower(preg_replace('/[^0-9a-f]/', '', $macSafe));
+        if ($macSafe === '') {
+            return;
+        }
+
+        $base = rtrim((string) $this->databaseUrl, '/');
+        $path = "assignments/{$macSafe}.json";
+        $secret = (string) $this->databaseSecret;
+        $url = "{$base}/{$path}?auth=".urlencode($secret);
+
+        Http::timeout(3)
+            ->withHeaders(['Content-Type' => 'application/json'])
+            ->withBody(json_encode($payload, JSON_THROW_ON_ERROR), 'application/json')
+            ->put($url);
+    }
+
+    /**
+     * Read latest hardware status snapshot from Firebase RTDB.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function getMachineHardwareStatus(int $microcontrollerId): ?array
+    {
+        if (! $this->isEnabled()) {
+            return null;
+        }
+
+        $base = rtrim((string) $this->databaseUrl, '/');
+        $path = "machines/{$microcontrollerId}/hardware_status.json";
+        $secret = (string) $this->databaseSecret;
+        $url = "{$base}/{$path}?auth=".urlencode($secret);
+
+        try {
+            $res = Http::timeout(3)->get($url);
+            if (! $res->successful()) {
+                return null;
+            }
+            $data = $res->json();
+            return is_array($data) ? $data : null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    public function setMachineSession(int $microcontrollerId, array $payload): void
+    {
+        if (! $this->isEnabled()) {
+            return;
+        }
+
+        $base = rtrim((string) $this->databaseUrl, '/');
+        $path = "machines/{$microcontrollerId}/session.json";
+        $secret = (string) $this->databaseSecret;
+        $url = "{$base}/{$path}?auth=".urlencode($secret);
+
+        Http::timeout(3)
+            ->withHeaders(['Content-Type' => 'application/json'])
+            ->withBody(json_encode($payload, JSON_THROW_ON_ERROR), 'application/json')
+            ->put($url);
+    }
+
+    public function clearMachineTestCommand(int $microcontrollerId): void
+    {
+        if (! $this->isEnabled()) {
+            return;
+        }
+
+        $base = rtrim((string) $this->databaseUrl, '/');
+        $path = "machines/{$microcontrollerId}/test_command.json";
+        $secret = (string) $this->databaseSecret;
+        $url = "{$base}/{$path}?auth=".urlencode($secret);
+
+        Http::timeout(3)->delete($url);
+    }
 }
 

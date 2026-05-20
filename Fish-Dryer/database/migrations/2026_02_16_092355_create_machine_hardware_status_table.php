@@ -14,23 +14,18 @@ return new class extends Migration
             $table->foreignId('microcontroller_id')->constrained('microcontrollers')->onDelete('cascade');
             $table->enum('component_name', [
                 'esp32',
-                'solar_panel',
-                'heater_fan_1',
-                'heater_fan_2',
-                'ventilation_fan',
-                'heater_1',
-                'heater_2',
                 'buzzer',
                 'led_1',
                 'led_2',
                 'led_3',
-                'led_drying',
-                'led_pause',
-                'led_stop',
-                'temp_humidity_sensor',
+                'door_sensor',
                 'moisture_sensor',
-                'moisture_sensor_1',
-                'moisture_sensor_2',
+                'heater_1',
+                'heater_2',
+                'fan_1',
+                'fan_2',
+                'fan_3',
+                'dht22',
             ]);
             $table->enum('status', ['working','warning','not_working'])->default('working');
             $table->timestamp('last_checked_at')->nullable();

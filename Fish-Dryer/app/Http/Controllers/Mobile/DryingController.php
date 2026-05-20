@@ -11,9 +11,12 @@ use App\Models\Microcontroller;
 use App\Models\DryingSession;
 use App\Models\MachineHardwareStatus;
 use App\Models\Notification;
+use App\Models\SensorLog;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 
 
@@ -24,12 +27,43 @@ class DryingController extends Controller
      * during short WiFi drops while still marking long-absent boards offline.
      */
     /** Heartbeat recency for "online" — wider window helps flaky campus Wi‑Fi / ESP reboots. */
-    private const ONLINE_LAST_SEEN_MINUTES = 180;
+    /** Presence window: after this with no heartbeat, API reports offline (mobile also uses ~90s RTDB). */
+    private const ONLINE_LAST_SEEN_MINUTES = 3;
+
+    /** Match mobile RTDB grace — ESP pushes `hardware_status` every ~2s when Wi‑Fi is up. */
+    private const ONLINE_RTDB_GRACE_SECONDS = 90;
 
     private function machineDisplayName(Microcontroller $machine): string
     {
         $display = trim((string) ($machine->display_name ?? ''));
         return $display !== '' ? $display : (string) $machine->device_id;
+    }
+
+    /** Normalize Wi‑Fi MAC to 12 lowercase hex (no colons) for `microcontrollers.mac`. */
+    private function normalizeHardwareMac(?string $mac): ?string
+    {
+        if ($mac === null || trim((string) $mac) === '') {
+            return null;
+        }
+        $hex = strtolower(preg_replace('/[^0-9a-f]/i', '', (string) $mac));
+
+        return strlen($hex) === 12 ? $hex : null;
+    }
+
+    /** 12-char hex MAC → `aa:bb:cc:dd:ee:ff` for JSON payloads. */
+    private function formatMacForDisplay(string $normalized12): string
+    {
+        $h = strtolower(preg_replace('/[^0-9a-f]/', '', $normalized12));
+        if (strlen($h) !== 12) {
+            return $normalized12;
+        }
+
+        return implode(':', str_split($h, 2));
+    }
+
+    private function microcontrollersHasMacColumn(): bool
+    {
+        return Schema::hasTable('microcontrollers') && Schema::hasColumn('microcontrollers', 'mac');
     }
 
     /**
@@ -41,20 +75,30 @@ class DryingController extends Controller
     {
         return [
             'esp32',
-            'solar_panel',
-            'heater_fan_1',
-            'heater_fan_2',
-            'ventilation_fan',
             'heater_1',
             'heater_2',
+            'fan_1',
+            'fan_2',
+            'fan_3',
             'buzzer',
             'led_1',
             'led_2',
             'led_3',
-            'temp_humidity_sensor',
-            'moisture_sensor_1',
-            'moisture_sensor_2',
+            'dht22',
+            'moisture_sensor',
+            'door_sensor',
         ];
+    }
+
+    /**
+     * Sensor-only keys written to Firebase `machines/{id}/hardware_status/components`
+     * and used for Overview hardware rows — must match firmware RTDB publish order/keys.
+     *
+     * @return list<string>
+     */
+    private function firebaseSensorHardwareComponentKeys(): array
+    {
+        return ['esp32', 'door_sensor', 'moisture_sensor', 'dht22'];
     }
 
     private function coerceComponentStatus(mixed $status): string
@@ -100,53 +144,56 @@ class DryingController extends Controller
 
         $allowed = [
             'esp32',
-            'solar_panel',
-            'heater_fan_1',
-            'heater_fan_2',
-            'ventilation_fan',
             'heater_1',
             'heater_2',
+            'fan_1',
+            'fan_2',
+            'fan_3',
             'buzzer',
             'led_1',
             'led_2',
             'led_3',
-            'led_drying',
-            'led_pause',
-            'led_stop',
-            'temp_humidity_sensor',
+            'dht22',
             'moisture_sensor',
-            'moisture_sensor_1',
-            'moisture_sensor_2',
+            'door_sensor',
         ];
 
         return match ($key) {
             'esp32', 'esp_32', 'esp', 'controller', 'mcu', 'microcontroller' => 'esp32',
 
-            'solar_panel', 'solar', 'solarpanel', 'pv', 'panel', 'solar_panel_module' => 'solar_panel',
-
             'buzzer', 'buzz', 'beep', 'beeper' => 'buzzer',
+
+            // MC38 reed switch (door sensor)
+            'door_sensor', 'door', 'door_switch', 'door_contact', 'contact_switch',
+            'reed_switch', 'reed', 'magnetic_switch', 'mc38', 'mc_38' => 'door_sensor',
 
             'heater_1', 'heater1', 'h1', 'heat1', 'heating_1', 'heating1', 'relay_1', 'relay1', 'rly1', 'ssr1' => 'heater_1',
             'heater_2', 'heater2', 'h2', 'heat2', 'heating_2', 'heating2', 'relay_2', 'relay2', 'rly2', 'ssr2' => 'heater_2',
 
-            'heater_fan_1', 'fan1', 'fan_1', 'hf1', 'h_fan_1', 'drying_fan_1', 'hot_fan_1' => 'heater_fan_1',
-            'heater_fan_2', 'fan2', 'fan_2', 'hf2', 'h_fan_2', 'drying_fan_2', 'hot_fan_2' => 'heater_fan_2',
-            'ventilation_fan', 'fan3', 'fan_3', 'vf', 'vent_fan', 'exhaust', 'exhaust_fan', 'cooling_fan', 'vent_fan_1' => 'ventilation_fan',
+            // Fans: canonical keys are fan_1..fan_3 (maps legacy heater_fan / ventilation too)
+            'fan_1', 'fan1', 'heater_fan_1', 'hf1', 'h_fan_1', 'drying_fan_1', 'hot_fan_1' => 'fan_1',
+            'fan_2', 'fan2', 'heater_fan_2', 'hf2', 'h_fan_2', 'drying_fan_2', 'hot_fan_2' => 'fan_2',
+            'fan_3', 'fan3', 'ventilation_fan', 'vf', 'vent_fan', 'exhaust', 'exhaust_fan', 'cooling_fan', 'vent_fan_1', 'fan' => 'fan_3',
 
             'led_1', 'led1', 'led_drying', 'drying_led' => 'led_1',
             'led_2', 'led2', 'led_pause', 'pause_led' => 'led_2',
             'led_3', 'led3', 'led_stop', 'stop_led' => 'led_3',
 
-            'temp_humidity_sensor', 'dht22', 'dht11', 'dht', 'dht_22', 'dht_11',
+            // DHT22 is one physical sensor with temp+humidity outputs.
+            'dht22', 'dht11', 'dht', 'dht_22', 'dht_11', 'temp_humidity_sensor',
             'temperature_and_humidity_sensor', 'temp_sensor', 'humidity_sensor', 'temperature_sensor',
-            'temp_humidity', 'rh_temp', 'ambient', 'env_sensor' => 'temp_humidity_sensor',
+            'temp_humidity', 'rh_temp', 'ambient', 'env_sensor' => 'dht22',
 
-            'moisture_sensor_1', 'moisture1', 'moisture_1', 'loadcell1', 'loadcell_1', 'load_cell_1',
-            'lc1', 'hx711_1', 'hx711a', 'weight_1', 'scale_1' => 'moisture_sensor_1',
-            'moisture_sensor_2', 'moisture2', 'moisture_2', 'loadcell2', 'loadcell_2', 'load_cell_2',
-            'lc2', 'hx711_2', 'hx711b', 'weight_2', 'scale_2' => 'moisture_sensor_2',
+            // Moisture sensor (YL-69) is a single component.
+            'moisture_sensor', 'moisture', 'yl69', 'yl_69', 'soil_moisture' => 'moisture_sensor',
 
-            'moisture_sensor', 'loadcell', 'hx711', 'weight', 'scale' => 'moisture_sensor_1',
+            // Accept legacy names but never persist them as canonical enum values.
+            'temp_humidity_sensor' => 'dht22',
+            'moisture_sensor_1' => 'moisture_sensor',
+            'moisture_sensor_2' => 'moisture_sensor',
+            'led_drying' => 'led_1',
+            'led_pause' => 'led_2',
+            'led_stop' => 'led_3',
 
             default => in_array($key, $allowed, true) ? $key : null,
         };
@@ -417,7 +464,7 @@ class DryingController extends Controller
 
         $payloadKeys = [
             'components', 'component', 'parts', 'connected', 'hardware', 'sensors',
-            'component_status', 'status', 'states', 'devices', 'readings',
+            'component_status', 'status', 'states', 'devices',
             'gpio_states', 'components_report', 'attached', 'detected',
         ];
 
@@ -458,9 +505,11 @@ class DryingController extends Controller
             $chunks[] = $v;
         };
 
+        // Never treat `readings` as a component map: keys like `door` ("open"/"closed") normalize
+        // to `door_sensor` and coerce to `not_working`, overwriting real `components.{...}`.
         $chunkKeys = [
             'components', 'component', 'parts', 'connected', 'hardware', 'sensors',
-            'component_status', 'states', 'devices', 'readings',
+            'component_status', 'states', 'devices',
             'gpio_states', 'components_report', 'attached', 'detected',
         ];
 
@@ -549,6 +598,11 @@ class DryingController extends Controller
             $deviceId = 'esp32-1';
         }
 
+        $wifiMacRaw = $readFirstNonEmptyString($decodedRoot, [
+            'mac', 'mac_address', 'macAddress', 'MAC', 'wifi_mac', 'wifiMac',
+        ]);
+        $wifiMacNorm = $this->normalizeHardwareMac($wifiMacRaw);
+
         // Prefer explicit DB row id from the app/firmware so heartbeats hit the same row
         // the user "saved", even if device_id strings drift across sketches.
         $machine = null;
@@ -560,6 +614,10 @@ class DryingController extends Controller
             if ($candidate) {
                 $machine = $candidate;
             }
+        }
+
+        if (! $machine && $wifiMacNorm && $this->microcontrollersHasMacColumn()) {
+            $machine = Microcontroller::where('mac', $wifiMacNorm)->first();
         }
 
         if (! $machine) {
@@ -585,11 +643,22 @@ class DryingController extends Controller
         }
 
         if (!$machine) {
-            $machine = Microcontroller::create([
+            $row = [
                 'device_id' => $deviceId,
                 'created_by' => $userId,
                 'last_seen' => null,
-            ]);
+            ];
+            if ($wifiMacNorm && $this->microcontrollersHasMacColumn()) {
+                $row['mac'] = $wifiMacNorm;
+            }
+            $machine = Microcontroller::create($row);
+        } elseif ($wifiMacNorm && $this->microcontrollersHasMacColumn() && (string) ($machine->mac ?? '') === '') {
+            try {
+                $machine->mac = $wifiMacNorm;
+                $machine->save();
+            } catch (\Throwable) {
+                // Another row already owns this MAC.
+            }
         }
 
         $statusMap = [];
@@ -600,7 +669,7 @@ class DryingController extends Controller
         // Nested objects some firmware uses: { "hardware": { "heater_1": "ok" } }
         $nestedObjectKeys = [
             'hardware', 'sensors', 'component_status', 'status', 'states', 'devices',
-            'readings', 'gpio_states', 'components_report', 'attached', 'detected',
+            'gpio_states', 'components_report', 'attached', 'detected',
         ];
         foreach ($nestedObjectKeys as $nestedKey) {
             if (isset($decodedRoot[$nestedKey]) && is_array($decodedRoot[$nestedKey])) {
@@ -632,32 +701,12 @@ class DryingController extends Controller
 
         $defaultComponents = $this->canonicalHardwareComponentKeys();
 
-        // Single-field sketches often map `moisture_sensor` → moisture_sensor_1 only.
-        // Mirror to moisture_sensor_2 so both UI rows stay in sync without firmware changes.
-        if (isset($statusMap['moisture_sensor_1']) && ! isset($statusMap['moisture_sensor_2'])) {
-            $statusMap['moisture_sensor_2'] = $statusMap['moisture_sensor_1'];
-        }
-
         /**
-         * `esp32` row meaning in the mobile UI:
-         * - If firmware reports **no hardware components at all**, do NOT mark ESP32 as "working"
-         *   (users interpret that as "all hardware OK"). Heartbeat only proves Wi‑Fi/MQ stack is up.
-         * - If firmware reports at least one non-ESP component, ESP32 is treated as healthy/online.
+         * Successful HTTP heartbeat means the MCU reached Laravel — same notion as mobile
+         * "machine online". Always mark ESP32 `working` here; sensor rows still come from
+         * firmware `components` (dht22, door_sensor, moisture_sensor).
          */
-        $reportedNonEspKeys = array_values(array_filter(
-            array_keys($statusMap),
-            static fn ($k) => is_string($k) && $k !== '' && strtolower((string) $k) !== 'esp32'
-        ));
-
-        if ($reportedNonEspKeys === []) {
-            // No component payload → ESP is present but hardware is not validated yet.
-            $statusMap['esp32'] = 'warning';
-        } else {
-            // Default ESP32 to healthy when we have *some* component telemetry to pair it with.
-            if (! isset($statusMap['esp32'])) {
-                $statusMap['esp32'] = 'working';
-            }
-        }
+        $statusMap['esp32'] = 'working';
 
         /**
          * Enforce deterministic "detection" semantics for the mobile UI:
@@ -674,39 +723,38 @@ class DryingController extends Controller
                 $status = $statusMap['esp32'] ?? $status;
             }
 
-            MachineHardwareStatus::updateOrCreate(
-                [
-                    'microcontroller_id' => $machine->id,
-                    'component_name' => $componentName,
-                ],
-                [
-                    'status' => $status,
-                    'last_checked_at' => now(),
-                ]
-            );
+            try {
+                MachineHardwareStatus::updateOrCreate(
+                    [
+                        'microcontroller_id' => $machine->id,
+                        'component_name' => $componentName,
+                    ],
+                    [
+                        'status' => $status,
+                        'last_checked_at' => now(),
+                    ]
+                );
+            } catch (\Throwable $e) {
+                // If DB enum is out of date, don't crash the heartbeat endpoint.
+                // Live monitoring via Firebase RTDB should still work.
+            }
         }
 
         // Bump presence only after hardware rows are written so `last_seen` ordering matches
         // `last_checked_at` (avoids UI treating fresh rows as stale).
         $machine->update(['last_seen' => now()]);
 
-        // Optional: mirror the latest snapshot to Firebase RTDB for realtime mobile UI.
-        try {
-            $firebase = app(FirebaseRealtimeService::class);
-            $firebase->setMachineHardwareStatus((int) $machine->id, [
-                'microcontroller_id' => (int) $machine->id,
-                'device_id' => (string) $machine->device_id,
-                'updated_at' => now()->toIso8601String(),
-                'components' => $statusMap,
-            ]);
-        } catch (\Throwable $e) {
-            // Firebase must never break the heartbeat/MySQL write path.
-        }
+        $this->recordSensorLogForActiveSession($machine, $decodedRoot);
+
+        // ESP firmware already PUTs `machines/{id}/hardware_status` every ~2s. A second Laravel
+        // mirror here made `updated_at` + components flip and the app looked offline/online.
+        // MySQL `last_seen` above is enough for the API; mobile uses RTDB from the board only.
 
         $resp = [
             'success' => true,
             'microcontroller_id' => $machine->id,
             'device_id' => $machine->device_id,
+            'mac' => $this->microcontrollersHasMacColumn() ? $machine->mac : null,
             'display_name' => $machine->display_name,
             'name' => $this->machineDisplayName($machine),
             'detected_components' => array_keys($statusMap),
@@ -716,18 +764,7 @@ class DryingController extends Controller
         ];
 
         if ($debugEnabled) {
-            $componentsVal = $decodedRoot['components'] ?? null;
-            $resp['debug'] = [
-                'method' => $request->method(),
-                'content_type' => (string) ($request->header('content-type') ?? ''),
-                'content_length_header' => (string) ($request->header('content-length') ?? ''),
-                'raw_body_len' => strlen($rawBody),
-                'root_keys' => $decodedRootKeys,
-                'laravel_all_keys' => is_array($laravelAll) ? array_keys($laravelAll) : [],
-                'has_components_key' => array_key_exists('components', $decodedRoot),
-                'components_php_type' => is_array($componentsVal) ? 'array' : gettype($componentsVal),
-                'parsed_status_keys' => array_keys($statusMap),
-            ];
+            $resp['debug'] = $debug;
         }
 
         return response()->json($resp);
@@ -744,25 +781,100 @@ class DryingController extends Controller
         return $ls->gte(now()->subMinutes(self::ONLINE_LAST_SEEN_MINUTES));
     }
 
+    /**
+     * True when Firebase RTDB `machines/{id}/hardware_status` was updated recently
+     * (ESP may reach RTDB while Laravel HTTP heartbeat is blocked or misconfigured).
+     */
+    private function isMicrocontrollerOnlineViaFirebase(int $microcontrollerId): bool
+    {
+        if ($microcontrollerId <= 0) {
+            return false;
+        }
+
+        try {
+            $firebase = app(FirebaseRealtimeService::class);
+            if (! $firebase->isEnabled()) {
+                return false;
+            }
+
+            $snap = $firebase->getMachineHardwareStatus($microcontrollerId);
+            if (! is_array($snap)) {
+                return false;
+            }
+
+            $updated = $snap['updated_at'] ?? null;
+            if ($updated === null || $updated === '') {
+                return false;
+            }
+
+            if (is_array($updated)) {
+                return false;
+            }
+
+            if (is_numeric($updated)) {
+                $ms = (int) $updated;
+                if ($ms > 0 && $ms < 1_000_000_000_000) {
+                    $ms *= 1000;
+                }
+
+                return Carbon::createFromTimestampMs($ms)
+                    ->gte(now()->subSeconds(self::ONLINE_RTDB_GRACE_SECONDS));
+            }
+
+            return Carbon::parse((string) $updated)
+                ->gte(now()->subSeconds(self::ONLINE_RTDB_GRACE_SECONDS));
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * Online for session control / overview — MySQL `last_seen` OR fresh Firebase heartbeat.
+     */
+    private function isMicrocontrollerReachable(Microcontroller $machine): bool
+    {
+        if ($this->isMicrocontrollerOnline($machine)) {
+            return true;
+        }
+
+        if (! $this->isMicrocontrollerOnlineViaFirebase((int) $machine->id)) {
+            return false;
+        }
+
+        // Heal Laravel presence when RTDB proves the board is live (e.g. SEND_TO_LARAVEL blocked).
+        try {
+            $machine->update(['last_seen' => now()]);
+        } catch (\Throwable) {
+            // Non-fatal — session can still start.
+        }
+
+        return true;
+    }
+
     private function componentAliases(string $componentName): array
     {
         $key = strtolower(str_replace([' ', '-'], '_', urldecode($componentName)));
 
         return match ($key) {
             'esp32' => ['esp32'],
-            'solar_panel' => ['solar_panel', 'solar'],
             'buzzer' => ['buzzer'],
+            'door_sensor' => ['door_sensor', 'door', 'mc38', 'reed_switch', 'reed', 'magnetic_switch'],
             'heater_1' => ['heater_1', 'heater1', 'relay_1', 'relay1'],
             'heater_2' => ['heater_2', 'heater2', 'relay_2', 'relay2'],
-            'heater_fan_1' => ['heater_fan_1', 'fan1', 'fan_1'],
-            'heater_fan_2' => ['heater_fan_2', 'fan2', 'fan_2'],
-            'ventilation_fan' => ['ventilation_fan', 'fan3', 'fan_3', 'exhaust_fan'],
-            'temp_humidity_sensor' => ['temp_humidity_sensor', 'dht22', 'dht11', 'dht'],
+            'fan_1' => ['fan_1', 'fan1', 'heater_fan_1'],
+            'fan_2' => ['fan_2', 'fan2', 'heater_fan_2'],
+            'fan_3' => ['fan_3', 'fan3', 'ventilation_fan', 'exhaust_fan', 'fan'],
+            'dht22' => ['dht22', 'temp_humidity_sensor', 'dht11', 'dht'],
             'led_1' => ['led_1', 'led_drying'],
             'led_2' => ['led_2', 'led_pause'],
             'led_3' => ['led_3', 'led_stop'],
-            'moisture_sensor_1' => ['moisture_sensor_1', 'loadcell_1', 'loadcell1', 'moisture_sensor'],
-            'moisture_sensor_2' => ['moisture_sensor_2', 'loadcell_2', 'loadcell2'],
+            'moisture_sensor' => [
+                'moisture_sensor',
+                'moisture',
+                'yl69',
+                'yl_69',
+                'soil_moisture',
+            ],
             default => [$key],
         };
     }
@@ -860,11 +972,26 @@ class DryingController extends Controller
             'target_temperature' => 'nullable|numeric',
             'fan_speed' => 'nullable|integer|min:1|max:3',
             'set_duration_minutes' => 'nullable|integer|min:1',
+            'drying_time_minutes' => 'nullable|integer|min:0',
+            'drying_time_seconds' => 'nullable|integer|min:0',
+            'temperature' => 'nullable|numeric',
+            'humidity' => 'nullable|numeric',
+            'moisture' => 'nullable|numeric',
         ]);
 
         $mcId = (int) $data['microcontroller_id'];
         $userId = (int) $data['user_id'];
         $action = $data['action'];
+
+        $machine = Microcontroller::find($mcId);
+        if ($machine instanceof Microcontroller && $this->isMicrocontrollerReachable($machine)) {
+            // Keep DB presence in sync when RTDB is live (UI uses Firebase for Online).
+            try {
+                $machine->update(['last_seen' => now()]);
+            } catch (\Throwable) {
+                // Non-fatal.
+            }
+        }
 
         try {
             if ($action === 'start') {
@@ -911,6 +1038,32 @@ class DryingController extends Controller
             }
 
             if ($action === 'pause') {
+                $paused = DryingSession::where('microcontroller_id', $mcId)
+                    ->where('status', 'paused')
+                    ->whereNull('ended_at')
+                    ->latest('started_at')
+                    ->first();
+
+                if ($paused) {
+                    $update = ['status' => 'running'];
+                    foreach (['fish_type', 'total_fish', 'target_temperature', 'fan_speed', 'set_duration_minutes', 'drying_time_minutes'] as $field) {
+                        if (array_key_exists($field, $data) && $data[$field] !== null && $data[$field] !== '') {
+                            $update[$field] = in_array($field, ['total_fish', 'fan_speed', 'set_duration_minutes', 'drying_time_minutes'], true)
+                                ? (int) $data[$field]
+                                : ($field === 'target_temperature' ? (float) $data[$field] : $data[$field]);
+                        }
+                    }
+                    if (array_key_exists('drying_time_seconds', $data) && $data['drying_time_seconds'] !== null) {
+                        $update['drying_time_minutes'] = max(0, (int) $data['drying_time_seconds']);
+                    }
+                    $paused->update($update);
+
+                    return response()->json([
+                        'success' => true,
+                        'session' => $paused->fresh(),
+                    ]);
+                }
+
                 $session = DryingSession::where('microcontroller_id', $mcId)
                     ->where('status', 'running')
                     ->whereNull('ended_at')
@@ -924,7 +1077,18 @@ class DryingController extends Controller
                     ], 422);
                 }
 
-                $session->update(['status' => 'paused']);
+                $update = ['status' => 'paused'];
+                foreach (['fish_type', 'total_fish', 'target_temperature', 'fan_speed', 'set_duration_minutes', 'drying_time_minutes'] as $field) {
+                    if (array_key_exists($field, $data) && $data[$field] !== null && $data[$field] !== '') {
+                        $update[$field] = in_array($field, ['total_fish', 'fan_speed', 'set_duration_minutes', 'drying_time_minutes'], true)
+                            ? (int) $data[$field]
+                            : ($field === 'target_temperature' ? (float) $data[$field] : $data[$field]);
+                    }
+                }
+                if (array_key_exists('drying_time_seconds', $data) && $data['drying_time_seconds'] !== null) {
+                    $update['drying_time_minutes'] = max(0, (int) $data['drying_time_seconds']);
+                }
+                $session->update($update);
 
                 return response()->json([
                     'success' => true,
@@ -946,14 +1110,28 @@ class DryingController extends Controller
                     ], 422);
                 }
 
-                $session->update([
+                $elapsedSeconds = $this->resolveElapsedDryingSecondsForStop($session, $data);
+
+                $update = [
                     'status' => 'stopped',
                     'ended_at' => now(),
-                ]);
+                    // Column name is legacy; value = actual running seconds (pause excluded).
+                    'drying_time_minutes' => $elapsedSeconds,
+                ];
+                foreach (['fish_type', 'total_fish', 'target_temperature', 'fan_speed', 'set_duration_minutes'] as $field) {
+                    if (array_key_exists($field, $data) && $data[$field] !== null && $data[$field] !== '') {
+                        $update[$field] = in_array($field, ['total_fish', 'fan_speed', 'set_duration_minutes', 'drying_time_minutes'], true)
+                            ? (int) $data[$field]
+                            : ($field === 'target_temperature' ? (float) $data[$field] : $data[$field]);
+                    }
+                }
+                $session->update($update);
+
+                $this->appendFinalSensorLogFromRequest($session, $data);
 
                 return response()->json([
                     'success' => true,
-                    'session' => $session->fresh(),
+                    'session' => $session->fresh()->load('sensorLogs'),
                 ]);
             }
         } catch (\Throwable $e) {
@@ -968,8 +1146,12 @@ class DryingController extends Controller
 
     public function recommendation(Request $request)
     {
+        $mcId = (int) $request->query('microcontroller_id', 0);
+
         $currentSession = DryingSession::query()
-            ->whereIn('status', ['running', 'paused', 'completed'])
+            ->whereIn('status', ['running', 'paused'])
+            ->whereNull('ended_at')
+            ->when($mcId > 0, fn ($q) => $q->where('microcontroller_id', $mcId))
             ->latest('started_at')
             ->first();
 
@@ -979,6 +1161,17 @@ class DryingController extends Controller
         $inputMoisture = $request->query('moisture');
         $inputFanSpeed = $request->query('fan_speed');
         $inputElapsedMinutes = $request->query('elapsed_minutes');
+
+        $activeFishType = $inputFishType !== ''
+            ? $inputFishType
+            : trim((string) ($currentSession?->fish_type ?? ''));
+
+        if ($activeFishType === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'No recommendation available.',
+            ], 422);
+        }
 
         $hasInputVector = $inputTemperature !== null || $inputHumidity !== null || $inputMoisture !== null || $inputFanSpeed !== null;
 
@@ -997,11 +1190,19 @@ class DryingController extends Controller
             ], 404);
         }
 
-        $candidates = DryingSession::query()
-            ->where('id', '!=', $currentSession->id)
-            ->where('status', 'completed')
-            ->where('final_status', 'fully_dried')
-            ->with(['sensorLogs:id,drying_session_id,temperature,humidity,moisture,fan_speed,recorded_at'])
+        $candidatesQuery = DryingSession::query()
+            ->whereIn('status', ['stopped', 'completed'])
+            ->whereNotNull('ended_at')
+            ->with(['sensorLogs:id,drying_session_id,temperature,humidity,moisture,fan_speed,recorded_at']);
+
+        if ($currentSession) {
+            $candidatesQuery->where('id', '!=', $currentSession->id);
+        }
+        if ($mcId > 0) {
+            $candidatesQuery->where('microcontroller_id', $mcId);
+        }
+
+        $candidates = $candidatesQuery
             ->get()
             ->filter(fn (DryingSession $session) => $session->sensorLogs->isNotEmpty())
             ->map(function (DryingSession $session) {
@@ -1020,7 +1221,21 @@ class DryingController extends Controller
         if ($candidates->isEmpty()) {
             return response()->json([
                 'success' => false,
-                'message' => 'Not enough successful history for KNN recommendation.',
+                'message' => 'Not enough past drying data yet. Complete more sessions to get suggestions.',
+            ], 404);
+        }
+
+        $fishCandidates = $candidates
+            ->filter(fn (array $c) => $this->fishTypesMatch($c['session']->fish_type ?? '', $activeFishType))
+            ->values();
+
+        if ($fishCandidates->isEmpty()) {
+            $displayFish = $this->displayFishTypeLabel($activeFishType);
+
+            return response()->json([
+                'success' => false,
+                'message' => "No drying history is available for {$displayFish}.",
+                'fish_type' => $activeFishType,
             ], 404);
         }
 
@@ -1031,9 +1246,11 @@ class DryingController extends Controller
             (float) ($inputFanSpeed ?? $currentLog?->fan_speed ?? $currentSession?->fan_speed ?? 0),
         ];
 
-        // Prefer "successful" sessions, but fall back to any completed sessions if needed.
-        $successful = $candidates->filter(fn (array $c) => ($c['session']->final_status ?? null) === 'fully_dried')->values();
-        $pool = $successful->isNotEmpty() ? $successful : $candidates;
+        // Same fish type only; prefer fully dried sessions when available.
+        $successful = $fishCandidates
+            ->filter(fn (array $c) => ($c['session']->final_status ?? null) === 'fully_dried')
+            ->values();
+        $pool = $successful->isNotEmpty() ? $successful : $fishCandidates;
 
         // Normalize features so distance isn't dominated by units (°C vs % vs fan level).
         $mins = [
@@ -1062,14 +1279,7 @@ class DryingController extends Controller
         ];
 
         $nearest = $pool
-            ->map(function (array $candidate) use ($currentNorm, $currentSession, $inputFishType, $norm, $mins, $maxs) {
-                $activeFishType = $inputFishType !== '' ? $inputFishType : ($currentSession?->fish_type ?? '');
-                $fishPenalty = (
-                    !empty($candidate['session']->fish_type) &&
-                    !empty($activeFishType) &&
-                    strcasecmp($candidate['session']->fish_type, $activeFishType) !== 0
-                ) ? 5 : 0;
-
+            ->map(function (array $candidate) use ($currentNorm, $norm, $mins, $maxs) {
                 $candNorm = [
                     $norm((float) $candidate['avg_temperature'], $mins['t'], $maxs['t']),
                     $norm((float) $candidate['avg_humidity'], $mins['h'], $maxs['h']),
@@ -1077,15 +1287,13 @@ class DryingController extends Controller
                     $norm((float) $candidate['avg_fan_speed'], $mins['f'], $maxs['f']),
                 ];
 
-                // Euclidean distance in normalized sensor-feature space (KNN).
-                $distance = sqrt(
+                $candidate['distance'] = sqrt(
                     (($candNorm[0] - $currentNorm[0]) ** 2) +
                     (($candNorm[1] - $currentNorm[1]) ** 2) +
                     (($candNorm[2] - $currentNorm[2]) ** 2) +
                     (($candNorm[3] - $currentNorm[3]) ** 2)
-                ) + $fishPenalty;
+                );
 
-                $candidate['distance'] = $distance;
                 return $candidate;
             })
             ->sortBy('distance')
@@ -1093,21 +1301,21 @@ class DryingController extends Controller
             ->values();
 
         $recommendedTemperature = round((float) $nearest->avg('avg_temperature'), 1);
-        $recommendedFanSpeed = (int) max(1, min(5, round((float) $nearest->avg('avg_fan_speed'))));
+        $recommendedFanSpeed = (int) max(1, min(3, round((float) $nearest->avg('avg_fan_speed'))));
         $recommendedDuration = (int) max(1, round((float) $nearest->avg('duration_minutes')));
         $elapsedMinutes = (int) (
-            $inputElapsedMinutes
-            ?? $currentSession?->drying_time_minutes
-            ?? 0
+            $inputElapsedMinutes !== null && $inputElapsedMinutes !== ''
+                ? $inputElapsedMinutes
+                : ($currentSession?->drying_time_minutes ?? 0)
         );
         $targetDuration = (int) ($currentSession?->set_duration_minutes ?? 0);
-        $needsExtension = $targetDuration > 0 && $elapsedMinutes >= $targetDuration;
-        $extensionMinutes = $needsExtension ? (int) max(5, $recommendedDuration - $elapsedMinutes) : 0;
+        $needsExtension = $currentSession
+            && $targetDuration > 0
+            && $elapsedMinutes >= $targetDuration;
+        $extensionMinutes = $needsExtension ? (int) max(5, $recommendedDuration) : 0;
 
         return response()->json([
             'success' => true,
-            'algorithm' => 'KNN',
-            'k' => $nearest->count(),
             'needs_extension' => $needsExtension,
             'recommendation' => [
                 'temperature' => $recommendedTemperature,
@@ -1115,14 +1323,151 @@ class DryingController extends Controller
                 'duration_minutes' => $recommendedDuration,
                 'extension_minutes' => $extensionMinutes,
                 'description' => $needsExtension
-                    ? "Drying time finished. KNN recommends extending by {$extensionMinutes} minute(s) with updated parameters."
+                    ? "Drying time is up. Suggested extension: {$extensionMinutes} minute(s) with the settings below."
                     : (
                         $successful->isNotEmpty()
-                            ? 'Recommended from the nearest successful drying sessions using sensor-based KNN similarity.'
-                            : 'Recommended from the nearest past drying sessions using sensor-based KNN similarity (no labeled successful sessions yet).'
+                            ? 'Suggested temperature, fan speed, and drying time based on similar successful dries.'
+                            : 'Suggested settings based on your previous drying sessions.'
                     ),
             ],
         ]);
+    }
+
+    private function normalizeFishTypeKey(?string $value): string
+    {
+        $v = strtolower(trim((string) $value));
+        $v = preg_replace('/\s+/', ' ', $v) ?? '';
+
+        return $v;
+    }
+
+    private function fishTypesMatch(?string $a, ?string $b): bool
+    {
+        $ka = $this->normalizeFishTypeKey($a);
+        $kb = $this->normalizeFishTypeKey($b);
+        if ($ka === '' || $kb === '') {
+            return false;
+        }
+
+        return $ka === $kb;
+    }
+
+    private function displayFishTypeLabel(string $value): string
+    {
+        $v = trim($value);
+
+        return $v !== '' ? '"'.$v.'"' : 'this fish type';
+    }
+
+    private function formatDryingTimeLabel(int $minutes): string
+    {
+        $minutes = max(0, $minutes);
+        if ($minutes < 60) {
+            return $minutes.' min';
+        }
+        $hours = intdiv($minutes, 60);
+        $mins = $minutes % 60;
+
+        return $mins > 0 ? "{$hours} hr {$mins} min" : "{$hours} hr";
+    }
+
+    /**
+     * Actual run time while drying (pause excluded). Only trust the mobile timer — never wall clock.
+     */
+    private function resolveElapsedDryingSecondsForStop(DryingSession $session, array $data): int
+    {
+        if (array_key_exists('drying_time_seconds', $data) && $data['drying_time_seconds'] !== null) {
+            return max(0, (int) $data['drying_time_seconds']);
+        }
+
+        if (array_key_exists('drying_time_minutes', $data) && $data['drying_time_minutes'] !== null) {
+            return max(0, (int) $data['drying_time_minutes']) * 60;
+        }
+
+        return max(0, (int) ($session->drying_time_minutes ?? 0));
+    }
+
+    private function appendFinalSensorLogFromRequest(DryingSession $session, array $data): void
+    {
+        $hasReading = array_key_exists('temperature', $data)
+            || array_key_exists('humidity', $data)
+            || array_key_exists('moisture', $data);
+        if (! $hasReading) {
+            return;
+        }
+
+        $last = $session->sensorLogs()->latest('recorded_at')->first();
+
+        try {
+            SensorLog::create([
+                'drying_session_id' => $session->id,
+                'temperature' => (float) (
+                    $data['temperature'] ?? $last?->temperature ?? $session->target_temperature ?? 0
+                ),
+                'humidity' => (float) ($data['humidity'] ?? $last?->humidity ?? 0),
+                'moisture' => (float) ($data['moisture'] ?? $last?->moisture ?? 0),
+                'fan_speed' => (int) ($session->fan_speed ?? $last?->fan_speed ?? 1),
+                'recorded_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('sensor_log_final_failed', ['message' => $e->getMessage()]);
+        }
+    }
+
+    private function recordSensorLogForActiveSession(Microcontroller $machine, array $decodedRoot): void
+    {
+        $session = DryingSession::where('microcontroller_id', $machine->id)
+            ->whereIn('status', ['running', 'paused'])
+            ->whereNull('ended_at')
+            ->latest('started_at')
+            ->first();
+
+        if (! $session) {
+            return;
+        }
+
+        $readings = $decodedRoot['readings'] ?? null;
+        if (! is_array($readings)) {
+            try {
+                $firebase = app(FirebaseRealtimeService::class);
+                $snap = $firebase->getMachineHardwareStatus((int) $machine->id);
+                $readings = is_array($snap['readings'] ?? null) ? $snap['readings'] : null;
+            } catch (\Throwable) {
+                return;
+            }
+        }
+
+        if (! is_array($readings)) {
+            return;
+        }
+
+        $last = $session->sensorLogs()->latest('recorded_at')->first();
+        if ($last?->recorded_at && Carbon::parse($last->recorded_at)->gte(now()->subSeconds(25))) {
+            return;
+        }
+
+        $temp = isset($readings['temperature']) ? (float) $readings['temperature'] : null;
+        $humidity = isset($readings['humidity']) ? (float) $readings['humidity'] : null;
+        $moisture = isset($readings['moisture_percent'])
+            ? (float) $readings['moisture_percent']
+            : (isset($readings['moisture']) ? (float) $readings['moisture'] : null);
+
+        if ($temp === null && $humidity === null && $moisture === null) {
+            return;
+        }
+
+        try {
+            SensorLog::create([
+                'drying_session_id' => $session->id,
+                'temperature' => $temp ?? (float) ($session->target_temperature ?? 0),
+                'humidity' => $humidity ?? 0,
+                'moisture' => $moisture ?? 0,
+                'fan_speed' => (int) ($session->fan_speed ?? 1),
+                'recorded_at' => now(),
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('sensor_log_insert_failed', ['message' => $e->getMessage()]);
+        }
     }
 
     private function transformSessionForHistory(DryingSession $session): array
@@ -1130,13 +1475,13 @@ class DryingController extends Controller
         $logs = $session->sensorLogs;
         $lastLog = $logs->last();
 
-        $duration = $session->drying_time_minutes
-            ?? $session->set_duration_minutes
-            ?? (
-                $session->started_at && $session->ended_at
-                    ? Carbon::parse($session->ended_at)->diffInMinutes(Carbon::parse($session->started_at))
-                    : 0
-            );
+        /** `drying_time_minutes` column stores running seconds (pause excluded). */
+        $totalDryingSeconds = max(0, (int) ($session->drying_time_minutes ?? 0));
+        $totalDryingMinutes = (int) floor($totalDryingSeconds / 60);
+
+        $avgHumidity = $logs->isNotEmpty() ? round((float) $logs->avg('humidity'), 2) : null;
+        $avgMoisture = $logs->isNotEmpty() ? round((float) $logs->avg('moisture'), 2) : null;
+        $avgTemperature = $logs->isNotEmpty() ? round((float) $logs->avg('temperature'), 2) : null;
 
         return [
             'id' => $session->id,
@@ -1147,15 +1492,20 @@ class DryingController extends Controller
             'total_fish' => $session->total_fish !== null ? (int) $session->total_fish : null,
             'target_temperature' => $session->target_temperature !== null ? (float) $session->target_temperature : null,
             'status' => $session->status,
-            'duration_minutes' => (int) ($duration ?? 0),
+            'duration_minutes' => (int) $totalDryingMinutes,
+            'set_duration_minutes' => $session->set_duration_minutes !== null ? (int) $session->set_duration_minutes : null,
+            'drying_time_minutes' => (int) $totalDryingMinutes,
+            'drying_time_seconds' => (int) $totalDryingSeconds,
             'temperature' => $lastLog?->temperature !== null ? (float) $lastLog->temperature : null,
-            'humidity' => $lastLog?->humidity !== null ? (float) $lastLog->humidity : null,
-            'moisture' => $lastLog?->moisture !== null ? (float) $lastLog->moisture : null,
+            'humidity' => $lastLog?->humidity !== null ? (float) $lastLog->humidity : $avgHumidity,
+            'moisture' => $lastLog?->moisture !== null ? (float) $lastLog->moisture : $avgMoisture,
             'fan_speed' => $lastLog?->fan_speed ?? $session->fan_speed,
-            'avg_temperature' => round((float) ($logs->avg('temperature') ?? 0), 2),
-            'avg_humidity' => round((float) ($logs->avg('humidity') ?? 0), 2),
-            'avg_moisture' => round((float) ($logs->avg('moisture') ?? 0), 2),
-            'avg_fan_speed' => round((float) ($logs->avg('fan_speed') ?? ($session->fan_speed ?? 0)), 2),
+            'avg_temperature' => $avgTemperature,
+            'avg_humidity' => $avgHumidity,
+            'avg_moisture' => $avgMoisture,
+            'avg_fan_speed' => $logs->isNotEmpty()
+                ? round((float) ($logs->avg('fan_speed') ?? ($session->fan_speed ?? 0)), 2)
+                : null,
             'started_at' => optional($session->started_at)->toDateTimeString(),
             'ended_at' => optional($session->ended_at)->toDateTimeString(),
         ];
@@ -1175,7 +1525,7 @@ class DryingController extends Controller
                 ->orderByDesc('id')
                 ->get();
 
-            $machine = $candidates->first(fn (Microcontroller $m) => $this->isMicrocontrollerOnline($m))
+            $machine = $candidates->first(fn (Microcontroller $m) => $this->isMicrocontrollerReachable($m))
                 ?? $candidates->first();
         }
 
@@ -1188,12 +1538,37 @@ class DryingController extends Controller
             ]);
         }
 
+        // Only expose an *active* drying session on overview so Status matches Control Panel.
+        // (Previously `latest()` could return a finished session while a new run was starting,
+        // or show stale fish/duration after Stop — Current Details should be empty when idle.)
         $session = DryingSession::where('microcontroller_id', $machine->id)
+            ->whereIn('status', ['running', 'paused'])
+            ->whereNull('ended_at')
             ->with(['sensorLogs:id,drying_session_id,temperature,humidity,moisture,fan_speed,recorded_at'])
-            ->latest()
+            ->orderByDesc('started_at')
+            ->orderByDesc('id')
             ->first();
 
         $hardwareStatuses = MachineHardwareStatus::where('microcontroller_id', $machine->id)->get();
+
+        // Prefer Firebase RTDB snapshot for "live" hardware statuses when enabled.
+        try {
+            $firebase = app(\App\Services\FirebaseRealtimeService::class);
+            $snap = $firebase->getMachineHardwareStatus((int) $machine->id);
+            $components = is_array($snap) ? ($snap['components'] ?? null) : null;
+            if (is_array($components) && $components !== []) {
+                $rows = [];
+                foreach ($this->firebaseSensorHardwareComponentKeys() as $key) {
+                    $rows[] = [
+                        'component_name' => $key,
+                        'status' => (string) ($components[$key] ?? 'not_working'),
+                    ];
+                }
+                $hardwareStatuses = collect($rows);
+            }
+        } catch (\Throwable $e) {
+            // Never break overview when Firebase is unavailable.
+        }
 
         $lastSeen = $machine->last_seen;
 
@@ -1202,9 +1577,10 @@ class DryingController extends Controller
                 'id' => $machine->id,
                 'name' => $this->machineDisplayName($machine),
                 'device_id' => $machine->device_id,
+                'mac' => $this->microcontrollersHasMacColumn() ? $machine->mac : null,
                 'display_name' => $machine->display_name,
                 'last_seen' => $lastSeen ? $lastSeen->toIso8601String() : null,
-                'status' => $this->isMicrocontrollerOnline($machine)
+                'status' => $this->isMicrocontrollerReachable($machine)
                     ? 'online'
                     : 'offline',
             ],
@@ -1330,8 +1706,12 @@ class DryingController extends Controller
     public function getMachines()
     {
         try {
+            $cols = ['id', 'device_id', 'display_name', 'last_seen'];
+            if ($this->microcontrollersHasMacColumn()) {
+                $cols[] = 'mac';
+            }
             $machines = Microcontroller::query()
-                ->select('id', 'device_id', 'display_name', 'last_seen')
+                ->select($cols)
                 ->latest('last_seen')
                 ->get();
 
@@ -1342,6 +1722,7 @@ class DryingController extends Controller
                     'id' => $machine->id,
                     'name' => $this->machineDisplayName($machine),
                     'device_id' => $machine->device_id,
+                    'mac' => $this->microcontrollersHasMacColumn() ? $machine->mac : null,
                     'display_name' => $machine->display_name,
                     'last_seen' => $lastSeen ? $lastSeen->toIso8601String() : null,
                     'status' => $this->isMicrocontrollerOnline($machine)
@@ -1377,22 +1758,22 @@ class DryingController extends Controller
                 ], 404);
             }
 
-            // Always return full hardware list expected by mobile UI.
+            // Always return full hardware list expected by the mobile UI.
+            // NOTE: DHT22 is one sensor (temp+humidity outputs), and moisture sensor is single.
             $defaultComponents = [
                 'esp32',
-                'solar_panel',
-                'heater_fan_1',
-                'heater_fan_2',
-                'ventilation_fan',
-                'buzzer',
-                'heater_1',
-                'heater_2',
                 'led_1',
                 'led_2',
                 'led_3',
-                'temp_humidity_sensor',
-                'moisture_sensor_1',
-                'moisture_sensor_2',
+                'buzzer',
+                'door_sensor',
+                'moisture_sensor',
+                'heater_1',
+                'heater_2',
+                'fan_1',
+                'fan_2',
+                'fan_3',
+                'dht22',
             ];
 
             $savedRows = MachineHardwareStatus::where('microcontroller_id', $machineId)->get();
@@ -1502,15 +1883,45 @@ class DryingController extends Controller
                 'name' => 'nullable|string|max:255',
                 // Hardware identity sent by ESP32 heartbeats (ignore own row on rename/save)
                 'device_id' => $deviceIdRules,
+                'mac' => ['nullable', 'string', 'max:32'],
                 'selected_id' => 'nullable|integer|exists:microcontrollers,id',
             ]);
+
+            $creatorId = (int) (Auth::id() ?? 0);
+            if ($creatorId <= 0) {
+                $creatorId = (int) (DB::table('users')->orderBy('id')->value('id') ?? 0);
+            }
+            if ($creatorId <= 0) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Cannot add a machine: sign in or ensure at least one user exists in the database (the add-machine API is not authenticated).',
+                ], 422);
+            }
+
+            $macNorm = $this->normalizeHardwareMac($request->input('mac'));
+            if ($macNorm && $this->microcontrollersHasMacColumn()) {
+                $dup = Microcontroller::query()->where('mac', $macNorm);
+                if ($request->filled('selected_id')) {
+                    $dup->where('id', '!=', (int) $request->input('selected_id'));
+                }
+                if ($dup->exists()) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'This MAC is already linked to another machine row.',
+                    ], 422);
+                }
+            }
 
             if ($request->filled('selected_id')) {
                 $machine = Microcontroller::findOrFail((int) $request->selected_id);
                 // Never mutate hardware identity from the mobile "name" field.
-                $machine->update([
+                $updates = [
                     'display_name' => $request->input('name'),
-                ]);
+                ];
+                if ($macNorm && $this->microcontrollersHasMacColumn()) {
+                    $updates['mac'] = $macNorm;
+                }
+                $machine->update($updates);
             } else {
                 if (!$request->filled('device_id')) {
                     return response()->json([
@@ -1519,13 +1930,17 @@ class DryingController extends Controller
                     ], 422);
                 }
 
-                $machine = Microcontroller::create([
+                $create = [
                     'device_id' => (string) $request->device_id,
                     'display_name' => $request->input('name'),
-                    'created_by' => Auth::id(),
+                    'created_by' => $creatorId,
                     // Presence/online is determined by ESP heartbeats, not manual adds.
                     'last_seen' => null,
-                ]);
+                ];
+                if ($macNorm && $this->microcontrollersHasMacColumn()) {
+                    $create['mac'] = $macNorm;
+                }
+                $machine = Microcontroller::create($create);
             }
 
             return response()->json([
@@ -1535,15 +1950,19 @@ class DryingController extends Controller
                     'id' => $machine->id,
                     'name' => $this->machineDisplayName($machine),
                     'device_id' => $machine->device_id,
+                    'mac' => $this->microcontrollersHasMacColumn() ? $machine->mac : null,
                     'display_name' => $machine->display_name,
                     'last_seen' => $machine->last_seen ? $machine->last_seen->toIso8601String() : null,
                     'status' => $this->isMicrocontrollerOnline($machine) ? 'online' : 'offline',
                 ]
             ], 201);
         } catch (\Exception $e) {
+            Log::error('addMachine failed', ['exception' => $e->getMessage()]);
+
             return response()->json([
                 'success' => false,
-                'message' => 'Error adding machine'
+                'message' => 'Error adding machine',
+                'error' => config('app.debug') ? $e->getMessage() : null,
             ], 500);
         }
     }
@@ -1668,8 +2087,12 @@ class DryingController extends Controller
         try {
             // List ALL boards so the app can always show something to pick.
             // `recent` / `status` reflect the same heartbeat window as getMachines().
+            $cols = ['id', 'device_id', 'display_name', 'last_seen'];
+            if ($this->microcontrollersHasMacColumn()) {
+                $cols[] = 'mac';
+            }
             $activeESP = DB::table('microcontrollers')
-                ->select('id', 'device_id', 'display_name', 'last_seen')
+                ->select($cols)
                 ->orderByDesc('last_seen')
                 ->get()
                 ->map(function ($item) {
@@ -1682,6 +2105,7 @@ class DryingController extends Controller
                         'id' => (string) $item->id,
                         'name' => $label,
                         'device_id' => $item->device_id,
+                        'mac' => $this->microcontrollersHasMacColumn() ? ($item->mac ?? null) : null,
                         'display_name' => $item->display_name,
                         'last_seen' => $item->last_seen,
                         'recent' => $recent,

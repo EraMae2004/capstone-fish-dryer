@@ -1,48 +1,168 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
-  ScrollView
+  ScrollView,
+  Alert
 } from 'react-native';
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { Stack } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
+import {
+  loadHardwareNotifications,
+  markAllHardwareNotificationsRead,
+  markHardwareNotificationsReadByIds,
+  deleteHardwareNotificationsByIds,
+  clearHardwareNotifications,
+  isDryingTemperatureWarning,
+  isHardwareAlert,
+  type StoredHardwareNotification,
+} from '@/lib/hardware-notifications-store';
+import { ListPaginationBar, useListPagination } from '@/lib/list-pagination';
 
-export default function UserNotifications() {
+function formatRelativeTime(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return '';
+  const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (sec < 60) return 'Just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} min ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  const d = Math.floor(hr / 24);
+  return `${d}d ago`;
+}
+
+type UserNotificationsProps = {
+  onBack?: () => void;
+  onNotificationsChanged?: () => void;
+};
+
+export default function UserNotifications({
+  onBack,
+  onNotificationsChanged,
+}: UserNotificationsProps) {
 
   const [activeTab, setActiveTab] = useState('all');
+  const [items, setItems] = useState<StoredHardwareNotification[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  const notifications = [
-    {
-      id: 1,
-      type: 'critical',
-      title: 'Temperature Sensor Failure',
-      desc: 'Temperature sensor stopped responding. Drying process may be affected.',
-      time: 'Just now'
-    },
-    {
-      id: 2,
-      type: 'info',
-      title: 'Drying Process Completed',
-      desc: 'Drying process of Salmon completed successfully.',
-      time: '5 minutes ago'
-    },
-    {
-      id: 3,
-      type: 'warning',
-      title: 'Humidity Slightly Above Ideal',
-      desc: 'Humidity rising above optimal drying range.',
-      time: '23h ago'
-    },
-    {
-      id: 4,
-      type: 'info',
-      title: 'Drying Process Started',
-      desc: 'New drying process started for 150 pcs of Salmon.',
-      time: 'Just now'
+  const reload = useCallback(async () => {
+    const list = await loadHardwareNotifications();
+    setItems(list);
+    onNotificationsChanged?.();
+    // Drop ids that no longer exist (e.g., after deletion).
+    setSelected((prev) => {
+      const validIds = new Set(list.map((x) => x.id));
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (validIds.has(id)) next.add(id);
+      });
+      return next;
+    });
+  }, [onNotificationsChanged]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void reload();
+    }, [reload])
+  );
+
+  // Real notifications, mapped into the original UI shape ({ id, type, title, desc, time }).
+  const notifications = useMemo(
+    () =>
+      items.map((x) => ({
+        id: x.id,
+        type: x.type,
+        componentKey: x.componentKey,
+        title: x.title,
+        desc: x.desc,
+        time: formatRelativeTime(x.createdAt),
+        read: x.read,
+      })),
+    [items]
+  );
+
+  const filteredNotifications = useMemo(() => {
+    if (activeTab === 'unread') return notifications.filter((n) => !n.read);
+    if (activeTab === 'alerts') {
+      return notifications.filter((n) => isHardwareAlert(n));
     }
-  ];
+    if (activeTab === 'warnings') {
+      return notifications.filter((n) => isDryingTemperatureWarning(n));
+    }
+    if (activeTab === 'info') return notifications.filter((n) => n.type === 'info');
+    return notifications;
+  }, [notifications, activeTab]);
+
+  const {
+    pageItems: pagedNotifications,
+    page,
+    totalPages,
+    setPage,
+    resetPage,
+  } = useListPagination(filteredNotifications);
+
+  useEffect(() => {
+    resetPage();
+  }, [activeTab, resetPage]);
+
+  const unreadCount = useMemo(() => notifications.filter((n) => !n.read).length, [notifications]);
+  const criticalCount = useMemo(() => notifications.filter((n) => n.type === 'critical').length, [notifications]);
+  const dryingWarningCount = useMemo(
+    () => items.filter((n) => isDryingTemperatureWarning(n)).length,
+    [items]
+  );
+  const infoCount = useMemo(() => notifications.filter((n) => n.type === 'info').length, [notifications]);
+
+  const toggleSelect = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleMarkAllRead = async () => {
+    if (selected.size > 0) {
+      await markHardwareNotificationsReadByIds(Array.from(selected));
+    } else {
+      await markAllHardwareNotificationsRead();
+    }
+    await reload();
+    await onNotificationsChanged?.();
+    setSelected(new Set());
+  };
+
+  const handleDelete = () => {
+    const usingSelection = selected.size > 0;
+    Alert.alert(
+      'Delete',
+      usingSelection
+        ? `Remove ${selected.size} selected notification${selected.size === 1 ? '' : 's'}?`
+        : 'Remove all notifications?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            if (usingSelection) {
+              await deleteHardwareNotificationsByIds(Array.from(selected));
+            } else {
+              await clearHardwareNotifications();
+            }
+            await reload();
+            await onNotificationsChanged?.();
+            setSelected(new Set());
+          },
+        },
+      ]
+    );
+  };
 
   const getBorderColor = (type: string) => {
     switch (type) {
@@ -66,49 +186,81 @@ export default function UserNotifications() {
     <>
       <Stack.Screen options={{ headerShown: false }} />
 
-      <ScrollView style={styles.container}>
+      <ScrollView
+        style={styles.container}
+        contentContainerStyle={styles.scrollContent}
+      >
 
-        <Text style={styles.title}>History</Text>
+        <View style={styles.titleRow}>
+          {onBack ? (
+            <TouchableOpacity
+              style={styles.backBtn}
+              onPress={onBack}
+              accessibilityRole="button"
+              accessibilityLabel="Back to overview"
+            >
+              <FontAwesome name="chevron-left" size={18} color="#1f3b57" />
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.backPlaceholder} />
+          )}
+          <Text style={styles.title}>Notifications</Text>
+          <View style={styles.backPlaceholder} />
+        </View>
 
         {/* FILTER TABS */}
-        <View style={styles.tabs}>
-          {['all', 'unread', 'alerts', 'info'].map(tab => (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.tabsScroll}
+          contentContainerStyle={styles.tabs}
+        >
+          {(
+            [
+              { key: 'all', label: 'All' },
+              { key: 'unread', label: 'Unread' },
+              { key: 'alerts', label: 'Alerts' },
+              { key: 'warnings', label: 'Warning' },
+              { key: 'info', label: 'Info' },
+            ] as const
+          ).map((tab) => (
             <TouchableOpacity
-              key={tab}
-              style={[
-                styles.tab,
-                activeTab === tab && styles.activeTab
-              ]}
-              onPress={() => setActiveTab(tab)}
+              key={tab.key}
+              style={[styles.tab, activeTab === tab.key && styles.activeTab]}
+              onPress={() => setActiveTab(tab.key)}
             >
-              <Text style={[
-                styles.tabText,
-                activeTab === tab && styles.activeTabText
-              ]}>
-                {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              <Text style={[styles.tabText, activeTab === tab.key && styles.activeTabText]}>
+                {tab.label}
               </Text>
             </TouchableOpacity>
           ))}
-        </View>
+        </ScrollView>
 
         {/* SUMMARY CARDS */}
         <View style={styles.cardRow}>
-          <SummaryCard icon="envelope" color="#2196f3" value="2" label="Unread Notifications" />
-          <SummaryCard icon="exclamation-circle" color="#ff4d4d" value="4" label="Critical Alerts" />
-          <SummaryCard icon="exclamation-triangle" color="#f5b800" value="1" label="Warning Alerts" />
-          <SummaryCard icon="info-circle" color="#4caf50" value="4" label="Info Notifications" />
+          <SummaryCard icon="envelope" color="#2196f3" value={String(unreadCount)} label="Unread Notifications" />
+          <SummaryCard icon="exclamation-circle" color="#ff4d4d" value={String(criticalCount)} label="Critical Alerts" />
+          <SummaryCard icon="exclamation-triangle" color="#f5b800" value={String(dryingWarningCount)} label="Drying Warnings" />
+          <SummaryCard icon="info-circle" color="#4caf50" value={String(infoCount)} label="Info Notifications" />
         </View>
 
         {/* ACTION BUTTONS */}
         <View style={styles.actions}>
-          <TouchableOpacity style={styles.markBtn}>
+          <TouchableOpacity
+            style={[styles.actionBtn, styles.markBtn]}
+            onPress={() => void handleMarkAllRead()}
+          >
             <FontAwesome name="check" size={14} color="#fff" />
-            <Text style={styles.actionText}> Mark all as Read</Text>
+            <Text style={styles.actionText} numberOfLines={1}>
+              {selected.size > 0 ? `Read (${selected.size})` : 'Read all'}
+            </Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.deleteBtn}>
+          <TouchableOpacity style={[styles.actionBtn, styles.deleteBtn]} onPress={handleDelete}>
             <FontAwesome name="trash" size={14} color="#fff" />
-            <Text style={styles.actionText}> Delete</Text>
+            <Text style={styles.actionText} numberOfLines={1}>
+              {selected.size > 0 ? `Delete (${selected.size})` : 'Delete all'}
+            </Text>
           </TouchableOpacity>
         </View>
 
@@ -116,39 +268,65 @@ export default function UserNotifications() {
         <View style={styles.listContainer}>
           <Text style={styles.listTitle}>All Notifications</Text>
 
-          {notifications.map((item) => {
+          {pagedNotifications.length === 0 ? (
+            <Text style={styles.emptyList}>No notifications in this filter.</Text>
+          ) : null}
+
+          {pagedNotifications.map((item) => {
             const icon = getIcon(item.type);
+            const isChecked = selected.has(item.id);
+            const isUnread = !item.read;
             return (
               <View
                 key={item.id}
                 style={[
                   styles.notification,
-                  { borderLeftColor: getBorderColor(item.type) }
+                  isUnread ? styles.notificationUnread : styles.notificationRead,
+                  { borderLeftColor: getBorderColor(item.type) },
                 ]}
               >
+                <TouchableOpacity
+                  style={styles.checkbox}
+                  onPress={() => toggleSelect(item.id)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons
+                    name={isChecked ? 'checkbox' : 'square-outline'}
+                    size={20}
+                    color={isChecked ? '#1f3b57' : '#888'}
+                  />
+                </TouchableOpacity>
+
                 <View style={styles.notificationLeft}>
                   <FontAwesome name={icon.name as any} size={18} color={icon.color} />
                 </View>
 
                 <View style={styles.notificationContent}>
-                  <Text style={styles.notificationTitle}>
-                    {item.title}
-                  </Text>
-                  <Text style={styles.notificationDesc}>
-                    {item.desc}
-                  </Text>
+                  <Text style={styles.notificationTitle}>{item.title}</Text>
+                  <Text style={styles.notificationDesc}>{item.desc}</Text>
                 </View>
 
                 <View style={styles.notificationRight}>
                   <Text style={styles.time}>{item.time}</Text>
-                  <Ionicons name="mail-outline" size={18} color="#1f3b57" />
+                  <Ionicons
+                    name={isUnread ? 'mail' : 'mail-outline'}
+                    size={18}
+                    color={isUnread ? '#1f3b57' : '#9aa5b1'}
+                  />
                 </View>
               </View>
             );
           })}
-        </View>
 
-        <Text style={styles.pagination}>Page 1 of 10</Text>
+          {filteredNotifications.length > 0 ? (
+            <ListPaginationBar
+              page={page}
+              totalPages={totalPages}
+              totalItems={filteredNotifications.length}
+              onPageChange={setPage}
+            />
+          ) : null}
+        </View>
 
       </ScrollView>
     </>
@@ -170,19 +348,52 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f5f5f5',
-    padding: 20
+  },
+
+  scrollContent: {
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 16,
+  },
+
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 15,
+  },
+
+  backBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    backgroundColor: '#e8ecef',
+  },
+
+  backPlaceholder: {
+    width: 36,
+    height: 36,
   },
 
   title: {
     fontSize: 22,
     fontWeight: '700',
-    marginBottom: 15,
-    color: '#1f3b57'
+    color: '#1f3b57',
+    flex: 1,
+    textAlign: 'center',
+  },
+
+  tabsScroll: {
+    marginBottom: 20,
+    flexGrow: 0,
   },
 
   tabs: {
     flexDirection: 'row',
-    marginBottom: 20
+    alignItems: 'center',
+    paddingRight: 8,
   },
 
   tab: {
@@ -234,32 +445,34 @@ const styles = StyleSheet.create({
 
   actions: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 15
+    gap: 10,
+    marginBottom: 15,
+  },
+
+  actionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderRadius: 8,
   },
 
   markBtn: {
     backgroundColor: '#1f3b57',
-    paddingVertical: 8,
-    paddingHorizontal: 15,
-    borderRadius: 6,
-    flexDirection: 'row',
-    alignItems: 'center'
   },
 
   deleteBtn: {
     backgroundColor: '#f44336',
-    paddingVertical: 8,
-    paddingHorizontal: 15,
-    borderRadius: 6,
-    flexDirection: 'row',
-    alignItems: 'center'
   },
 
   actionText: {
     color: '#fff',
     fontSize: 12,
-    fontWeight: '600'
+    fontWeight: '600',
+    flexShrink: 1,
   },
 
   listContainer: {
@@ -280,8 +493,22 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderLeftWidth: 4,
     paddingLeft: 10,
+    paddingRight: 6,
     borderBottomWidth: 1,
-    borderBottomColor: '#eee'
+    borderBottomColor: '#eee',
+  },
+
+  notificationUnread: {
+    backgroundColor: '#dce4ec',
+  },
+
+  notificationRead: {
+    backgroundColor: '#fafbfc',
+  },
+
+  checkbox: {
+    marginRight: 8,
+    paddingHorizontal: 2,
   },
 
   notificationLeft: {
@@ -289,17 +516,19 @@ const styles = StyleSheet.create({
   },
 
   notificationContent: {
-    flex: 1
+    flex: 1,
   },
 
   notificationTitle: {
     fontWeight: '600',
-    fontSize: 13
+    fontSize: 13,
+    color: '#334155',
+    flexShrink: 1,
   },
 
   notificationDesc: {
     fontSize: 12,
-    color: '#666'
+    color: '#666',
   },
 
   notificationRight: {
@@ -312,11 +541,11 @@ const styles = StyleSheet.create({
     marginBottom: 5
   },
 
-  pagination: {
-    textAlign: 'center',
-    marginTop: 15,
+  emptyList: {
     fontSize: 12,
-    color: '#555'
-  }
+    color: '#888',
+    textAlign: 'center',
+    paddingVertical: 16,
+  },
 
 });

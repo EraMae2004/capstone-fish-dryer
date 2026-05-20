@@ -1,14 +1,19 @@
 import React from "react";
 import { ScrollView, View, Text, StyleSheet } from "react-native";
+import { formatMoisturePercent, resolveMoisturePercent } from "@/lib/duration-format";
 import { userTypography } from "./userTypography";
-
 export default function OverviewStatus({
-  machine,
   session,
   hardware_statuses,
-  /** When set, machine + hardware rows treat RTDB+API combined “live” (from parent). */
+  /** When set, hardware rows treat RTDB+API combined “live” (from parent). */
   hardwareStreamFresh,
+  /** RTDB `machines/{id}/hardware_status.readings` — live temp / humidity / moisture when present. */
+  liveReadings,
+  /** Only show Current Details values while a session is running or paused. */
+  hasActiveSession,
+  remainingTimeLabel,
 }: any) {
+  const showSessionDetails = Boolean(hasActiveSession);
   const normalizeKey = (value: string) =>
     String(value ?? "")
       .toLowerCase()
@@ -24,106 +29,120 @@ export default function OverviewStatus({
     return raw || "--";
   };
 
-  /**
-   * UI "live" is stricter than the API's long heartbeat window.
-   * If we only trust `machine.status=online` while `last_seen` is stale, the UI looks fake.
-   */
-  const LIVE_LAST_SEEN_MS = 90_000;
-  const parseIsoMs = (iso: unknown): number | null => {
-    if (!iso) return null;
-    const d = new Date(String(iso));
-    const t = d.getTime();
-    return Number.isFinite(t) ? t : null;
-  };
-
-  const lastSeenMs = parseIsoMs(machine?.last_seen);
-  const seenRecently =
-    lastSeenMs !== null ? Date.now() - lastSeenMs <= LIVE_LAST_SEEN_MS : false;
-
-  const rawMc = String(machine?.status ?? "")
-    .trim()
-    .toLowerCase();
-  const apiOnline = rawMc === "online" || rawMc === "true" || rawMc === "1";
-  const mcOnline = Boolean(machine) && apiOnline && seenRecently;
-  const overviewLive =
-    typeof hardwareStreamFresh === "boolean" ? hardwareStreamFresh : mcOnline;
-  const mcDotColor = overviewLive ? "#2ecc71" : machine ? "#e74c3c" : "#95a5a6";
-  const mcStatusText = machine
-    ? overviewLive
-      ? "Online"
-      : apiOnline && !seenRecently
-        ? "Offline (stale)"
-        : "Offline"
-    : "—";
-
   const logs = session?.sensor_logs;
   const latestLog = Array.isArray(logs) && logs.length > 0 ? logs[logs.length - 1] : null;
 
-  const remainingTime =
-    session?.set_duration_minutes && session?.drying_time_minutes
-      ? session.set_duration_minutes - session.drying_time_minutes
-      : null;
+  const lr = liveReadings && typeof liveReadings === "object" ? liveReadings : null;
+  const liveTemp = lr?.temperature ?? lr?.temp;
+  const liveHum = lr?.humidity ?? lr?.hum;
+  const liveMoistLabel = formatMoisturePercent(resolveMoisturePercent(lr));
 
+  /** ESP32 + real sensors only (matches Firebase `components` + firmware). */
   const hardwareComponents = [
-    { key: "esp32", label: "ESP32" },
-    { key: "solar_panel", label: "Solar Panel" },
-    { key: "heater_fan_1", label: "Heater Fan 1" },
-    { key: "heater_fan_2", label: "Heater Fan 2" },
-    { key: "ventilation_fan", label: "Ventilation Fan" },
-    { key: "buzzer", label: "Buzzer" },
-    { key: "heater_1", label: "Heater 1" },
-    { key: "heater_2", label: "Heater 2" },
-    { key: "led_1", label: "LED 1" },
-    { key: "led_2", label: "LED 2" },
-    { key: "led_3", label: "LED 3" },
-    { key: "temp_humidity_sensor", label: "Temp & Humidity Sensor" },
-    { key: "moisture_sensor_1", label: "Moisture Sensor 1" },
-    { key: "moisture_sensor_2", label: "Moisture Sensor 2" },
+    {
+      key: "esp32",
+      label: "ESP32 (board online)",
+      aliases: ["esp32"],
+    },
+    {
+      key: "dht22",
+      label: "DHT22 (Temp & Humidity)",
+      aliases: [
+        "dht22",
+        "dht11",
+        "dht",
+        "temp_humidity_sensor",
+        "temperature_and_humidity_sensor",
+        "temp_sensor",
+        "humidity_sensor",
+      ],
+    },
+    {
+      key: "door_sensor",
+      label: "Door Sensor (MC38)",
+      aliases: [
+        "door_sensor",
+        "door",
+        "reed_switch",
+        "reed",
+        "magnetic_switch",
+        "mc38",
+      ],
+    },
+    {
+      key: "moisture_sensor",
+      label: "YL-69 Moisture",
+      aliases: [
+        "moisture_sensor",
+        "moisture",
+        "yl69",
+        "yl_69",
+        "soil_moisture",
+        "moisture_sensor_1",
+        "moisture_sensor_2",
+        "moisture1",
+        "moisture2",
+      ],
+    },
   ];
 
   return (
     <ScrollView>
 
-      <Text style={styles.title}>OVERVIEW</Text>
-
-      <View style={styles.statusRow}>
-        <Text style={styles.label}>Machine status:</Text>
-        <View style={[styles.dot, { backgroundColor: mcDotColor }]} />
-        <Text style={styles.bold}>{mcStatusText}</Text>
-      </View>
-
-      <View style={styles.dropdown}>
-        <Text>{machine?.name ?? "No Machine"}</Text>
-      </View>
-
       <View style={styles.card}>
         <Text style={styles.cardHeader}>Current Details</Text>
 
-        {renderRow("Type of Fish", session?.fish_type)}
-        {renderRow("No. of Fish", session?.total_fish)}
+        {renderRow("Type of Fish", showSessionDetails ? session?.fish_type : null)}
+        {renderRow("No. of Fish", showSessionDetails ? session?.total_fish : null)}
 
-        {renderRow("Current Temp",
-          latestLog?.temperature ? latestLog.temperature + "°C" : null
+        {renderRow(
+          "Current Temp",
+          showSessionDetails &&
+            liveTemp != null &&
+            String(liveTemp).trim() !== ""
+            ? String(liveTemp) + "°C"
+            : showSessionDetails && latestLog?.temperature
+              ? latestLog.temperature + "°C"
+              : null
         )}
 
-        {renderRow("Target Temp",
-          session?.target_temperature ? session.target_temperature + "°C" : null
+        {renderRow(
+          "Target Temp",
+          showSessionDetails && session?.target_temperature
+            ? session.target_temperature + "°C"
+            : null
         )}
 
-        {renderRow("Humidity",
-          latestLog?.humidity ? latestLog.humidity + "%" : null
+        {renderRow(
+          "Humidity",
+          showSessionDetails &&
+            liveHum != null &&
+            String(liveHum).trim() !== ""
+            ? String(liveHum) + "%"
+            : showSessionDetails && latestLog?.humidity
+              ? latestLog.humidity + "%"
+              : null
         )}
 
-        {renderRow("Current Moisture",
-          latestLog?.moisture ? latestLog.moisture + "%" : null
+        {renderRow(
+          "Current Moisture",
+          showSessionDetails && liveMoistLabel
+            ? liveMoistLabel
+            : showSessionDetails && latestLog?.moisture != null
+              ? `${Math.round(Number(latestLog.moisture))}%`
+              : null
         )}
 
-        {renderRow("Fan Speed",
-          session?.fan_speed ? "Level " + session.fan_speed : null
+        {renderRow(
+          "Fan Speed",
+          showSessionDetails && session?.fan_speed ? "Level " + session.fan_speed : null
         )}
 
-        {renderRow("Remaining Time",
-          remainingTime ? remainingTime + " mins" : null
+        {renderRow(
+          "Remaining Time",
+          showSessionDetails && typeof remainingTimeLabel === "string"
+            ? remainingTimeLabel
+            : null
         )}
       </View>
 
@@ -131,38 +150,19 @@ export default function OverviewStatus({
         <Text style={styles.cardHeader}>Hardware Status</Text>
 
         {hardwareComponents.map((component, index) => {
+          const aliasSet = new Set(
+            component.aliases.map((a: string) => normalizeKey(a))
+          );
 
           const found = hardware_statuses?.find((item: any) => {
             const key = normalizeKey(item.component_name);
-            const componentKey = normalizeKey(component.key);
-            if (key === componentKey) return true;
-
-            if (componentKey === "moisture_sensor_1" && [
-              "moisture_sensor_1",
-              "moisture1",
-              "loadcell_1",
-              "loadcell1",
-              "load_cell_1",
-              "weight_sensor_1",
-            ].includes(key)) {
-              return true;
-            }
-
-            if (componentKey === "moisture_sensor_2" && [
-              "moisture_sensor_2",
-              "moisture2",
-              "loadcell_2",
-              "loadcell2",
-              "load_cell_2",
-              "weight_sensor_2",
-            ].includes(key)) {
-              return true;
-            }
-
-            return false;
+            return aliasSet.has(key);
           });
 
-          const rawStatus = !overviewLive ? "not_working" : (found?.status ?? "--");
+          const streamLive = typeof hardwareStreamFresh === "boolean" ? hardwareStreamFresh : true;
+          const rawStatus = !streamLive
+            ? "not_working"
+            : (found?.status ?? "unknown");
           const statusValue = normalizeStatus(rawStatus);
 
           const color =
@@ -205,41 +205,14 @@ function renderRow(label: string, value: any) {
 }
 
 const styles = StyleSheet.create({
-  title: {
-    ...userTypography.pageTitle,
-    marginBottom: 15,
-  },
-
-  statusRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    marginBottom: 8,
-  },
-
   label: { ...userTypography.body, color: "#444" },
   bold: { ...userTypography.bodyStrong, color: "#444" },
-
-  dot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
 
   dotSmall: {
     width: 8,
     height: 8,
     borderRadius: 4,
     marginRight: 6,
-  },
-
-  dropdown: {
-    backgroundColor: "#fff",
-    padding: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#ddd",
-    marginBottom: 20,
   },
 
   card: {

@@ -1,6 +1,7 @@
 import React from "react";
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView } from "react-native";
 import { userTypography } from "./userTypography";
+import { formatDigitsAsHMS } from "@/lib/duration-format";
 
 export default function OverviewParameters({
   fishType,
@@ -11,44 +12,107 @@ export default function OverviewParameters({
   setTemperature,
   fanSpeed,
   setFanSpeed,
+  /** Stored as digits-only string ("013000" for 01:30:00); displayed as HH:MM:SS. */
   duration,
   setDuration,
   startMachine,
   pauseMachine,
   stopMachine,
-  machineStatus,
-  machineName,
-  timer,
   recommendation,
-  applyRecommendation
+  applyRecommendation,
+  /** True while a drying session is `running` — disables all parameter inputs. */
+  parametersLocked,
+  sessionStatus,
+  hasActiveSession,
+  needsExtension,
+  waitingForExtension,
+  machineOnline,
 }: any) {
 
   const [unit, setUnit] = React.useState("pcs");
   const [showUnit, setShowUnit] = React.useState(false);
   const [showFan, setShowFan] = React.useState(false);
 
+  const locked = Boolean(parametersLocked);
+  /** Match overview header: only treat explicit `false` as offline. */
+  const online = machineOnline === true;
+  const extensionMode = Boolean(waitingForExtension || needsExtension);
+  const hasApplicableRecommendation =
+    recommendation != null &&
+    recommendation.temperature != null &&
+    recommendation.fan_speed != null &&
+    (extensionMode
+      ? Number(recommendation.extension_minutes) >= 1
+      : Number(recommendation.duration_minutes) >= 1);
+  const sessionSt = String(sessionStatus ?? "").trim().toLowerCase();
+  const isPaused = sessionSt === "paused";
+  const sessionActive = Boolean(hasActiveSession);
+
+  /**
+   * Stopwatch-style HH:MM:SS input: the user types digits only (no colons).
+   * Each new digit appends and the format shifts left, so the freshest digit
+   * always lands in the seconds slot. Backspace drops the rightmost digit.
+   *
+   * The parent stores the raw digits buffer (e.g. "13000" → display "01:30:00").
+   * We compare the lengths of the *formatted display* (always 8 chars) vs the
+   * incoming `text` to robustly classify the edit:
+   *   newLen > 8 → user typed a character (append last char of text)
+   *   newLen < 8 → user backspaced (drop last buffer digit)
+   *   newLen = 8 → paste/replace (take last 6 digits of text)
+   */
+  const durationDigits = String(duration ?? "").replace(/\D/g, "").slice(-6);
+  const durationDisplay = formatDigitsAsHMS(durationDigits);
+
+  const handleDurationChange = (text: string) => {
+    const incoming = String(text ?? "");
+    const newLen = incoming.length;
+    const oldLen = durationDisplay.length; // always 8
+
+    if (newLen > oldLen) {
+      const lastChar = incoming.slice(-1);
+      if (/\d/.test(lastChar)) {
+        setDuration((durationDigits + lastChar).slice(-6));
+      }
+      return;
+    }
+
+    if (newLen < oldLen) {
+      setDuration(durationDigits.slice(0, -1));
+      return;
+    }
+
+    const incomingDigits = incoming.replace(/\D/g, "");
+    setDuration(incomingDigits.slice(-6));
+  };
+
+  const inputStyle = [styles.input, locked && styles.inputDisabled];
+  const inputWithRightControlStyle = [styles.input, styles.inputWithRightControl, locked && styles.inputDisabled];
+  const inputWithSuffixStyle = [styles.input, styles.inputWithSuffix, locked && styles.inputDisabled];
+  const inputButtonStyle = [styles.input, styles.inputButton, locked && styles.inputDisabled];
+
   return (
     <ScrollView contentContainerStyle={{ paddingBottom: 10 }}>
-
-      {/* HEADER */}
-      <Text style={styles.pageTitle}>OVERVIEW</Text>
-
-      <View style={styles.machineHeader}>
-        <View style={styles.statusRowHeader}>
-          <Text style={styles.machineStatus}>
-            Machine Status: <Text style={styles.greenDot}>●</Text> {machineStatus}
-          </Text>
-          <Text style={styles.timerText}>{timer ?? "--"}</Text>
-        </View>
-
-        <TouchableOpacity style={styles.machineDropdown}>
-          <Text style={styles.dropdownValue}>{machineName || "Select Machine"} ▼</Text>
-        </TouchableOpacity>
-      </View>
 
       {/* CONTROL PANEL */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Control Panel</Text>
+
+        {!online && (
+          <Text style={styles.lockNotice}>
+            The machine is offline. Start and resume are unavailable until it reconnects.
+          </Text>
+        )}
+
+        {locked && (
+          <Text style={styles.lockNotice}>
+            Drying is running. Pause or stop to change parameters.
+          </Text>
+        )}
+        {isPaused && (
+          <Text style={styles.lockNotice}>
+            Drying is paused. Tap Resume to continue, or Stop to end the session.
+          </Text>
+        )}
 
         {/* TYPE OF FISH */}
         <View style={styles.formField}>
@@ -56,7 +120,8 @@ export default function OverviewParameters({
             placeholder="Type of Fish"
             value={fishType}
             onChangeText={setFishType}
-            style={styles.input}
+            style={inputStyle}
+            editable={!locked}
           />
         </View>
 
@@ -66,8 +131,9 @@ export default function OverviewParameters({
             placeholder="No. of Fish"
             value={totalFish}
             onChangeText={setTotalFish}
-            style={[styles.input, styles.inputWithRightControl]}
+            style={inputWithRightControlStyle}
             keyboardType="numeric"
+            editable={!locked}
           />
 
           {/* RIGHT ARROW */}
@@ -77,6 +143,7 @@ export default function OverviewParameters({
               setShowUnit(!showUnit);
               setShowFan(false);
             }}
+            disabled={locked}
           >
             <Text style={styles.dropdownText}>
               {unit.toUpperCase()} ▼
@@ -84,7 +151,7 @@ export default function OverviewParameters({
           </TouchableOpacity>
 
           {/* DROPDOWN */}
-          {showUnit && (
+          {showUnit && !locked && (
             <View style={styles.dropdown}>
               <TouchableOpacity
                 style={styles.dropdownItem}
@@ -115,8 +182,9 @@ export default function OverviewParameters({
             placeholder="Temperature"
             value={temperature}
             onChangeText={setTemperature}
-            style={[styles.input, styles.inputWithSuffix]}
+            style={inputWithSuffixStyle}
             keyboardType="numeric"
+            editable={!locked}
           />
           <Text style={styles.suffix}>°C</Text>
         </View>
@@ -124,11 +192,12 @@ export default function OverviewParameters({
         {/* FAN SPEED */}
         <View style={[styles.formField, styles.fieldContainer]}>
           <TouchableOpacity
-            style={[styles.input, styles.inputButton]}
+            style={inputButtonStyle}
             onPress={() => {
               setShowFan(!showFan);
               setShowUnit(false);
             }}
+            disabled={locked}
           >
             <Text>Fan Speed Level {fanSpeed || "1"}</Text>
           </TouchableOpacity>
@@ -140,12 +209,13 @@ export default function OverviewParameters({
               setShowFan(!showFan);
               setShowUnit(false);
             }}
+            disabled={locked}
           >
             <Text style={styles.dropdownText}>▼</Text>
           </TouchableOpacity>
 
           {/* DROPDOWN */}
-          {showFan && (
+          {showFan && !locked && (
             <View style={styles.dropdown}>
               {["1","2","3"].map(level => (
                 <TouchableOpacity
@@ -168,25 +238,43 @@ export default function OverviewParameters({
         {/* DURATION */}
         <View style={styles.formField}>
           <TextInput
-            placeholder="Duration (minutes)"
-            value={duration}
-            onChangeText={setDuration}
-            style={styles.input}
+            placeholder="00:00:00"
+            value={durationDisplay}
+            onChangeText={handleDurationChange}
+            style={inputStyle}
             keyboardType="numeric"
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={!locked}
           />
         </View>
 
         {/* BUTTONS */}
         <View style={styles.buttonRow}>
-          <TouchableOpacity style={styles.startBtn} onPress={startMachine}>
+          <TouchableOpacity
+            style={[styles.startBtn, (locked || !online) && styles.btnDisabled]}
+            onPress={startMachine}
+            disabled={locked || !online}
+          >
             <Text style={styles.btnText}>▶ Start</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.pauseBtn} onPress={pauseMachine}>
-            <Text style={styles.btnText}>|| Pause</Text>
+          <TouchableOpacity
+            style={[
+              styles.pauseBtn,
+              (!locked && !isPaused) || (isPaused && !online) ? styles.btnDisabled : null,
+            ]}
+            onPress={pauseMachine}
+            disabled={(!locked && !isPaused) || (isPaused && !online)}
+          >
+            <Text style={styles.btnText}>{isPaused ? "▶ Resume" : "|| Pause"}</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.stopBtn} onPress={stopMachine}>
+          <TouchableOpacity
+            style={[styles.stopBtn, !sessionActive && styles.btnDisabled]}
+            onPress={stopMachine}
+            disabled={!sessionActive}
+          >
             <Text style={styles.btnText}>■ Stop</Text>
           </TouchableOpacity>
         </View>
@@ -201,8 +289,26 @@ export default function OverviewParameters({
           {recommendation?.description || "No recommendation available"}
         </Text>
 
-        <TouchableOpacity style={styles.applyBtn} onPress={applyRecommendation}>
-          <Text style={styles.applyText}>Apply Recommendation</Text>
+        <TouchableOpacity
+          style={[
+            styles.applyBtn,
+            ((locked && !waitingForExtension) ||
+              !hasApplicableRecommendation ||
+              (extensionMode && !online)) &&
+              styles.btnDisabled,
+          ]}
+          onPress={() => void applyRecommendation()}
+          disabled={
+            (locked && !waitingForExtension) ||
+            !hasApplicableRecommendation ||
+            (extensionMode && !online)
+          }
+        >
+          <Text style={styles.applyText}>
+            {waitingForExtension || needsExtension
+              ? "Apply & Continue Drying"
+              : "Apply Recommendation"}
+          </Text>
         </TouchableOpacity>
       </View>
 
@@ -211,49 +317,6 @@ export default function OverviewParameters({
 }
 
 const styles = StyleSheet.create({
-
-  pageTitle:{
-    ...userTypography.pageTitle,
-    marginBottom:15,
-    color:"#1f3c5c"
-  },
-
-  machineHeader:{
-    marginBottom:20
-  },
-
-  machineStatus:{
-    ...userTypography.bodyStrong,
-  },
-
-  greenDot:{
-    color:"green"
-  },
-
-  machineDropdown:{
-    backgroundColor:"#fff",
-    padding:10,
-    borderRadius:8,
-    borderWidth:1,
-    borderColor:"#ddd",
-    marginBottom:20
-  },
-
-  dropdownValue: {
-    ...userTypography.body,
-  },
-
-  statusRowHeader:{
-    flexDirection:"row",
-    justifyContent:"space-between",
-    alignItems:"center",
-    marginBottom:10
-  },
-
-  timerText:{
-    ...userTypography.emphasis,
-    color:"#1f3c5c"
-  },
 
   card: {
     backgroundColor: "#fff",
@@ -277,6 +340,33 @@ const styles = StyleSheet.create({
     padding: 12,
     minHeight: 48,
     ...userTypography.body,
+  },
+
+  inputDisabled: {
+    backgroundColor: "#ececec",
+    color: "#888",
+    opacity: 0.7,
+  },
+
+  lockNotice: {
+    ...userTypography.body,
+    color: "#b8860b",
+    backgroundColor: "#fff8e1",
+    borderColor: "#f1c40f",
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 8,
+    marginBottom: 12,
+  },
+
+  durationHint: {
+    ...userTypography.caption,
+    color: "#777",
+    marginTop: 4,
+  },
+
+  btnDisabled: {
+    opacity: 0.5,
   },
 
   formField: {

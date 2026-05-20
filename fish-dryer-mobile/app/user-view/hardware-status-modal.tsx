@@ -14,7 +14,12 @@ type Microcontroller = {
   id: string;
   name: string;
   device_id?: string;
+  /** Hardware MAC ("AA:BB:CC:DD:EE:FF") — used to write assignments/{MAC} so the
+   *  ESP32 can adopt its numeric ID at runtime without a reflash. */
+  mac?: string;
   display_name?: string | null;
+  /** Short line from RTDB components (discovery / hardware_status). */
+  sensorSummary?: string;
 };
 
 type Props = {
@@ -116,10 +121,10 @@ export default function HardwareStatusModal({
           </View>
 
           {/* INPUT */}
-          <Text style={styles.label}>Friendly name (optional)</Text>
+          <Text style={styles.label}>Machine Name</Text>
           <TextInput
             style={styles.input}
-            placeholder="e.g. Dryer A (does not change hardware ID)"
+            placeholder="enter your machine name"
             value={machineName}
             onChangeText={setMachineName}
           />
@@ -169,6 +174,11 @@ export default function HardwareStatusModal({
                     {!!c.device_id && (
                       <Text style={{ marginTop: 2, fontSize: 12, color: "#666" }}>
                         ID: {c.device_id}
+                      </Text>
+                    )}
+                    {!!c.sensorSummary && (
+                      <Text style={{ marginTop: 4, fontSize: 11, color: "#888" }} numberOfLines={2}>
+                        {c.sensorSummary}
                       </Text>
                     )}
                   </View>

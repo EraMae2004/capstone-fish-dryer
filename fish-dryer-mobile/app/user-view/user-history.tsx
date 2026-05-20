@@ -14,26 +14,59 @@ import { Stack } from 'expo-router';
 import { API_BASE_URL } from "@/config/api";
 import UserGraph from './user-graph';
 import { userTypography } from "./userTypography";
+import { formatMinutesAsHMS, formatSecondsAsHMS } from "@/lib/duration-format";
+import { ListPaginationBar, useListPagination } from '@/lib/list-pagination';
+
+function fmtPct(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "--";
+  const n = Number(value);
+  return Number.isFinite(n) ? `${n.toFixed(1)}` : "--";
+}
+
+function fmtDryMins(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "--";
+  const n = Number(value);
+  return Number.isFinite(n) ? formatMinutesAsHMS(n) : "--";
+}
+
+function fmtSessionDryTime(row: any): string {
+  const sec = Number(row?.drying_time_seconds);
+  if (Number.isFinite(sec) && sec >= 0) {
+    return formatSecondsAsHMS(sec);
+  }
+  const mins = Number(row?.drying_time_minutes ?? row?.duration_minutes);
+  if (Number.isFinite(mins) && mins > 0) {
+    return formatSecondsAsHMS(mins * 60);
+  }
+  return "00:00:00";
+}
+
+function fmtSessionDate(value: unknown): string {
+  if (value == null || value === "") return "--";
+  return String(value).replace("T", " ").slice(0, 19);
+}
 
 export default function UserHistory() {
 
   const [sessions, setSessions] = useState<any[]>([]);
   const [selectedSession, setSelectedSession] = useState<any | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
   const [range, setRange] = useState<'weekly' | 'monthly' | '3months'>('weekly');
 
   useEffect(() => {
-    fetchHistory();
-  }, []);
+    void fetchHistory(range);
+  }, [range]);
 
-  const fetchHistory = async () => {
+  const fetchHistory = async (rangeKey: typeof range) => {
     try {
       setLoading(true);
-      const res = await fetch(`${API_BASE_URL}/drying-sessions`);
+      const res = await fetch(`${API_BASE_URL}/drying-sessions?range=${rangeKey}`);
       const data = await res.json();
 
       const rows = data?.sessions ?? data?.data ?? data ?? [];
       setSessions(Array.isArray(rows) ? rows : []);
+      setSelectedIds(new Set());
 
     } catch (error) {
       console.log(error);
@@ -42,24 +75,29 @@ export default function UserHistory() {
     }
   };
 
-  const filteredSessions = useMemo(() => {
-    if (!Array.isArray(sessions) || sessions.length === 0) return [];
-    const now = new Date();
-    const days =
-      range === 'weekly' ? 7 :
-      range === 'monthly' ? 30 :
-      90;
-    const start = new Date(now);
-    start.setDate(now.getDate() - days);
+  /** API already filters by range; keep list in sync with graph. */
+  const filteredSessions = sessions;
 
-    return sessions.filter((s) => {
-      const raw = s?.date ?? s?.ended_at ?? s?.created_at;
-      if (!raw) return false;
-      const d = new Date(raw);
-      if (Number.isNaN(d.getTime())) return false;
-      return d >= start && d <= now;
+  const {
+    pageItems: pagedSessions,
+    page,
+    totalPages,
+    setPage,
+    resetPage,
+  } = useListPagination(filteredSessions);
+
+  useEffect(() => {
+    resetPage();
+  }, [range, resetPage]);
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
     });
-  }, [sessions, range]);
+  };
 
   const handleViewDetails = async (id: number) => {
     try {
@@ -84,13 +122,50 @@ export default function UserHistory() {
             if (selectedSession?.id === id) {
               setSelectedSession(null);
             }
-            fetchHistory();
+            setSelectedIds((prev) => {
+              const next = new Set(prev);
+              next.delete(id);
+              return next;
+            });
+            void fetchHistory(range);
           } catch (error) {
             console.log(error);
           }
         }
       }
     ]);
+  };
+
+  const handleDeleteSelected = () => {
+    if (selectedIds.size === 0) return;
+    const ids = Array.from(selectedIds);
+    Alert.alert(
+      'Delete Selected',
+      `Delete ${ids.length} drying session${ids.length === 1 ? '' : 's'}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await fetch(`${API_BASE_URL}/drying-sessions/batch-delete`, {
+                method: 'POST',
+                headers: {
+                  Accept: 'application/json',
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ ids }),
+              });
+              setSelectedSession(null);
+              void fetchHistory(range);
+            } catch (error) {
+              console.log(error);
+            }
+          },
+        },
+      ]
+    );
   };
 
   if (loading) {
@@ -102,11 +177,16 @@ export default function UserHistory() {
   }
 
   return (
-    <>
+    <View style={styles.screen}>
       <Stack.Screen options={{ headerShown: false }} />
       <Text style={styles.title}>History</Text>
 
-      <ScrollView style={styles.container}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator
+        nestedScrollEnabled
+      >
         <UserGraph
           sessions={filteredSessions}
           summary={{ total_batches: filteredSessions.length }}
@@ -114,64 +194,114 @@ export default function UserHistory() {
           onChangeRange={setRange}
         />
 
-        {/* TABLE HEADER */}
         <View style={styles.tableHeader}>
+          <Text style={styles.headerText}> </Text>
           <Text style={styles.headerText}>ID</Text>
           <Text style={styles.headerText}>Date</Text>
           <Text style={styles.headerText}>Fish</Text>
           <Text style={styles.headerText}>Action</Text>
         </View>
 
-        {/* TABLE ROWS */}
-        {sessions.map((item) => (
-          <View style={styles.row} key={item.id}>
-
-            <Text style={styles.cell}>#{item.id}</Text>
-            <Text style={styles.cell}>{String(item.date).replace('T', ' ').slice(0, 16)}</Text>
-            <Text style={styles.cell}>{item.fish_type}</Text>
-
-            <View style={styles.actions}>
-              <TouchableOpacity onPress={() => handleViewDetails(item.id)}>
-                <FontAwesome name="eye" size={18} color="#4fc3f7" />
+        {pagedSessions.map((item) => {
+          const id = Number(item.id);
+          const checked = selectedIds.has(id);
+          return (
+            <View style={styles.row} key={item.id}>
+              <TouchableOpacity onPress={() => toggleSelect(id)} style={styles.checkboxTouch}>
+                <FontAwesome
+                  name={checked ? 'check-square' : 'square-o'}
+                  size={20}
+                  color="#1f3b57"
+                />
               </TouchableOpacity>
-              <TouchableOpacity onPress={() => handleDelete(item.id)}>
-                <FontAwesome name="trash" size={18} color="#e74c3c" />
-              </TouchableOpacity>
+
+              <Text style={styles.cell}>#{item.id}</Text>
+              <Text style={styles.cell}>{String(item.date).replace('T', ' ').slice(0, 16)}</Text>
+              <Text style={styles.cell}>{item.fish_type}</Text>
+
+              <View style={styles.actions}>
+                <TouchableOpacity onPress={() => handleViewDetails(id)}>
+                  <FontAwesome name="eye" size={18} color="#4fc3f7" />
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => handleDelete(id)}>
+                  <FontAwesome name="trash" size={18} color="#e74c3c" />
+                </TouchableOpacity>
+              </View>
             </View>
+          );
+        })}
 
+        {selectedIds.size > 0 ? (
+          <TouchableOpacity style={styles.deleteSelected} onPress={handleDeleteSelected}>
+            <FontAwesome name="trash" size={16} color="#e74c3c" />
+            <Text style={styles.deleteSelectedText}> Delete selected</Text>
+          </TouchableOpacity>
+        ) : null}
+
+        {filteredSessions.length > 0 ? (
+          <View style={styles.paginationWrap}>
+            <ListPaginationBar
+              page={page}
+              totalPages={totalPages}
+              totalItems={filteredSessions.length}
+              onPageChange={setPage}
+            />
           </View>
-        ))}
-
+        ) : null}
       </ScrollView>
 
       <Modal visible={!!selectedSession} transparent animationType="fade" onRequestClose={() => setSelectedSession(null)}>
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Drying Session Details</Text>
-            <Text style={styles.detailRow}>ID: #{selectedSession?.id}</Text>
-            <Text style={styles.detailRow}>Date: {selectedSession?.date?.replace('T', ' ')}</Text>
-            <Text style={styles.detailRow}>Fish Type: {selectedSession?.fish_type ?? '--'}</Text>
-            <Text style={styles.detailRow}>Temperature: {selectedSession?.temperature ?? '--'} °C</Text>
-            <Text style={styles.detailRow}>Humidity: {selectedSession?.humidity ?? '--'} %</Text>
-            <Text style={styles.detailRow}>Moisture: {selectedSession?.moisture ?? '--'} %</Text>
-            <Text style={styles.detailRow}>Fan Speed: {selectedSession?.fan_speed ?? '--'}</Text>
-            <Text style={styles.detailRow}>Duration: {selectedSession?.duration_minutes ?? 0} mins</Text>
+            <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator>
+              <Text style={styles.detailRow}>ID: #{selectedSession?.id}</Text>
+              <Text style={styles.detailRow}>Date: {fmtSessionDate(selectedSession?.date ?? selectedSession?.ended_at)}</Text>
+              <Text style={styles.detailRow}>Fish Type: {selectedSession?.fish_type ?? '--'}</Text>
+              <Text style={styles.detailRow}>No. of Fish: {selectedSession?.total_fish ?? '--'}</Text>
+              <Text style={styles.detailRow}>Target Temp: {selectedSession?.target_temperature ?? '--'} °C</Text>
+              <Text style={styles.detailRow}>
+                Planned duration: {fmtDryMins(selectedSession?.set_duration_minutes)}
+              </Text>
+              <Text style={styles.detailRow}>
+                Temperature: {selectedSession?.temperature != null ? `${selectedSession.temperature} °C` : '--'}
+              </Text>
+              <Text style={styles.detailRow}>
+                Humidity: {fmtPct(selectedSession?.humidity ?? selectedSession?.avg_humidity)} %
+              </Text>
+              <Text style={styles.detailRow}>
+                Moisture: {fmtPct(selectedSession?.moisture ?? selectedSession?.avg_moisture)} %
+              </Text>
+              <Text style={styles.detailRow}>Fan Speed: {selectedSession?.fan_speed ?? '--'}</Text>
+              <Text style={styles.detailRow}>
+                Total drying time: {fmtSessionDryTime(selectedSession)}
+              </Text>
+            </ScrollView>
             <TouchableOpacity style={styles.closeBtn} onPress={() => setSelectedSession(null)}>
               <Text style={styles.closeText}>Close</Text>
             </TouchableOpacity>
           </View>
         </View>
       </Modal>
-    </>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
 
-  container: {
+  screen: {
     flex: 1,
     backgroundColor: '#f5f5f5',
-    padding: 20
+    paddingHorizontal: 0,
+    paddingTop: 0,
+  },
+
+  scroll: {
+    flex: 1,
+  },
+
+  scrollContent: {
+    paddingBottom: 16,
   },
 
   title: {
@@ -183,6 +313,7 @@ const styles = StyleSheet.create({
   tableHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    paddingHorizontal: 12,
     marginBottom: 10
   },
 
@@ -201,6 +332,11 @@ const styles = StyleSheet.create({
     borderRadius: 8
   },
 
+  checkboxTouch: {
+    width: 24,
+    alignItems: 'center'
+  },
+
   cell: {
     ...userTypography.tableCell,
   },
@@ -216,6 +352,27 @@ const styles = StyleSheet.create({
     gap: 14
   },
 
+  deleteSelected: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 8,
+    marginBottom: 16
+  },
+
+  deleteSelectedText: {
+    ...userTypography.tableCell,
+    color: '#e74c3c'
+  },
+
+  paginationWrap: {
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingBottom: 4,
+    marginTop: 4,
+  },
+
   modalBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.4)',
@@ -226,7 +383,12 @@ const styles = StyleSheet.create({
   modalCard: {
     backgroundColor: '#fff',
     borderRadius: 12,
-    padding: 16
+    padding: 16,
+    maxHeight: '80%'
+  },
+
+  modalScroll: {
+    maxHeight: 320,
   },
 
   modalTitle: {

@@ -2,20 +2,31 @@ import React, { useMemo } from "react";
 import { View, Text, StyleSheet, useWindowDimensions, TouchableOpacity } from "react-native";
 import { LineChart } from "react-native-gifted-charts";
 
+function parseSessionDate(raw: unknown): Date | null {
+  if (raw == null || raw === "") return null;
+  const d = new Date(String(raw).trim().replace(" ", "T"));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function sessionDurationMinutes(row: any): number {
+  const sec = Number(row?.drying_time_seconds ?? row?.drying_time_minutes ?? 0);
+  return Number.isFinite(sec) && sec > 0 ? sec / 60 : 0;
+}
+
 export default function UserGraph({ sessions = [], summary, range, onChangeRange }: any) {
   const { width } = useWindowDimensions();
 
   const groupedByPeriod = useMemo(() => {
     const grouped = sessions.reduce((acc: Record<string, any[]>, session: any) => {
-      const rawDate = session?.date ?? session?.ended_at ?? session?.created_at;
-      if (!rawDate) return acc;
-      const key = String(rawDate).slice(0, 10);
+      const d = parseSessionDate(session?.date ?? session?.ended_at ?? session?.created_at);
+      if (!d) return acc;
+      const key = d.toISOString().slice(0, 10);
       if (!acc[key]) acc[key] = [];
       acc[key].push(session);
       return acc;
     }, {});
 
-    const dateKeys = Object.keys(grouped).sort((a, b) => a.localeCompare(b));
+    const dateKeys = Object.keys(grouped).sort((a: string, b: string) => a.localeCompare(b));
     if (dateKeys.length === 0) {
       return {
         duration: [{ value: 0, label: "N/A" }],
@@ -25,23 +36,37 @@ export default function UserGraph({ sessions = [], summary, range, onChangeRange
       };
     }
 
+    const buildSeries = (valueFn: (row: any) => number) =>
+      dateKeys.map((dateKey) => {
+        const rows = grouped[dateKey];
+        const vals = rows.map(valueFn).filter((v: number) => v > 0);
+        const avg =
+          vals.length > 0 ? vals.reduce((sum: number, v: number) => sum + v, 0) / vals.length : 0;
+        return { value: Number(avg.toFixed(2)), label: dateKey.slice(5) };
+      });
+
+    const duration = buildSeries(sessionDurationMinutes);
+    const humidity = buildSeries((row) => Number(row?.avg_humidity ?? row?.humidity) || 0);
+    const temperature = buildSeries((row) => Number(row?.avg_temperature ?? row?.temperature) || 0);
+
+    const hasData =
+      duration.some((p) => p.value > 0) ||
+      humidity.some((p) => p.value > 0) ||
+      temperature.some((p) => p.value > 0);
+
+    const padOnePoint = (series: { value: number; label: string }[]) =>
+      series.length === 1
+        ? [
+            { value: series[0].value, label: series[0].label },
+            { value: series[0].value, label: " " },
+          ]
+        : series;
+
     return {
-      duration: dateKeys.map((dateKey) => {
-        const rows = grouped[dateKey];
-        const avg = rows.reduce((sum: number, row: any) => sum + (Number(row?.duration_minutes) || 0), 0) / rows.length;
-        return { value: Number(avg.toFixed(2)), label: dateKey.slice(5) };
-      }),
-      humidity: dateKeys.map((dateKey) => {
-        const rows = grouped[dateKey];
-        const avg = rows.reduce((sum: number, row: any) => sum + (Number(row?.avg_humidity ?? row?.humidity) || 0), 0) / rows.length;
-        return { value: Number(avg.toFixed(2)), label: dateKey.slice(5) };
-      }),
-      temperature: dateKeys.map((dateKey) => {
-        const rows = grouped[dateKey];
-        const avg = rows.reduce((sum: number, row: any) => sum + (Number(row?.avg_temperature ?? row?.temperature) || 0), 0) / rows.length;
-        return { value: Number(avg.toFixed(2)), label: dateKey.slice(5) };
-      }),
-      hasData: true,
+      duration: padOnePoint(duration),
+      humidity: padOnePoint(humidity),
+      temperature: padOnePoint(temperature),
+      hasData,
     };
   }, [sessions]);
 
@@ -51,11 +76,17 @@ export default function UserGraph({ sessions = [], summary, range, onChangeRange
   const graphTemperatureData = groupedByPeriod.temperature;
   const chartMax = Math.max(
     20,
-    ...graphDurationData.map((item: any) => item.value),
-    ...graphHumidityData.map((item: any) => item.value),
-    ...graphTemperatureData.map((item: any) => item.value)
+    ...graphDurationData.map((item: { value: number }) => item.value),
+    ...graphHumidityData.map((item: { value: number }) => item.value),
+    ...graphTemperatureData.map((item: { value: number }) => item.value)
   );
   const chartWidth = Math.max(220, width - 96);
+  const pointCount = Math.max(
+    graphHumidityData.length,
+    graphTemperatureData.length,
+    graphDurationData.length,
+    2
+  );
 
   return (
     <View style={styles.container}>
@@ -103,7 +134,7 @@ export default function UserGraph({ sessions = [], summary, range, onChangeRange
           xAxisColor="#d5dbe3"
           maxValue={Math.ceil(chartMax * 1.2)}
           noOfSections={4}
-          spacing={Math.max(20, (chartWidth - 60) / Math.max(graphHumidityData.length, 3))}
+          spacing={Math.max(20, (chartWidth - 60) / Math.max(pointCount - 1, 1))}
           initialSpacing={10}
           endSpacing={10}
           yAxisLabelWidth={36}
@@ -113,11 +144,12 @@ export default function UserGraph({ sessions = [], summary, range, onChangeRange
           rulesColor="#eef2f7"
           areaChart={false}
           curved
-          disableScroll
+          disableScroll={false}
+          scrollToEnd
         />
         {!groupedByPeriod.hasData && (
           <View style={styles.noDataHint}>
-            <Text style={styles.emptyText}>No saved sessions yet. Showing default graph.</Text>
+            <Text style={styles.emptyText}>No saved sessions in this period.</Text>
           </View>
         )}
 
@@ -160,7 +192,7 @@ const styles = StyleSheet.create({
   },
 
   sideInfo: {
-    alignItems: "flex-end",
+    alignItems: "center",
   },
 
   sideLabel: {
@@ -215,12 +247,6 @@ const styles = StyleSheet.create({
     color: "#334155",
     fontSize: 11,
     fontWeight: "600",
-  },
-
-  axisHint: {
-    color: "#64748b",
-    fontSize: 11,
-    marginBottom: 8,
   },
 
   noDataHint: {

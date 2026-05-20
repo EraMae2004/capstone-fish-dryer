@@ -19,6 +19,18 @@ function defaultRealtimeDatabaseUrl(projectId: string): string | null {
   const pid = projectId.trim();
   if (!pid) return null;
 
+  // Project-specific hard default (prevents wrong firebaseio.com fallback).
+  // This repo's RTDB lives in asia-southeast1.
+  if (pid === "capstone-fish-dryer") {
+    return "https://capstone-fish-dryer-default-rtdb.asia-southeast1.firebasedatabase.app";
+  }
+
+  const region = (process.env.EXPO_PUBLIC_FIREBASE_RTDB_REGION ?? "").trim();
+  if (region) {
+    // Regional RTDB domain (recommended): https://<project>-default-rtdb.<region>.firebasedatabase.app
+    return `https://${pid}-default-rtdb.${region}.firebasedatabase.app`;
+  }
+
   // Firebase commonly uses either:
   // - https://<project>-default-rtdb.firebaseio.com
   // - https://<project>-default-rtdb.<region>.firebasedatabase.app
@@ -48,9 +60,22 @@ function readFirebaseConfig() {
 
   const hasEnv = Object.values(fromEnv).some((v) => !!v);
   if (hasEnv) {
+    const normalizedDbUrl = (() => {
+      const pid = fromEnv.projectId;
+      const url = fromEnv.databaseURL;
+      if (pid === "capstone-fish-dryer") {
+        const wrong = "https://capstone-fish-dryer-default-rtdb.firebaseio.com";
+        const right =
+          "https://capstone-fish-dryer-default-rtdb.asia-southeast1.firebasedatabase.app";
+        if (!url) return right;
+        if (url.replace(/\/+$/, "") === wrong) return right;
+      }
+      return url || defaultRealtimeDatabaseUrl(pid) || "";
+    })();
+
     return {
       ...fromEnv,
-      databaseURL: fromEnv.databaseURL || defaultRealtimeDatabaseUrl(fromEnv.projectId) || "",
+      databaseURL: normalizedDbUrl,
     };
   }
 
@@ -69,7 +94,18 @@ function readFirebaseConfig() {
 
   return {
     ...merged,
-    databaseURL: merged.databaseURL || defaultRealtimeDatabaseUrl(merged.projectId) || "",
+    databaseURL: (() => {
+      const pid = merged.projectId;
+      const url = merged.databaseURL;
+      if (pid === "capstone-fish-dryer") {
+        const wrong = "https://capstone-fish-dryer-default-rtdb.firebaseio.com";
+        const right =
+          "https://capstone-fish-dryer-default-rtdb.asia-southeast1.firebasedatabase.app";
+        if (!url) return right;
+        if (url.replace(/\/+$/, "") === wrong) return right;
+      }
+      return url || defaultRealtimeDatabaseUrl(pid) || "";
+    })(),
   };
 }
 

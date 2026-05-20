@@ -1,6 +1,6 @@
 //user-view.tsx
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -24,6 +24,7 @@ import HardwareStatus from './hardware-status';
 import UserHistory from './user-history';
 import UserNotifications from './user-notifications';
 import { API_BASE_URL } from '@/config/api';
+import { countUnreadHardwareNotifications } from '@/lib/hardware-notifications-store';
 
 const { width } = Dimensions.get('window');
 
@@ -36,8 +37,15 @@ export default function UserView() {
   const [activeScreen, setActiveScreen] = useState<
     'overview' | 'history' | 'notifications' | 'hardware' | 'profile'
   >('overview');
+  const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
 
   const slideAnim = useState(new Animated.Value(-width))[0];
+
+  const refreshUnreadNotificationCount = useCallback(async () => {
+    const count = await countUnreadHardwareNotifications();
+    setUnreadNotificationCount(count);
+    return count;
+  }, []);
 
   useEffect(() => {
     const loadUser = async () => {
@@ -53,6 +61,10 @@ export default function UserView() {
 
     loadUser();
   }, []);
+
+  useEffect(() => {
+    void refreshUnreadNotificationCount();
+  }, [activeScreen, refreshUnreadNotificationCount]);
 
   const handleLogout = async () => {
     try {
@@ -93,11 +105,22 @@ export default function UserView() {
   const renderContent = () => {
     switch (activeScreen) {
       case 'overview':
-        return <UserOverview />;
+        return (
+          <UserOverview
+            unreadNotificationCount={unreadNotificationCount}
+            onOpenNotifications={() => setActiveScreen('notifications')}
+            onNotificationsChanged={refreshUnreadNotificationCount}
+          />
+        );
       case 'history':
         return <UserHistory />;
       case 'notifications':
-        return <UserNotifications />;
+        return (
+          <UserNotifications
+            onBack={() => setActiveScreen('overview')}
+            onNotificationsChanged={refreshUnreadNotificationCount}
+          />
+        );
       case 'hardware':
         return <HardwareStatus />;
       case 'profile':
@@ -185,18 +208,6 @@ export default function UserView() {
         >
           <FontAwesome name="history" size={18} color="#5f6b7a" />
           <Text style={styles.menuText}>History</Text>
-        </TouchableOpacity>
-
-        {/* NOTIFICATIONS */}
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={() => {
-            setActiveScreen('notifications');
-            toggleSidebar();
-          }}
-        >
-          <FontAwesome name="bell" size={18} color="#5f6b7a" />
-          <Text style={styles.menuText}>Notifications</Text>
         </TouchableOpacity>
 
         {/* HARDWARE */}
