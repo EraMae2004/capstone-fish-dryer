@@ -13,7 +13,7 @@ import { FontAwesome } from '@expo/vector-icons';
 import { Stack } from 'expo-router';
 import { API_BASE_URL } from "@/config/api";
 import UserGraph from './user-graph';
-import { userTypography } from "./userTypography";
+import { userTypography } from "@/lib/user-typography";
 import { formatMinutesAsHMS, formatSecondsAsHMS } from "@/lib/duration-format";
 import { ListPaginationBar, useListPagination } from '@/lib/list-pagination';
 

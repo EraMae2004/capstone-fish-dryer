@@ -1,5 +1,6 @@
 import { Tabs } from 'expo-router';
-import React from 'react';
+import React, { type ComponentProps } from 'react';
+import { PlatformPressable } from '@react-navigation/elements';
 
 import { HapticTab } from '@/components/haptic-tab';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -12,9 +13,11 @@ export default function TabLayout() {
   return (
     <Tabs
       screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
+        tabBarActiveTintColor: Colors[colorScheme].tint,
         headerShown: false,
-        tabBarButton: HapticTab,
+        tabBarButton: (props) => (
+          <HapticTab {...(props as ComponentProps<typeof PlatformPressable>)} />
+        ),
       }}>
       <Tabs.Screen
         name="index"

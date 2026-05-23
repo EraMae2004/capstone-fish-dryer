@@ -110,7 +110,6 @@ export function resolveMoisturePercent(
   if (typeof r.moisture_raw === "number" && Number.isFinite(r.moisture_raw)) {
     const dry = YL69_DRY_ADC;
     const wet = YL69_WET_ADC;
-    if (dry === wet) return null;
     const pct =
       dry > wet
         ? ((dry - r.moisture_raw) * 100) / (dry - wet)

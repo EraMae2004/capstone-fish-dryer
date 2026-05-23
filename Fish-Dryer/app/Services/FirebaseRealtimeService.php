@@ -7,26 +7,41 @@ use Illuminate\Support\Facades\Http;
 class FirebaseRealtimeService
 {
     private bool $enabled;
+
     private ?string $databaseUrl;
+
     private ?string $databaseSecret;
 
     public function __construct()
     {
         $this->enabled = (bool) (env('FIREBASE_ENABLED', false));
         $this->databaseUrl = env('FIREBASE_DATABASE_URL') ?: null;
-        // Use RTDB legacy Database Secret for server writes (simple + works on PHP 8.2/XAMPP).
-        // Example: https://<project-id>-default-rtdb.asia-southeast1.firebasedatabase.app
         $this->databaseSecret = env('FIREBASE_DATABASE_SECRET') ?: null;
     }
 
+    /** Enabled when URL is set; secret optional (open RTDB rules / prototype). */
     public function isEnabled(): bool
     {
-        return $this->enabled && $this->databaseUrl && $this->databaseSecret;
+        return $this->enabled && $this->databaseUrl;
+    }
+
+    private function rtdbUrl(string $path): string
+    {
+        $base = rtrim((string) $this->databaseUrl, '/');
+        $path = ltrim($path, '/');
+        if (! str_ends_with($path, '.json')) {
+            $path .= '.json';
+        }
+        $url = "{$base}/{$path}";
+        $secret = trim((string) $this->databaseSecret);
+        if ($secret !== '') {
+            $url .= (str_contains($url, '?') ? '&' : '?').'auth='.urlencode($secret);
+        }
+
+        return $url;
     }
 
     /**
-     * Mirror latest hardware status snapshot to Firebase RTDB.
-     *
      * @param  array<string, mixed>  $payload
      */
     public function setMachineHardwareStatus(int $microcontrollerId, array $payload): void
@@ -35,19 +50,14 @@ class FirebaseRealtimeService
             return;
         }
 
-        $base = rtrim((string) $this->databaseUrl, '/');
-        $path = "machines/{$microcontrollerId}/hardware_status.json";
-        $secret = (string) $this->databaseSecret;
-        $url = "{$base}/{$path}?auth=".urlencode($secret);
-
         Http::timeout(3)
             ->withHeaders(['Content-Type' => 'application/json'])
             ->withBody(json_encode($payload, JSON_THROW_ON_ERROR), 'application/json')
-            ->put($url);
+            ->put($this->rtdbUrl("machines/{$microcontrollerId}/hardware_status"));
     }
 
     /**
-     * ESP32 polls RTDB `assignments/{macSafe}` — keep it in sync when Laravel resolves the board by MAC.
+     * ESP polls `assignments/{MAC}` — uppercase 12 hex, no colons (matches firmware + mobile).
      *
      * @param  array<string, mixed>  $payload
      */
@@ -57,51 +67,62 @@ class FirebaseRealtimeService
             return;
         }
 
-        $macSafe = strtolower(preg_replace('/[^0-9a-f]/', '', $macSafe));
+        $macSafe = strtoupper(preg_replace('/[^0-9A-F]/i', '', $macSafe));
         if ($macSafe === '') {
             return;
         }
 
-        $base = rtrim((string) $this->databaseUrl, '/');
-        $path = "assignments/{$macSafe}.json";
-        $secret = (string) $this->databaseSecret;
-        $url = "{$base}/{$path}?auth=".urlencode($secret);
-
         Http::timeout(3)
             ->withHeaders(['Content-Type' => 'application/json'])
             ->withBody(json_encode($payload, JSON_THROW_ON_ERROR), 'application/json')
-            ->put($url);
+            ->put($this->rtdbUrl("assignments/{$macSafe}"));
     }
 
     /**
-     * Read latest hardware status snapshot from Firebase RTDB.
-     *
      * @return array<string, mixed>|null
      */
-    public function getMachineHardwareStatus(int $microcontrollerId): ?array
+    private function getJson(string $path): ?array
     {
         if (! $this->isEnabled()) {
             return null;
         }
 
-        $base = rtrim((string) $this->databaseUrl, '/');
-        $path = "machines/{$microcontrollerId}/hardware_status.json";
-        $secret = (string) $this->databaseSecret;
-        $url = "{$base}/{$path}?auth=".urlencode($secret);
-
         try {
-            $res = Http::timeout(3)->get($url);
+            $res = Http::timeout(4)->get($this->rtdbUrl($path));
             if (! $res->successful()) {
                 return null;
             }
             $data = $res->json();
+
             return is_array($data) ? $data : null;
-        } catch (\Throwable $e) {
+        } catch (\Throwable) {
             return null;
         }
     }
 
     /**
+     * Latest ESP telemetry (board PUTs every ~2s when assigned).
+     *
+     * @return array<string, mixed>|null
+     */
+    public function getMachineHardwareStatus(int $microcontrollerId): ?array
+    {
+        return $this->getJson("machines/{$microcontrollerId}/hardware_status");
+    }
+
+    /**
+     * Drying command the ESP follows (fan / heaters / buzzer / LEDs).
+     *
+     * @return array<string, mixed>|null
+     */
+    public function getMachineSession(int $microcontrollerId): ?array
+    {
+        return $this->getJson("machines/{$microcontrollerId}/session");
+    }
+
+    /**
+     * ESP32 follows `machines/{id}/session` for fan, heaters, buzzer, LEDs.
+     *
      * @param  array<string, mixed>  $payload
      */
     public function setMachineSession(int $microcontrollerId, array $payload): void
@@ -110,15 +131,10 @@ class FirebaseRealtimeService
             return;
         }
 
-        $base = rtrim((string) $this->databaseUrl, '/');
-        $path = "machines/{$microcontrollerId}/session.json";
-        $secret = (string) $this->databaseSecret;
-        $url = "{$base}/{$path}?auth=".urlencode($secret);
-
         Http::timeout(3)
             ->withHeaders(['Content-Type' => 'application/json'])
             ->withBody(json_encode($payload, JSON_THROW_ON_ERROR), 'application/json')
-            ->put($url);
+            ->put($this->rtdbUrl("machines/{$microcontrollerId}/session"));
     }
 
     public function clearMachineTestCommand(int $microcontrollerId): void
@@ -127,12 +143,6 @@ class FirebaseRealtimeService
             return;
         }
 
-        $base = rtrim((string) $this->databaseUrl, '/');
-        $path = "machines/{$microcontrollerId}/test_command.json";
-        $secret = (string) $this->databaseSecret;
-        $url = "{$base}/{$path}?auth=".urlencode($secret);
-
-        Http::timeout(3)->delete($url);
+        Http::timeout(3)->delete($this->rtdbUrl("machines/{$microcontrollerId}/test_command"));
     }
 }
-

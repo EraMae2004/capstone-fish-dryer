@@ -27,16 +27,84 @@ class DryingController extends Controller
      * during short WiFi drops while still marking long-absent boards offline.
      */
     /** Heartbeat recency for "online" — wider window helps flaky campus Wi‑Fi / ESP reboots. */
-    /** Presence window: after this with no heartbeat, API reports offline (mobile also uses ~90s RTDB). */
+    /** Presence window: after this with no heartbeat, API reports offline (mobile RTDB uses ~12s). */
     private const ONLINE_LAST_SEEN_MINUTES = 3;
 
-    /** Match mobile RTDB grace — ESP pushes `hardware_status` every ~2s when Wi‑Fi is up. */
-    private const ONLINE_RTDB_GRACE_SECONDS = 90;
+    /** Match mobile RTDB offline grace — ESP pushes `hardware_status` every ~2s when Wi‑Fi is up. */
+    private const ONLINE_RTDB_GRACE_SECONDS = 60;
 
     private function machineDisplayName(Microcontroller $machine): string
     {
         $display = trim((string) ($machine->display_name ?? ''));
         return $display !== '' ? $display : (string) $machine->device_id;
+    }
+
+    /**
+     * ESP32 only runs fan/heaters/buzzer from RTDB `machines/{id}/session` (not Laravel MySQL).
+     * Mirror every start/pause/stop here so the board always receives the command.
+     */
+    private function syncEspSessionToFirebase(
+        int $microcontrollerId,
+        string $status,
+        ?float $targetTemperature = null,
+        ?int $fanSpeed = null
+    ): void {
+        try {
+            $firebase = app(FirebaseRealtimeService::class);
+            if (! $firebase->isEnabled()) {
+                return;
+            }
+
+            $st = strtolower(trim($status));
+            $running = $st === 'running';
+            $paused = $st === 'paused';
+            $tt = $targetTemperature !== null ? (float) $targetTemperature : 0.0;
+            if ($running || $paused) {
+                if ($tt <= 1.0) {
+                    $tt = 60.0;
+                }
+            } else {
+                $tt = 0.0;
+            }
+
+            $fs = $fanSpeed !== null ? (int) $fanSpeed : 1;
+            if ($fs < 1 || $fs > 3) {
+                $fs = 1;
+            }
+
+            $command = match ($st) {
+                'running' => 'start',
+                'paused' => 'pause',
+                'stopped' => 'stop',
+                default => $st,
+            };
+
+            $firebase->setMachineSession($microcontrollerId, [
+                'command' => $command,
+                'status' => $st,
+                'target_temperature' => $tt,
+                'fan_speed' => $fs,
+                'fault_buzzer_armed' => $running,
+                'session_active' => $running,
+                'updated_at' => now()->toIso8601String(),
+            ]);
+
+            $machine = Microcontroller::find($microcontrollerId);
+            $macHex = $machine ? $this->normalizeHardwareMac($machine->mac ?? $machine->device_id ?? null) : null;
+            if ($macHex) {
+                $firebase->setDeviceAssignment($macHex, [
+                    'microcontroller_id' => $microcontrollerId,
+                    'mac' => implode(':', str_split($macHex, 2)),
+                    'updated_at' => now()->toIso8601String(),
+                ]);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('firebase_session_sync_failed', [
+                'microcontroller_id' => $microcontrollerId,
+                'status' => $status,
+                'message' => $e->getMessage(),
+            ]);
+        }
     }
 
     /** Normalize Wi‑Fi MAC to 12 lowercase hex (no colons) for `microcontrollers.mac`. */
@@ -1031,9 +1099,17 @@ class DryingController extends Controller
                     'ended_at' => null,
                 ]);
 
+                $this->syncEspSessionToFirebase(
+                    $mcId,
+                    'running',
+                    (float) $data['target_temperature'],
+                    (int) $data['fan_speed']
+                );
+
                 return response()->json([
                     'success' => true,
                     'session' => $session,
+                    'firebase_command' => 'start',
                 ]);
             }
 
@@ -1057,10 +1133,18 @@ class DryingController extends Controller
                         $update['drying_time_minutes'] = max(0, (int) $data['drying_time_seconds']);
                     }
                     $paused->update($update);
+                    $paused = $paused->fresh();
+                    $this->syncEspSessionToFirebase(
+                        $mcId,
+                        (string) $paused->status,
+                        (float) $paused->target_temperature,
+                        (int) $paused->fan_speed
+                    );
 
                     return response()->json([
                         'success' => true,
-                        'session' => $paused->fresh(),
+                        'session' => $paused,
+                        'firebase_command' => 'start',
                     ]);
                 }
 
@@ -1089,10 +1173,18 @@ class DryingController extends Controller
                     $update['drying_time_minutes'] = max(0, (int) $data['drying_time_seconds']);
                 }
                 $session->update($update);
+                $session = $session->fresh();
+                $this->syncEspSessionToFirebase(
+                    $mcId,
+                    (string) $session->status,
+                    (float) $session->target_temperature,
+                    (int) $session->fan_speed
+                );
 
                 return response()->json([
                     'success' => true,
-                    'session' => $session->fresh(),
+                    'session' => $session,
+                    'firebase_command' => 'pause',
                 ]);
             }
 
@@ -1129,9 +1221,12 @@ class DryingController extends Controller
 
                 $this->appendFinalSensorLogFromRequest($session, $data);
 
+                $this->syncEspSessionToFirebase($mcId, 'stopped', 0, 1);
+
                 return response()->json([
                     'success' => true,
                     'session' => $session->fresh()->load('sensorLogs'),
+                    'firebase_command' => 'stop',
                 ]);
             }
         } catch (\Throwable $e) {
@@ -1142,6 +1237,37 @@ class DryingController extends Controller
         }
 
         return response()->json(['success' => false, 'message' => 'Unknown action'], 400);
+    }
+
+    /**
+     * Mobile / admin: read ESP telemetry straight from Firebase (same node the board writes).
+     */
+    public function firebaseTelemetry(Request $request, int $machineId)
+    {
+        $machine = Microcontroller::find($machineId);
+        if (! $machine) {
+            return response()->json(['success' => false, 'message' => 'Machine not found'], 404);
+        }
+
+        $firebase = app(FirebaseRealtimeService::class);
+        if (! $firebase->isEnabled()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Firebase RTDB is disabled. Set FIREBASE_ENABLED=true in Laravel .env',
+            ], 503);
+        }
+
+        $hardware = $firebase->getMachineHardwareStatus($machineId);
+        $session = $firebase->getMachineSession($machineId);
+
+        return response()->json([
+            'success' => true,
+            'machine_id' => $machineId,
+            'online' => $this->isMicrocontrollerOnlineViaFirebase($machineId),
+            'hardware_status' => $hardware,
+            'live_readings' => is_array($hardware) ? ($hardware['readings'] ?? null) : null,
+            'session' => $session,
+        ]);
     }
 
     public function recommendation(Request $request)
@@ -1427,17 +1553,19 @@ class DryingController extends Controller
         }
 
         $readings = $decodedRoot['readings'] ?? null;
-        if (! is_array($readings)) {
+        if (! is_array($readings) || $readings === []) {
             try {
                 $firebase = app(FirebaseRealtimeService::class);
-                $snap = $firebase->getMachineHardwareStatus((int) $machine->id);
-                $readings = is_array($snap['readings'] ?? null) ? $snap['readings'] : null;
+                if ($firebase->isEnabled()) {
+                    $snap = $firebase->getMachineHardwareStatus((int) $machine->id);
+                    $readings = is_array($snap['readings'] ?? null) ? $snap['readings'] : null;
+                }
             } catch (\Throwable) {
                 return;
             }
         }
 
-        if (! is_array($readings)) {
+        if (! is_array($readings) || $readings === []) {
             return;
         }
 
@@ -1551,26 +1679,41 @@ class DryingController extends Controller
 
         $hardwareStatuses = MachineHardwareStatus::where('microcontroller_id', $machine->id)->get();
 
-        // Prefer Firebase RTDB snapshot for "live" hardware statuses when enabled.
+        $liveReadings = null;
+        $rtdbHardware = null;
+        $rtdbSession = null;
+        $firebaseEnabled = false;
+
+        // Laravel reads live sensor data from Firebase (ESP writes hardware_status).
         try {
-            $firebase = app(\App\Services\FirebaseRealtimeService::class);
-            $snap = $firebase->getMachineHardwareStatus((int) $machine->id);
-            $components = is_array($snap) ? ($snap['components'] ?? null) : null;
-            if (is_array($components) && $components !== []) {
-                $rows = [];
-                foreach ($this->firebaseSensorHardwareComponentKeys() as $key) {
-                    $rows[] = [
-                        'component_name' => $key,
-                        'status' => (string) ($components[$key] ?? 'not_working'),
-                    ];
+            $firebase = app(FirebaseRealtimeService::class);
+            $firebaseEnabled = $firebase->isEnabled();
+            if ($firebaseEnabled) {
+                $rtdbHardware = $firebase->getMachineHardwareStatus((int) $machine->id);
+                $rtdbSession = $firebase->getMachineSession((int) $machine->id);
+                $readings = is_array($rtdbHardware) ? ($rtdbHardware['readings'] ?? null) : null;
+                if (is_array($readings) && $readings !== []) {
+                    $liveReadings = $readings;
                 }
-                $hardwareStatuses = collect($rows);
+                $components = is_array($rtdbHardware) ? ($rtdbHardware['components'] ?? null) : null;
+                if (is_array($components) && $components !== []) {
+                    $rows = [];
+                    foreach ($this->firebaseSensorHardwareComponentKeys() as $key) {
+                        $rows[] = [
+                            'component_name' => $key,
+                            'status' => (string) ($components[$key] ?? 'not_working'),
+                        ];
+                    }
+                    $hardwareStatuses = collect($rows);
+                }
             }
         } catch (\Throwable $e) {
             // Never break overview when Firebase is unavailable.
         }
 
         $lastSeen = $machine->last_seen;
+        $online = $this->isMicrocontrollerReachable($machine)
+            || ($firebaseEnabled && $this->isMicrocontrollerOnlineViaFirebase((int) $machine->id));
 
         return response()->json([
             'machine' => [
@@ -1580,13 +1723,17 @@ class DryingController extends Controller
                 'mac' => $this->microcontrollersHasMacColumn() ? $machine->mac : null,
                 'display_name' => $machine->display_name,
                 'last_seen' => $lastSeen ? $lastSeen->toIso8601String() : null,
-                'status' => $this->isMicrocontrollerReachable($machine)
-                    ? 'online'
-                    : 'offline',
+                'status' => $online ? 'online' : 'offline',
             ],
             'session' => $session,
             'hardware_statuses' => $hardwareStatuses,
-            'message' => null
+            'live_readings' => $liveReadings,
+            'rtdb' => [
+                'enabled' => $firebaseEnabled,
+                'hardware_updated_at' => is_array($rtdbHardware) ? ($rtdbHardware['updated_at'] ?? null) : null,
+                'session' => $rtdbSession,
+            ],
+            'message' => null,
         ]);
     }
 

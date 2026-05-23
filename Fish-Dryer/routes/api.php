@@ -15,6 +15,7 @@ Route::post('/ai/analyze', [MobileDryingController::class, 'analyzeBatch']);
 
 
 Route::get('/mobile/overview', [MobileDryingController::class, 'overview']);
+Route::get('/mobile/machines/{machineId}/firebase', [MobileDryingController::class, 'firebaseTelemetry']);
 Route::get('/mobile/recommendation', [MobileDryingController::class, 'recommendation']);
 Route::get('/mobile/user/{id}', [MobileAuthController::class, 'getUser']);
 Route::get('/drying-sessions', [MobileDryingController::class, 'index']);

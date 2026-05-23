@@ -1,7 +1,7 @@
 import React from "react";
 import { ScrollView, View, Text, StyleSheet } from "react-native";
 import { formatMoisturePercent, resolveMoisturePercent } from "@/lib/duration-format";
-import { userTypography } from "./userTypography";
+import { userTypography } from "@/lib/user-typography";
 export default function OverviewStatus({
   session,
   hardware_statuses,

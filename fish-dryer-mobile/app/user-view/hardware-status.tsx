@@ -6,12 +6,12 @@ import {
   ScrollView,
   TouchableOpacity,
   ActivityIndicator,
-  SafeAreaView,
   StatusBar,
   Alert,
   Modal,
   Pressable,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { FontAwesome as Icon, MaterialCommunityIcons } from "@expo/vector-icons";
 import { API_BASE_URL } from "@/config/api";
 import HardwareStatusModal from "./hardware-status-modal";
@@ -33,7 +33,7 @@ import {
   hardwareTestKeyForLabel,
   publishHardwareTestCommand,
 } from "@/lib/hardware-test-command";
-import { userTypography } from "./userTypography";
+import { userTypography } from "@/lib/user-typography";
 
 type MachineOnlineStatus = "online" | "offline";
 
@@ -1709,7 +1709,7 @@ const diagStyles = StyleSheet.create({
 
   // Full-screen dim layer that catches taps in the empty area to close the modal.
   backdrop: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: "rgba(15, 23, 42, 0.55)",
   },
 

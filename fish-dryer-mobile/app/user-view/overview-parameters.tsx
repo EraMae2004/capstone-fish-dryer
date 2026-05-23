@@ -1,6 +1,6 @@
 import React from "react";
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView } from "react-native";
-import { userTypography } from "./userTypography";
+import { userTypography } from "@/lib/user-typography";
 import { formatDigitsAsHMS } from "@/lib/duration-format";
 
 export default function OverviewParameters({
