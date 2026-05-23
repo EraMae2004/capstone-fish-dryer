@@ -188,9 +188,9 @@
       #ifndef BUZZER_PWM_DUTY
       #define BUZZER_PWM_DUTY 255
       #endif
-      /** If assignments/{MAC} missing, still follow machines/{id}/session (single-machine lab). */
+      /** 0 = unassigned boards must not publish to machines/1/ until the app assigns them. */
       #ifndef FALLBACK_MACHINE_ID
-      #define FALLBACK_MACHINE_ID 1
+      #define FALLBACK_MACHINE_ID 0
       #endif
       #ifndef ALLOW_ACTUATORS_WITHOUT_ASSIGNMENT
       #define ALLOW_ACTUATORS_WITHOUT_ASSIGNMENT 1

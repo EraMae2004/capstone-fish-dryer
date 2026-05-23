@@ -9,7 +9,6 @@ import {
 } from 'react-native';
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { Stack } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
 import {
   loadHardwareNotifications,
   markAllHardwareNotificationsRead,
@@ -64,11 +63,9 @@ export default function UserNotifications({
     });
   }, [onNotificationsChanged]);
 
-  useFocusEffect(
-    useCallback(() => {
-      void reload();
-    }, [reload])
-  );
+  useEffect(() => {
+    void reload();
+  }, [reload]);
 
   // Real notifications, mapped into the original UI shape ({ id, type, title, desc, time }).
   const notifications = useMemo(

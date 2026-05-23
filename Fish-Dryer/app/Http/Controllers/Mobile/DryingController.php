@@ -2060,6 +2060,21 @@ class DryingController extends Controller
             }
 
             if ($request->filled('selected_id')) {
+                $candidate = Microcontroller::find((int) $request->input('selected_id'));
+                $candidateMac = $candidate
+                    ? $this->normalizeHardwareMac($candidate->mac ?? null)
+                    : null;
+                // Only update an existing row when this physical MAC already owns that id.
+                $updateExisting = $candidate
+                    && (
+                        ($macNorm && $candidateMac && $macNorm === $candidateMac)
+                        || (! $macNorm && $candidateMac === null)
+                    );
+            } else {
+                $updateExisting = false;
+            }
+
+            if ($updateExisting) {
                 $machine = Microcontroller::findOrFail((int) $request->selected_id);
                 // Never mutate hardware identity from the mobile "name" field.
                 $updates = [
@@ -2088,6 +2103,24 @@ class DryingController extends Controller
                     $create['mac'] = $macNorm;
                 }
                 $machine = Microcontroller::create($create);
+            }
+
+            try {
+                $firebase = app(FirebaseRealtimeService::class);
+                if ($firebase->isEnabled() && $macNorm) {
+                    $firebase->setDeviceAssignment($macNorm, [
+                        'microcontroller_id' => (int) $machine->id,
+                        'name' => $this->machineDisplayName($machine),
+                        'device_id' => (string) $machine->device_id,
+                        'mac' => implode(':', str_split($macNorm, 2)),
+                        'updated_at' => now()->toIso8601String(),
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                Log::warning('addMachine_firebase_assignment_failed', [
+                    'microcontroller_id' => $machine->id,
+                    'message' => $e->getMessage(),
+                ]);
             }
 
             return response()->json([

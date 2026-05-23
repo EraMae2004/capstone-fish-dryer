@@ -23,6 +23,7 @@ import { parsePresenceMs } from "@/lib/parse-presence-ms";
 import {
   ingestRtdbHardwareSnapshot,
   isMachineOnlineForUi,
+  RTDB_INITIAL_STALE_MS,
   useStableMachineOnline,
 } from "@/lib/machine-presence";
 
@@ -56,7 +57,7 @@ function durationDigitsToSeconds(digits: string): number | null {
 }
 
 /** Recompute RTDB staleness every second so offline appears soon after the ESP stops. */
-const PRESENCE_UI_TICK_MS = 1_000;
+const PRESENCE_UI_TICK_MS = 500;
 const PROBLEM_NOTIFY_INTERVAL_MS = 60_000;
 
 /** Survives Overview unmount (notifications screen) so open/close does not spam alerts. */
@@ -233,6 +234,7 @@ export default function UserOverview({
     }
 
     const r = dbRef(firebaseDb, `machines/${machine.id}/hardware_status`);
+    let hadAccepted = false;
     const unsub = onValue(
       r,
       (snap: DataSnapshot) => {
@@ -241,17 +243,22 @@ export default function UserOverview({
           return;
         }
 
-        const ingested = ingestRtdbHardwareSnapshot(
+        const now = Date.now();
+        const payloadMs = parsePresenceMs(
           (val as Record<string, unknown>).updated_at
         );
-        if (ingested.payloadMs != null) {
-          setOverviewRtdbPayloadAtMs(ingested.payloadMs);
+        if (
+          !hadAccepted &&
+          (payloadMs == null || now - payloadMs > RTDB_INITIAL_STALE_MS)
+        ) {
+          return;
         }
-        if (ingested.receiveMs != null) {
-          setOverviewRtdbLastReceiveMs((prev) =>
-            Math.max(prev ?? 0, ingested.receiveMs as number)
-          );
+        hadAccepted = true;
+
+        if (payloadMs != null) {
+          setOverviewRtdbPayloadAtMs(payloadMs);
         }
+        setOverviewRtdbLastReceiveMs(now);
 
         const componentsMap =
           (val as Record<string, unknown>).components &&

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   View,
   Text,
@@ -15,15 +15,19 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { FontAwesome as Icon, MaterialCommunityIcons } from "@expo/vector-icons";
 import { API_BASE_URL } from "@/config/api";
 import HardwareStatusModal from "./hardware-status-modal";
-import { onValue, ref as dbRef, get as dbGet, set as dbSet, type DataSnapshot } from "firebase/database";
+import { onValue, ref as dbRef, get as dbGet, type DataSnapshot } from "firebase/database";
 import { firebaseDb } from "@/config/firebase";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
 import { resolveMoisturePercent } from "@/lib/duration-format";
+import { ensureEspAssignment } from "@/lib/ensure-esp-assignment";
 import {
+  computeStableOnlineByMachineId,
+  hardwareStatusBelongsToMachine,
   ingestRtdbHardwareSnapshot,
   isMachineLive,
   isMachineOnlineForUi,
-  isRtdbMicrocontrollerLive,
+  normalizeHardwareMacKey,
+  recordMachineRtdbDelivery,
   useStableMachineOnline,
 } from "@/lib/machine-presence";
 import {
@@ -53,6 +57,7 @@ type Machine = {
   id: number;
   name: string;
   device_id?: string;
+  mac?: string | null;
   display_name?: string | null;
   status?: MachineOnlineStatus;
   /** ISO 8601 from Laravel — used to explain offline vs "detected" row. */
@@ -60,7 +65,7 @@ type Machine = {
 };
 
 const MACHINE_PRESENCE_POLL_MS = 15_000;
-const PRESENCE_UI_TICK_MS = 1_000;
+const PRESENCE_UI_TICK_MS = 500;
 
 /** MCU offline ⇒ every component reads not_working (no stale "working" ghosts). */
 function effectiveComponentStatus(rawStatus: string, streamFresh: boolean): string {
@@ -93,12 +98,23 @@ function asJsonArray<T>(v: unknown): T[] {
 /** API / proxies sometimes vary casing; keep UI consistent with backend intent. */
 function normalizeMachineRow(m: Machine): Required<Pick<Machine, "status">> & Machine {
   const id = Number(m.id);
+  const macRaw = String((m as { mac?: unknown }).mac ?? "").trim();
   return {
     ...m,
     id: Number.isFinite(id) ? id : m.id,
+    mac: macRaw || null,
     status: machineStatusFromApi(m.status),
     last_seen: m.last_seen ?? null,
   };
+}
+
+function machineMacForRow(m: Machine | null | undefined): string | null {
+  if (!m) return null;
+  return normalizeHardwareMacKey(m.mac) ?? normalizeHardwareMacKey(m.device_id);
+}
+
+function macWithColonsFromKey(macKey: string): string {
+  return macKey.match(/.{1,2}/g)?.join(":") ?? macKey;
 }
 
 /** Sync machine row with Firebase presence (not Laravel `last_seen`, which lags up to 3 min). */
@@ -169,11 +185,52 @@ type LiveReadings = {
   door?: string;
 };
 
+type MachineHardwareSnapshot = {
+  components: ComponentStatus[];
+  readings: LiveReadings | null;
+  receiveMs: number | null;
+  payloadMs: number | null;
+};
+
+const HW_STATUS_SKIP_KEYS = new Set([
+  "components",
+  "updated_at",
+  "microcontroller_id",
+  "device_id",
+  "readings",
+  "name",
+  "mac",
+]);
+
+function parseHardwareStatusFromRtdb(val: Record<string, unknown>): {
+  components: ComponentStatus[];
+  readings: LiveReadings | null;
+  payloadMs: number | null;
+} {
+  const payloadMs = parsePresenceMs(val.updated_at);
+  const readingsRaw = val.readings;
+  const readings =
+    readingsRaw && typeof readingsRaw === "object" ? (readingsRaw as LiveReadings) : null;
+  const componentsMap =
+    val.components && typeof val.components === "object" ? val.components : val;
+  const components =
+    componentsMap && typeof componentsMap === "object"
+      ? Object.entries(componentsMap as Record<string, unknown>)
+          .filter(([k]) => !HW_STATUS_SKIP_KEYS.has(k))
+          .map(([component_name, status]) => ({
+            component_name,
+            status: String(status ?? "unknown"),
+          }))
+      : [];
+  return { components, readings, payloadMs };
+}
+
 export default function HardwareStatus() {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [selectedMachine, setSelectedMachine] = useState<Machine | null>(null);
-  const [components, setComponents] = useState<ComponentStatus[]>([]);
-  const [liveReadings, setLiveReadings] = useState<LiveReadings | null>(null);
+  /** Per-machine RTDB hardware — keyed by Laravel/Firebase machine id. */
+  const [machineHwById, setMachineHwById] = useState<Record<number, MachineHardwareSnapshot>>({});
+  const machineHwByIdRef = useRef<Record<number, MachineHardwareSnapshot>>({});
 
   const [loading, setLoading] = useState(true);
   const [testingAll, setTestingAll] = useState(false);
@@ -194,28 +251,58 @@ export default function HardwareStatus() {
   const [modalVisible, setModalVisible] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
 
-  const [hardwareRtdbLastReceiveMs, setHardwareRtdbLastReceiveMs] = useState<number | null>(null);
-  const [hardwareRtdbPayloadAtMs, setHardwareRtdbPayloadAtMs] = useState<number | null>(null);
   /** Last Firebase delivery per machine id (`machines/{id}/hardware_status`). */
   const [machineRtdbReceiveMs, setMachineRtdbReceiveMs] = useState<Record<number, number>>({});
   const [machineRtdbPayloadMs, setMachineRtdbPayloadMs] = useState<Record<number, number>>({});
+  const [presenceTick, setPresenceTick] = useState(0);
   const machineRtdbReceiveRef = useRef<Record<number, number>>({});
-  /** Avoid slow `/components` responses overwriting newer RTDB rows. */
-  const componentsFromRtdbRef = useRef(false);
+  const machineRtdbPayloadRef = useRef<Record<number, number>>({});
+  const machineRtdbSeenCallbackRef = useRef<Record<number, boolean>>({});
+  const machinesRef = useRef<Machine[]>([]);
   const componentsLoadGenRef = useRef(0);
+  const userPickedMachineRef = useRef(false);
+  const stableOnlineByIdRef = useRef<Record<number, boolean>>({});
+  const stableOfflineStreakRef = useRef<Record<number, number>>({});
 
   /** Avoid stale `selectedMachine` inside interval / async refresh (was resetting wrong row). */
   const selectedMachineIdRef = useRef<number | null>(null);
+
+  const selectMachine = (m: Machine) => {
+    userPickedMachineRef.current = true;
+    setSelectedMachine(m);
+    selectedMachineIdRef.current = m.id;
+  };
   useEffect(() => {
     selectedMachineIdRef.current = selectedMachine?.id ?? null;
   }, [selectedMachine?.id]);
+
+  const machineIdsKey = useMemo(
+    () => machines.map((m) => m.id).join(","),
+    [machines]
+  );
+
+  useEffect(() => {
+    machinesRef.current = machines;
+  }, [machines]);
+
+  const selectedHw =
+    selectedMachine != null ? machineHwById[selectedMachine.id] : undefined;
+  const components = selectedHw?.components ?? [];
+  const liveReadings = selectedHw?.readings ?? null;
+  const hardwareRtdbLastReceiveMs =
+    selectedMachine != null
+      ? machineRtdbReceiveMs[selectedMachine.id] ?? selectedHw?.receiveMs ?? null
+      : null;
+  const hardwareRtdbPayloadAtMs =
+    selectedMachine != null
+      ? machineRtdbPayloadMs[selectedMachine.id] ?? selectedHw?.payloadMs ?? null
+      : null;
 
   useEffect(() => {
     loadMachines();
   }, []);
 
   /** RTDB does not push when the ESP stops; re-render periodically so "recent" expires → offline. */
-  const [presenceTick, setPresenceTick] = useState(0);
   useEffect(() => {
     if (!firebaseDb) return;
     const id = setInterval(() => setPresenceTick((n) => n + 1), PRESENCE_UI_TICK_MS);
@@ -228,147 +315,66 @@ export default function HardwareStatus() {
     selectedMachine?.id ?? null
   );
 
-  // Pulse every machine that has `hardware_status` in RTDB — drives card Online/Offline when Laravel lags.
+  // Per-machine RTDB listeners — every live heartbeat refreshes receiveMs (no parent-scan flicker).
   useEffect(() => {
-    if (!firebaseDb) {
-      machineRtdbReceiveRef.current = {};
-      setMachineRtdbReceiveMs({});
-      setMachineRtdbPayloadMs({});
+    if (!firebaseDb || !machineIdsKey) {
       return;
     }
-    const r = dbRef(firebaseDb, "machines");
-    const unsub = onValue(r, (snap: DataSnapshot) => {
-      const val = snap.val();
-      if (!val || typeof val !== "object") {
-        return;
-      }
-      const now = Date.now();
-      const receiveNext: Record<number, number> = { ...machineRtdbReceiveRef.current };
-      const payloadNext: Record<number, number> = {};
-      for (const [rawId, node] of Object.entries(val as Record<string, unknown>)) {
-        const id = Number(rawId);
-        if (!Number.isFinite(id)) continue;
-        const obj = node && typeof node === "object" ? (node as Record<string, unknown>) : null;
-        const hw = obj?.hardware_status;
-        if (!hw || typeof hw !== "object") continue;
-        const hwRec = hw as Record<string, unknown>;
-        const ingested = ingestRtdbHardwareSnapshot(hwRec.updated_at, now);
-        if (!ingested.acceptDelivery || ingested.receiveMs == null) continue;
-        receiveNext[id] = Math.max(receiveNext[id] ?? 0, ingested.receiveMs);
-        if (ingested.payloadMs != null) payloadNext[id] = ingested.payloadMs;
-      }
-      machineRtdbReceiveRef.current = receiveNext;
-      setMachineRtdbReceiveMs(receiveNext);
-      setMachineRtdbPayloadMs(payloadNext);
-    });
-    return () => {
-      unsub();
-    };
-  }, []);
+    const db = firebaseDb;
 
-  /** If Laravel machine id ≠ ESP `MICROCONTROLLER_ID`, RTDB writes go to another path and this screen stayed “offline”. When exactly one machine shows an RTDB pulse, select it automatically. */
-  useEffect(() => {
-    if (!firebaseDb || machines.length === 0) return;
-    const sid = selectedMachineIdRef.current ?? selectedMachine?.id ?? null;
-    const selRecent =
-      sid != null && isRtdbMicrocontrollerLive(machineRtdbReceiveMs[sid]);
-    if (selRecent) return;
+    const ids = machineIdsKey
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((id) => Number.isFinite(id));
 
-    const candidates = machines.filter((m) =>
-      isRtdbMicrocontrollerLive(machineRtdbReceiveMs[m.id])
-    );
-    if (candidates.length !== 1) return;
-    const only = candidates[0];
-    if (sid != null && only.id === sid) return;
-
-    setSelectedMachine(only);
-    selectedMachineIdRef.current = only.id;
-    void loadComponents(only.id);
-  }, [firebaseDb, machines, machineRtdbReceiveMs, machineRtdbPayloadMs, selectedMachine?.id]);
-
-  // Realtime Firebase subscription: mirrors latest statuses without polling delay.
-  useEffect(() => {
-    if (!firebaseDb) {
-      setHardwareRtdbLastReceiveMs(null);
-      setHardwareRtdbPayloadAtMs(null);
-      componentsFromRtdbRef.current = false;
-      return;
-    }
-    if (!selectedMachine?.id) {
-      setHardwareRtdbLastReceiveMs(null);
-      setHardwareRtdbPayloadAtMs(null);
-      componentsFromRtdbRef.current = false;
-      return;
-    }
-
-    componentsFromRtdbRef.current = false;
-
-    const r = dbRef(firebaseDb, `machines/${selectedMachine.id}/hardware_status`);
-    const unsub = onValue(
-      r,
-      (snap: DataSnapshot) => {
+    const unsubs = ids.map((id) => {
+      const path = `machines/${id}/hardware_status`;
+      return onValue(dbRef(db, path), (snap: DataSnapshot) => {
         const val = snap.val();
-        if (!val || typeof val !== "object") {
+        if (!val || typeof val !== "object") return;
+        const hwRec = val as Record<string, unknown>;
+        const row = machinesRef.current.find((r) => r.id === id);
+        if (!hardwareStatusBelongsToMachine(id, hwRec, machineMacForRow(row))) {
           return;
         }
 
-        const ingested = ingestRtdbHardwareSnapshot(
-          (val as Record<string, unknown>).updated_at
+        const now = Date.now();
+        const parsed = parseHardwareStatusFromRtdb(hwRec);
+        const bumped = recordMachineRtdbDelivery(
+          machineRtdbReceiveRef.current,
+          machineRtdbPayloadRef.current,
+          id,
+          hwRec.updated_at,
+          machineRtdbSeenCallbackRef.current,
+          now
         );
-        if (ingested.payloadMs != null) {
-          setHardwareRtdbPayloadAtMs(ingested.payloadMs);
-        }
-        if (ingested.receiveMs != null) {
-          setHardwareRtdbLastReceiveMs((prev) =>
-            Math.max(prev ?? 0, ingested.receiveMs as number)
-          );
-        }
+        if (!bumped.accepted) return;
 
-        const readingsRaw = (val as Record<string, unknown>).readings;
-        if (readingsRaw && typeof readingsRaw === "object") {
-          setLiveReadings(readingsRaw as LiveReadings);
-        }
+        machineRtdbReceiveRef.current = bumped.receiveById;
+        machineRtdbPayloadRef.current = bumped.payloadById;
+        machineHwByIdRef.current = {
+          ...machineHwByIdRef.current,
+          [id]: {
+            components: parsed.components,
+            readings: parsed.readings,
+            receiveMs: bumped.receiveById[id] ?? now,
+            payloadMs: bumped.payloadById[id] ?? parsed.payloadMs ?? now,
+          },
+        };
 
-        // Expect { components: { heater_1: "working", ... } } (preferred)
-        // but accept { heater_1: "working", ... } too.
-        const componentsMap = (val.components && typeof val.components === "object")
-          ? val.components
-          : val;
-
-        if (!componentsMap || typeof componentsMap !== "object") return;
-
-        const skip = new Set([
-          "components",
-          "updated_at",
-          "microcontroller_id",
-          "device_id",
-          "readings",
-          "name",
-          "mac",
-        ]);
-
-        const next = Object.entries(componentsMap as Record<string, unknown>)
-          .filter(([k]) => !skip.has(k))
-          .map(([component_name, status]) => ({
-            component_name,
-            status: String(status ?? "unknown"),
-          }));
-
-        if (next.length) {
-          setComponents(next);
-          componentsFromRtdbRef.current = true;
-        }
-      },
-      (err: unknown) => {
-        console.log("Firebase hardware_status subscribe error:", err);
-      }
-    );
+        setMachineRtdbReceiveMs({ ...machineRtdbReceiveRef.current });
+        setMachineRtdbPayloadMs({ ...machineRtdbPayloadRef.current });
+        setMachineHwById({ ...machineHwByIdRef.current });
+      });
+    });
 
     return () => {
-      unsub();
-      componentsFromRtdbRef.current = false;
+      for (const id of ids) {
+        delete machineRtdbSeenCallbackRef.current[id];
+      }
+      unsubs.forEach((u) => u());
     };
-  }, [selectedMachine?.id]);
+  }, [firebaseDb, machineIdsKey]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -486,11 +492,18 @@ export default function HardwareStatus() {
     const sid = selectedMachineIdRef.current;
     const next =
       list.find((m: Machine) => Number(m.id) === Number(sid)) ??
-      list.find((m) => isMachineLive(m)) ??
-      list[0] ??
-      null;
-    setSelectedMachine(next);
-    selectedMachineIdRef.current = next?.id ?? null;
+      (userPickedMachineRef.current ? null : list[0] ?? null);
+    if (next) {
+      if (next.id !== sid) {
+        selectMachine(next);
+      } else {
+        setSelectedMachine(next);
+        selectedMachineIdRef.current = next.id;
+      }
+    } else if (!userPickedMachineRef.current) {
+      setSelectedMachine(null);
+      selectedMachineIdRef.current = null;
+    }
 
     if (next && !usedFallback && !firebaseDb) {
       try {
@@ -509,11 +522,37 @@ export default function HardwareStatus() {
     const gen = ++componentsLoadGenRef.current;
     try {
       const res = await apiRequest(`/machines/${machineId}/components`);
-      if (gen !== componentsLoadGenRef.current || componentsFromRtdbRef.current) return;
-      setComponents(asJsonArray<ComponentStatus>(res.data));
+      if (gen !== componentsLoadGenRef.current) return;
+      const rows = asJsonArray<ComponentStatus>(res.data);
+      const now = Date.now();
+      setMachineHwById((prev) => {
+        const next = {
+          ...prev,
+          [machineId]: {
+            components: rows,
+            readings: null,
+            receiveMs: now,
+            payloadMs: now,
+          },
+        };
+        machineHwByIdRef.current = next;
+        return next;
+      });
     } catch (e) {
-      if (gen !== componentsLoadGenRef.current || componentsFromRtdbRef.current) return;
-      setComponents([]);
+      if (gen !== componentsLoadGenRef.current) return;
+      setMachineHwById((prev) => {
+        const next = {
+          ...prev,
+          [machineId]: {
+            components: [],
+            readings: null,
+            receiveMs: null,
+            payloadMs: null,
+          },
+        };
+        machineHwByIdRef.current = next;
+        return next;
+      });
       setApiError(
         e instanceof Error
           ? `Components (#${machineId}): ${e.message}`
@@ -523,6 +562,15 @@ export default function HardwareStatus() {
   };
 
   void presenceTick;
+
+  const stableOnlineById = computeStableOnlineByMachineId(
+    machineRtdbReceiveMs,
+    stableOnlineByIdRef.current,
+    machines.map((m) => m.id),
+    Date.now(),
+    stableOfflineStreakRef.current
+  );
+  stableOnlineByIdRef.current = stableOnlineById;
 
   const selectedMachineOnline = isMachineOnlineForUi({
     firebaseConfigured: Boolean(firebaseDb),
@@ -535,7 +583,7 @@ export default function HardwareStatus() {
 
   const machineCardAppearsLive = (m: Machine) => {
     if (!firebaseDb) return isMachineLive(m);
-    return isRtdbMicrocontrollerLive(machineRtdbReceiveMs[m.id]);
+    return stableOnlineById[m.id] ?? false;
   };
 
   const getComponentStatus = (name: string) => {
@@ -586,29 +634,29 @@ export default function HardwareStatus() {
     readings: LiveReadings;
     updatedAtMs: number | null;
   } | null> => {
+    const cached = machineHwByIdRef.current[machineId];
     let componentsMap: Record<string, string> = {};
-    components.forEach((c) => {
+    (cached?.components ?? []).forEach((c) => {
       if (c?.component_name) componentsMap[normalizeKey(c.component_name)] = String(c.status ?? "");
     });
-    let readings: LiveReadings = liveReadings ?? {};
-    let updatedAtMs: number | null = hardwareRtdbPayloadAtMs ?? hardwareRtdbLastReceiveMs;
+    let readings: LiveReadings = cached?.readings ?? {};
+    let updatedAtMs: number | null =
+      cached?.payloadMs ?? cached?.receiveMs ?? machineRtdbPayloadMs[machineId] ?? null;
 
     if (firebaseDb) {
       try {
         const snap = await dbGet(dbRef(firebaseDb, `machines/${machineId}/hardware_status`));
         const val = snap.val();
         if (val && typeof val === "object") {
-          const v = val as Record<string, unknown>;
-          updatedAtMs = parsePresenceMs(v.updated_at);
-          const cmap = (v.components && typeof v.components === "object" ? v.components : v) as Record<string, unknown>;
+          const parsed = parseHardwareStatusFromRtdb(val as Record<string, unknown>);
+          updatedAtMs = parsed.payloadMs;
           componentsMap = {};
-          for (const [k, st] of Object.entries(cmap)) {
-            if (["components", "updated_at", "microcontroller_id", "device_id", "readings", "name", "mac"].includes(k)) continue;
-            componentsMap[normalizeKey(k)] = String(st ?? "");
-          }
-          if (v.readings && typeof v.readings === "object") {
-            readings = v.readings as LiveReadings;
-          }
+          parsed.components.forEach((c) => {
+            if (c?.component_name) {
+              componentsMap[normalizeKey(c.component_name)] = String(c.status ?? "");
+            }
+          });
+          if (parsed.readings) readings = parsed.readings;
         }
       } catch (e) {
         console.log("Diagnostic dbGet failed, using cached state:", e);
@@ -986,6 +1034,7 @@ export default function HardwareStatus() {
 
       // (2) Already-publishing machines/{id}/hardware_status still alive.
       try {
+        const known = machinesRef.current;
         const snap = await dbGet(dbRef(firebaseDb, "machines"));
         const val = snap.val();
         if (val && typeof val === "object") {
@@ -998,14 +1047,38 @@ export default function HardwareStatus() {
             if (!hw) continue;
             const snapIng = ingestRtdbHardwareSnapshot(hw.updated_at);
             if (!snapIng.acceptDelivery || snapIng.payloadMs == null) continue;
-            upsert({
-              id: rawId,
-              name: String(obj.name ?? hw.name ?? `Machine ${rawId}`),
-              device_id: String(obj.device_id ?? hw.device_id ?? "") || undefined,
-              mac: String(hw.mac ?? "") || undefined,
-              last_seen: new Date(snapIng.payloadMs).toISOString(),
-              status: "online",
-            });
+            const pathId = Number(rawId);
+            const hwMacRaw = String(hw.mac ?? obj.mac ?? "").trim();
+            const hwMacKey = normalizeHardwareMacKey(hwMacRaw);
+            const hwMcId = Number(hw.microcontroller_id);
+            const registered =
+              Number.isFinite(pathId) &&
+              hwMacKey != null &&
+              known.some(
+                (m) => m.id === pathId && normalizeHardwareMacKey(m.mac) === hwMacKey
+              );
+            const claimedOnPath =
+              registered && Number.isFinite(hwMcId) && hwMcId === pathId;
+            if (claimedOnPath) {
+              upsert({
+                id: String(pathId),
+                name: String(obj.name ?? hw.name ?? `Machine ${rawId}`),
+                device_id: String(obj.device_id ?? hw.device_id ?? "") || undefined,
+                mac: hwMacRaw || undefined,
+                last_seen: new Date(snapIng.payloadMs).toISOString(),
+                status: "online",
+              });
+            } else if (hwMacKey) {
+              // Physical board not linked to this path id — treat as new hardware by MAC.
+              upsert({
+                id: hwMacKey,
+                name: String(hw.name ?? obj.name ?? `Board ${hwMacKey.slice(-4)}`),
+                device_id: String(hw.device_id ?? obj.device_id ?? hwMacRaw) || undefined,
+                mac: hwMacRaw || macWithColonsFromKey(hwMacKey),
+                last_seen: new Date(snapIng.payloadMs).toISOString(),
+                status: "online",
+              });
+            }
           }
         }
       } catch (e) {
@@ -1050,9 +1123,17 @@ export default function HardwareStatus() {
       const res = await apiRequest("/machines");
       const list = asJsonArray<Machine>(res.data).map(normalizeMachineRow);
       const receiveMap = machineRtdbReceiveRef.current;
+      const stableMap = computeStableOnlineByMachineId(
+        receiveMap,
+        stableOnlineByIdRef.current,
+        list.map((m) => m.id),
+        Date.now(),
+        stableOfflineStreakRef.current
+      );
+      stableOnlineByIdRef.current = stableMap;
       const withPresence = list.map((m) => {
         if (!firebaseDb) return m;
-        const live = isRtdbMicrocontrollerLive(receiveMap[m.id]);
+        const live = stableMap[m.id] ?? false;
         return machineRowWithLivePresence(m, receiveMap[m.id], undefined, live);
       });
       setMachines(withPresence);
@@ -1082,28 +1163,27 @@ export default function HardwareStatus() {
         return;
       }
 
-      // Boards advertised before being assigned use their MAC as the row id (selected.id).
-      // In that case selectedNumId becomes NaN — that's fine; Laravel will mint a new id.
-      const selectedNumId = Number(selected.id);
-      const isUnassignedBoard = !Number.isFinite(selectedNumId) || selectedNumId <= 0;
+      const deviceId = String(selected.device_id ?? "").trim();
+      const mac = String(selected.mac ?? selected.id ?? "").trim();
+      const macKey = normalizeHardwareMacKey(mac) ?? normalizeHardwareMacKey(selected.id);
 
-      const existingById = isUnassignedBoard
-        ? null
-        : machines.find((m) => m.id === selectedNumId) ?? null;
-      const deviceId = String(selected.device_id ?? existingById?.device_id ?? "").trim();
-      const mac = String(selected.mac ?? "").trim();
-
-      if (!deviceId && !mac) {
+      if (!deviceId && !macKey) {
         Alert.alert("Missing hardware ID", "Could not read MAC/device_id from the detected board.");
         return;
       }
+
+      // If this physical MAC is already in the DB, update that row. Otherwise always mint a new id
+      // (never reuse machines/1 from detection when board 2 was wrongly publishing there).
+      const linkedRow = macKey
+        ? machines.find((m) => normalizeHardwareMacKey(m.mac) === macKey)
+        : undefined;
 
       // If user typed a new friendly name, don't treat it as a duplicate "machine row".
       const dupByDisplay =
         typedName &&
         machines.some(
           (m) =>
-            m.id !== selectedNumId &&
+            m.id !== linkedRow?.id &&
             normalizeKey(String(m.display_name ?? m.name)) === normalizeKey(typedName)
         );
 
@@ -1112,22 +1192,20 @@ export default function HardwareStatus() {
         return;
       }
 
-      // Ask Laravel to upsert the row. For unassigned boards we omit selected_id so the
-      // backend mints a new microcontrollers.id; for known boards we keep the id stable.
       const saveBody: Record<string, unknown> = {
         name: typedName || null,
-        device_id: deviceId || mac,
-        mac: mac || undefined,
+        device_id: deviceId || macWithColonsFromKey(macKey ?? ""),
+        mac: macKey ? macWithColonsFromKey(macKey) : mac || undefined,
       };
-      if (!isUnassignedBoard) saveBody.selected_id = selectedNumId;
+      if (linkedRow) {
+        saveBody.selected_id = linkedRow.id;
+      }
 
       const res = await apiRequest("/machines", {
         method: "POST",
         body: JSON.stringify(saveBody),
       });
 
-      // Pull the assigned numeric id back from the API response (varies by backend
-      // shape, so we cover the common spots).
       const respData =
         (res && typeof res === "object" && (res as Record<string, unknown>).data) || res;
       const respObj = (respData && typeof respData === "object" ? respData : {}) as Record<
@@ -1138,21 +1216,14 @@ export default function HardwareStatus() {
         Number(respObj.id) ||
         Number(respObj.microcontroller_id) ||
         Number((respObj.machine as Record<string, unknown> | undefined)?.id) ||
-        (isUnassignedBoard ? 0 : selectedNumId);
+        linkedRow?.id ||
+        0;
 
-      // *** This is the part that removes the firmware hardcoding ***
-      // Tell the physical board (identified by MAC) which numeric id it should use.
-      // The ESP32 polls assignments/{MAC} on every heartbeat and persists the value
-      // to flash, so it adopts the new id without a reflash.
-      if (firebaseDb && mac && assignedId > 0) {
+      if (firebaseDb && macKey && assignedId > 0) {
         try {
-          const macSafe = mac.replace(/:/g, "");
-          await dbSet(dbRef(firebaseDb, `assignments/${macSafe}`), {
-            microcontroller_id: assignedId,
+          await ensureEspAssignment(firebaseDb, assignedId, macKey, {
             name: typedName || selected.name,
-            device_id: deviceId || mac,
-            mac,
-            assigned_at: new Date().toISOString(),
+            deviceId: String(saveBody.device_id ?? ""),
           });
         } catch (e) {
           console.log("Failed to write assignments/{MAC} (board may not auto-adopt id):", e);
@@ -1214,8 +1285,7 @@ export default function HardwareStatus() {
                 !liveCard && styles.offline,
               ]}
               onPress={() => {
-                setSelectedMachine(m);
-                selectedMachineIdRef.current = m.id;
+                selectMachine(m);
                 void loadComponents(m.id);
               }}
             >
