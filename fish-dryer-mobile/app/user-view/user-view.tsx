@@ -12,7 +12,7 @@ import {
   Pressable,
   Image,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { FontAwesome } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
@@ -27,10 +27,12 @@ import { API_BASE_URL } from '@/config/api';
 import { countUnreadHardwareNotifications } from '@/lib/hardware-notifications-store';
 
 const { width } = Dimensions.get('window');
-
+const TOPBAR_HEIGHT = 80;
 
 export default function UserView() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const topbarTotalHeight = TOPBAR_HEIGHT + insets.top;
 
   const [user, setUser] = useState<any>(null);
   const [sidebarVisible, setSidebarVisible] = useState(false);
@@ -133,11 +135,11 @@ export default function UserView() {
   return (
 
     
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['bottom']}>
       <StatusBar barStyle="light-content" />
 
       {/* ================= TOP BAR ================= */}
-      <View style={styles.topbar}>
+      <View style={[styles.topbar, { height: topbarTotalHeight, paddingTop: insets.top + 20 }]}>
         <View style={styles.leftSection}>
           <TouchableOpacity onPress={toggleSidebar}>
             <FontAwesome name="bars" size={22} color="white" />
@@ -165,14 +167,17 @@ export default function UserView() {
 
       {/* ================= OVERLAY ================= */}
       {sidebarVisible && (
-        <Pressable style={styles.overlay} onPress={toggleSidebar} />
+        <Pressable
+          style={[styles.overlay, { top: topbarTotalHeight }]}
+          onPress={toggleSidebar}
+        />
       )}
 
       {/* ================= SIDEBAR ================= */}
       <Animated.View
         style={[
           styles.sidebar,
-          { transform: [{ translateX: slideAnim }] },
+          { top: topbarTotalHeight, transform: [{ translateX: slideAnim }] },
         ]}
       >
         {/* OVERVIEW */}
@@ -256,13 +261,12 @@ const styles = StyleSheet.create({
   },
 
   topbar: {
-    height: 80,
     backgroundColor: '#2c3e50',
     paddingHorizontal: 20,
-    paddingTop: 20,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    zIndex: 40,
   },
 
   leftSection: {
@@ -318,13 +322,14 @@ const styles = StyleSheet.create({
   sidebar: {
     position: 'absolute',
     left: 0,
-    top: 80,
+    bottom: 0,
     width: width * 0.75,
-    height: '100%',
     backgroundColor: 'white',
-    paddingVertical: 20,
+    paddingTop: 20,
+    paddingBottom: 20,
     paddingHorizontal: 10,
     elevation: 20,
+    zIndex: 10,
   },
 
   menuItem: {
@@ -366,8 +371,10 @@ const styles = StyleSheet.create({
 
   overlay: {
     position: 'absolute',
-    width: '100%',
-    height: '100%',
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: 'rgba(0,0,0,0.3)',
+    zIndex: 5,
   },
 });

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   View,
   Text,
@@ -28,7 +28,6 @@ import {
   isMachineOnlineForUi,
   normalizeHardwareMacKey,
   recordMachineRtdbDelivery,
-  useStableMachineOnline,
 } from "@/lib/machine-presence";
 import {
   clearHardwareTestCommand,
@@ -255,6 +254,7 @@ export default function HardwareStatus() {
   const [machineRtdbReceiveMs, setMachineRtdbReceiveMs] = useState<Record<number, number>>({});
   const [machineRtdbPayloadMs, setMachineRtdbPayloadMs] = useState<Record<number, number>>({});
   const [presenceTick, setPresenceTick] = useState(0);
+  const [stableOnlineById, setStableOnlineById] = useState<Record<number, boolean>>({});
   const machineRtdbReceiveRef = useRef<Record<number, number>>({});
   const machineRtdbPayloadRef = useRef<Record<number, number>>({});
   const machineRtdbSeenCallbackRef = useRef<Record<number, boolean>>({});
@@ -309,11 +309,35 @@ export default function HardwareStatus() {
     return () => clearInterval(id);
   }, [firebaseDb]);
 
-  const hardwareStableOnline = useStableMachineOnline(
-    hardwareRtdbLastReceiveMs,
-    presenceTick,
-    selectedMachine?.id ?? null
-  );
+  const recomputeStableOnline = useCallback((advanceOfflineDebounce: boolean) => {
+    const ids = machinesRef.current.map((m) => m.id);
+    if (ids.length === 0) return;
+    const next = computeStableOnlineByMachineId(
+      machineRtdbReceiveRef.current,
+      stableOnlineByIdRef.current,
+      ids,
+      Date.now(),
+      stableOfflineStreakRef.current,
+      advanceOfflineDebounce
+    );
+    stableOnlineByIdRef.current = next;
+    setStableOnlineById(next);
+  }, []);
+
+  /** Heartbeat delivery — go Online immediately; do not debounce-off on unrelated renders. */
+  useEffect(() => {
+    if (!firebaseDb || !machineIdsKey) return;
+    recomputeStableOnline(false);
+  }, [firebaseDb, machineIdsKey, machineRtdbReceiveMs, recomputeStableOnline]);
+
+  /** Timer tick — only path that may advance offline debounce. */
+  useEffect(() => {
+    if (!firebaseDb || !machineIdsKey) return;
+    recomputeStableOnline(true);
+  }, [firebaseDb, machineIdsKey, presenceTick, recomputeStableOnline]);
+
+  const hardwareStableOnline =
+    selectedMachine != null ? (stableOnlineById[selectedMachine.id] ?? false) : false;
 
   // Per-machine RTDB listeners — every live heartbeat refreshes receiveMs (no parent-scan flicker).
   useEffect(() => {
@@ -560,17 +584,6 @@ export default function HardwareStatus() {
       );
     }
   };
-
-  void presenceTick;
-
-  const stableOnlineById = computeStableOnlineByMachineId(
-    machineRtdbReceiveMs,
-    stableOnlineByIdRef.current,
-    machines.map((m) => m.id),
-    Date.now(),
-    stableOfflineStreakRef.current
-  );
-  stableOnlineByIdRef.current = stableOnlineById;
 
   const selectedMachineOnline = isMachineOnlineForUi({
     firebaseConfigured: Boolean(firebaseDb),
@@ -1123,14 +1136,7 @@ export default function HardwareStatus() {
       const res = await apiRequest("/machines");
       const list = asJsonArray<Machine>(res.data).map(normalizeMachineRow);
       const receiveMap = machineRtdbReceiveRef.current;
-      const stableMap = computeStableOnlineByMachineId(
-        receiveMap,
-        stableOnlineByIdRef.current,
-        list.map((m) => m.id),
-        Date.now(),
-        stableOfflineStreakRef.current
-      );
-      stableOnlineByIdRef.current = stableMap;
+      const stableMap = stableOnlineByIdRef.current;
       const withPresence = list.map((m) => {
         if (!firebaseDb) return m;
         const live = stableMap[m.id] ?? false;

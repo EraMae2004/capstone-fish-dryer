@@ -89,6 +89,14 @@ class DryingController extends Controller
                 'updated_at' => now()->toIso8601String(),
             ]);
 
+            $firebase->setMachineCommand($microcontrollerId, [
+                'action' => $command,
+                'fan_speed' => $fs,
+                'target_temperature' => $tt,
+                'seq' => (int) round(microtime(true) * 1000),
+                'updated_at' => now()->toIso8601String(),
+            ]);
+
             $machine = Microcontroller::find($microcontrollerId);
             $macHex = $machine ? $this->normalizeHardwareMac($machine->mac ?? $machine->device_id ?? null) : null;
             if ($macHex) {

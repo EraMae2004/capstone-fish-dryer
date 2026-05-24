@@ -137,6 +137,23 @@ class FirebaseRealtimeService
             ->put($this->rtdbUrl("machines/{$microcontrollerId}/session"));
     }
 
+    /**
+     * Direct ESP command channel — firmware polls `machines/{id}/command` every ~400ms.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    public function setMachineCommand(int $microcontrollerId, array $payload): void
+    {
+        if (! $this->isEnabled()) {
+            return;
+        }
+
+        Http::timeout(3)
+            ->withHeaders(['Content-Type' => 'application/json'])
+            ->withBody(json_encode($payload, JSON_THROW_ON_ERROR), 'application/json')
+            ->put($this->rtdbUrl("machines/{$microcontrollerId}/command"));
+    }
+
     public function clearMachineTestCommand(int $microcontrollerId): void
     {
         if (! $this->isEnabled()) {

@@ -94,7 +94,7 @@
       // Must match fish-dryer-mobile/app.json -> expo.extra.apiBaseUrl (same IP, ends with /api).
       const char* API_URL = "http://10.173.245.15:8000/api/hardware/esp32/status";
 
-      static const char* FIRMWARE_BUILD_TAG = "drying-lock-v38";
+      static const char* FIRMWARE_BUILD_TAG = "drying-actuators-v40";
 
       // Laravel heartbeat: keeps `last_seen` + hardware rows in MySQL and mirrors RTDB when enabled.
       // Set to 0 only while debugging (e.g. API returns 500). If the app shows "offline" but RTDB
@@ -335,7 +335,7 @@
           fanRep = fanLoadIsOn();
           h1Rep = heaterLoadIsOn(RELAY_HEATER1);
           h2Rep = heaterLoadIsOn(RELAY_HEATER2);
-        } else if (sessionAllowsActuators()) {
+        } else if (dryingSessionOutputsActive()) {
           fanRep = fanLoadIsOn();
           h1Rep = heaterLoadIsOn(RELAY_HEATER1);
           h2Rep = heaterLoadIsOn(RELAY_HEATER2);
@@ -490,16 +490,18 @@
       #ifndef MOISTURE_DISCONNECT_GOOD_RESET_SAMPLES
       #define MOISTURE_DISCONNECT_GOOD_RESET_SAMPLES 2
       #endif
-      /** 0 = drying buzzer ignores moisture (DHT temp faults still alarm). */
+      /** 1 = moisture disconnect/fault triggers drying buzzer (with DHT/door faults). */
       #ifndef MOISTURE_FAULT_BUZZER
-      #define MOISTURE_FAULT_BUZZER 0
+      #define MOISTURE_FAULT_BUZZER 1
       #endif
 
       static bool gMoistureConnectedStable = false;
       static uint8_t gMoistureGoodStreak = 0;
       static uint8_t gMoistureBadStreak = 0;
-      /** Latched ON after RTDB session=start until explicit stop (survives flaky GETs). */
+      /** Latched ON after RTDB start until explicit stop (survives flaky GETs). */
       static bool gDryingOutputsLatched = false;
+      /** Last processed `machines/{id}/command.seq` (mobile + Laravel write here). */
+      static unsigned long gLastCommandSeq = 0;
 
       /**
        * YL-69 A0: wet → low ADC, dry → high. Unplugged GPIO35 often hits 0 (min) with
@@ -750,6 +752,11 @@
         return (s == "paused");
       }
 
+      /** Fan, heaters, and moisture telemetry only while drying is actively running. */
+      static bool dryingSessionOutputsActive() {
+        return gDryingOutputsLatched && sessionStatusIsRunning();
+      }
+
       static float gLastGoodAirC = NAN;
       static unsigned long gLastGoodAirMs = 0;
 
@@ -816,7 +823,36 @@
       }
 
       static void applyFanSpeedForSession() {
-        driveFanLoad(sessionAllowsActuators());
+        serviceFanSpeedRelay(millis());
+      }
+
+      /** Single relay fan: keep ON while drying (mechanical relays cannot PWM fast). */
+      static void serviceFanSpeedRelay(unsigned long nowMs) {
+        (void)nowMs;
+        if (!dryingSessionOutputsActive()) {
+          driveFanLoad(false);
+          return;
+        }
+        driveFanLoad(true);
+      }
+
+      /** Bang-bang heaters + 90s warm-up at session start (so loads are visibly active). */
+      static void serviceHeatersForSession(bool dhtOk, float airC) {
+        if (!dryingSessionOutputsActive()) {
+          driveHeaterLoad(false);
+          return;
+        }
+        if (gDryingSessionStartMs != 0 &&
+            (millis() - gDryingSessionStartMs) < 90000UL) {
+          driveHeaterLoad(true);
+          return;
+        }
+        const float t = airCToUseForHeater(dhtOk, airC);
+        if (isnan(t)) {
+          driveHeaterLoad(true);
+          return;
+        }
+        driveHeaterLoad(t < (gSessionTargetC - TEMP_TARGET_MARGIN_C));
       }
 
       static void logActualLoadGpios(const char* why) {
@@ -924,7 +960,10 @@
         if (gSessionTargetC <= 1.0f) {
           gSessionTargetC = 60.0f;
         }
-        applyDryingOutputsHard();
+        {
+          const bool dhtOkNow = pollDhtIfDue();
+          applyDryingSessionLoads(dhtOkNow, cachedDhtT);
+        }
         applyLedsForSession("running");
         if (chirp) {
         #if BUZZER_DRYING_START_CHIRP_MS > 0
@@ -936,10 +975,16 @@
         logActualLoadGpios("drying");
       }
 
-      /** Drive fan + heaters + short buzzer — call every loop while drying latched. */
+      /** Fan + heaters ON (bench / wiring test — not session PWM). */
       static void applyDryingOutputsHard() {
         driveFanLoad(true);
         driveHeaterLoad(true);
+      }
+
+      /** Session loads: fan speed PWM + target-temp heaters (Overview Start only). */
+      static void applyDryingSessionLoads(bool dhtOk, float airC) {
+        serviceFanSpeedRelay(millis());
+        serviceHeatersForSession(dhtOk, airC);
       }
 
       static void safetyCutLoadsUnlessRunning() {
@@ -1392,10 +1437,8 @@
       }
 
       static void commitLoadRelays(bool dhtOk, float airC) {
-        (void)dhtOk;
-        (void)airC;
-        if (gDryingOutputsLatched) {
-          applyDryingOutputsHard();
+        if (dryingSessionOutputsActive()) {
+          applyDryingSessionLoads(dhtOk, airC);
           return;
         }
       #if ENABLE_RTDB_HARDWARE_TEST
@@ -1444,6 +1487,7 @@
         gNullSessionPollStreak = 0;
         gDrySessionLatched = false;
         gDryingSessionStartMs = 0;
+        gLastCommandSeq = 0;
         disengageBuzzerAlarm();
         pauseLocalHardwareTestOnly();
         forceActuatorsOff();
@@ -1469,6 +1513,94 @@
         Serial.println(RELAY_ACTIVE_LOW ? 1 : 0);
       }
 
+      /** Prefer persisted assignment id — must match mobile `machines/{id}/session` + `command`. */
+      static int sessionMachineId() {
+        if (gAssignedId > 0) {
+          return gAssignedId;
+        }
+        return effectiveSessionMachineId();
+      }
+
+      /**
+       * Mobile + Laravel write `machines/{id}/command` — ESP applies this first (reliable).
+       */
+      static void applyCloudCommandFromRtdb(int mid) {
+        if (mid <= 0) {
+          return;
+        }
+        const String path = String("machines/") + String(mid) + "/command";
+        const String body = rtdbGetText(path);
+        if (body.length() == 0 || body == "null") {
+          return;
+        }
+
+        const unsigned long seq =
+            (unsigned long)parseJsonFloatAfterKey(body, "seq", 0);
+        if (seq > 0 && seq <= gLastCommandSeq) {
+          return;
+        }
+
+        String action = parseJsonStringAfterKey(body, "action", "");
+        action.toLowerCase();
+        action.trim();
+        if (action.length() == 0) {
+          action = parseJsonStringAfterKey(body, "command", "");
+          action.toLowerCase();
+          action.trim();
+        }
+
+        const float tt =
+            parseJsonFloatAfterKey(body, "target_temperature", gSessionTargetC);
+        if (tt > 1.0f && tt < 120.0f) {
+          gSessionTargetC = tt;
+        }
+        const int fs = parseJsonIntAfterKey(body, "fan_speed", gFanSpeedLevel);
+        gFanSpeedLevel = fs < 1 ? 1 : (fs > 3 ? 3 : fs);
+
+        if (gAssignedId <= 0 && mid > 0) {
+          gAssignedId = mid;
+          persistAssignment(gAssignedId, gDeviceName);
+        }
+
+        if (action == "stop") {
+          if (seq > 0) {
+            gLastCommandSeq = seq;
+          }
+          Serial.println("[command] stop");
+          forceIdleSessionState();
+          return;
+        }
+
+        if (action == "pause") {
+          if (seq > 0) {
+            gLastCommandSeq = seq;
+          }
+          Serial.println("[command] pause");
+          gDryingOutputsLatched = false;
+          gSessionStatus = "paused";
+          gSessionActiveFlag = false;
+          gDryingSessionStartMs = 0;
+          disengageBuzzerAlarm();
+          driveFanLoad(false);
+          driveHeaterLoad(false);
+          applyLedsForSession("paused");
+          return;
+        }
+
+        if (action == "start" || action == "running") {
+          if (seq > 0) {
+            gLastCommandSeq = seq;
+          }
+          const bool chirp = !gDryingOutputsLatched;
+          if (!gDryingOutputsLatched) {
+            gDryingSessionStartMs = millis();
+          }
+          Serial.print("[command] start mid=");
+          Serial.println(mid);
+          beginDryingOutputs(chirp);
+        }
+      }
+
       static void applySessionLedsOnly() {
         applyLedsForSession(
             gSessionStatus.length() ? gSessionStatus : String("stopped"));
@@ -1482,10 +1614,12 @@
         if (gAssignedId <= 0) {
           (void)refreshAssignmentFromCloud();
         }
-        const int mid = effectiveSessionMachineId();
+        const int mid = sessionMachineId();
         if (mid <= 0) {
           return;
         }
+
+        applyCloudCommandFromRtdb(mid);
 
         const String sessionPath =
             String("machines/") + String(mid) + "/session";
@@ -1500,8 +1634,8 @@
             Serial.print(" latched=");
             Serial.println(gDryingOutputsLatched ? 1 : 0);
           }
-          if (gDryingOutputsLatched) {
-            applyDryingOutputsHard();
+          if (gDryingOutputsLatched && sessionStatusIsRunning()) {
+            applyDryingSessionLoads(pollDhtIfDue(), cachedDhtT);
           }
           return;
         }
@@ -1603,10 +1737,8 @@
 
         if (parsed == "stopped" || parsed == "idle" || parsed == "complete" ||
             parsed == "completed") {
-          if (!gDryingOutputsLatched) {
-            Serial.println("[session] cloud=stopped");
-            forceIdleSessionState();
-          }
+          Serial.println("[session] cloud=stopped");
+          forceIdleSessionState();
           return;
         }
 
@@ -1615,6 +1747,8 @@
           gSessionStatus = "paused";
           gSessionActiveFlag = false;
           gSessionTargetC = 0.0f;
+          gDryingSessionStartMs = 0;
+          disengageBuzzerAlarm();
           driveFanLoad(false);
           driveHeaterLoad(false);
           applyLedsForSession("paused");
@@ -1656,6 +1790,8 @@
         while (i < (int)body.length() && (body[i] == ' ' || body[i] == '\t')) i++;
         if (body.startsWith("true", i)) return true;
         if (body.startsWith("false", i)) return false;
+        if (body[i] == '1') return true;
+        if (body[i] == '0') return false;
         return defV;
       }
 
@@ -1947,11 +2083,16 @@
         int spread = 0;
         int moistureMin = 0;
         int moistureMax = 0;
-        readMoistureAdc(moistureRaw, spread, moistureMin, moistureMax);
-        const bool moistureOkReport =
-            moistureSensorReportOk(moistureRaw, spread, moistureMin, moistureMax);
-        if (moistureOkReport) {
-          updateMoistureBounds(moistureRaw);
+        bool moistureOkReport = false;
+        const bool dryingActive =
+            dryingSessionOutputsActive() || gDryingOutputsLatched;
+        if (dryingActive) {
+          readMoistureAdc(moistureRaw, spread, moistureMin, moistureMax);
+          moistureOkReport =
+              moistureSensorReportOk(moistureRaw, spread, moistureMin, moistureMax);
+          if (moistureOkReport) {
+            updateMoistureBounds(moistureRaw);
+          }
         }
         const int moisturePct =
             moistureOkReport ? moisturePercentFromAdc(moistureRaw) : -1;
@@ -2203,7 +2344,7 @@
           }
         }
 
-        if (sessionAllowsActuators()) {
+        if (dryingSessionOutputsActive()) {
           commitLoadRelays(dhtOkReport, t);
         } else if (shouldForceLoadsOff()) {
           forceActuatorsOff();
@@ -2347,7 +2488,9 @@
       static void readSensorsOnce(bool& dhtOk, bool& moistureOk, bool& doorOk) {
         dhtOk = pollDhtIfDue();
 
-        if (millis() - gLastMoistureSampleMs >= 250UL) {
+        const bool dryingActive =
+            dryingSessionOutputsActive() || gDryingOutputsLatched;
+        if (dryingActive && millis() - gLastMoistureSampleMs >= 250UL) {
           gLastMoistureSampleMs = millis();
           int minV = 0;
           int maxV = 0;
@@ -2355,8 +2498,12 @@
           gMoistureMinCached = minV;
           gMoistureMaxCached = maxV;
         }
-        moistureOk = moistureSensorReportOk(
-            gMoistureAvgCached, gMoistureSpreadCached, gMoistureMinCached, gMoistureMaxCached);
+        if (dryingActive) {
+          moistureOk = moistureSensorReportOk(
+              gMoistureAvgCached, gMoistureSpreadCached, gMoistureMinCached, gMoistureMaxCached);
+        } else {
+          moistureOk = false;
+        }
 
         doorOk = doorSensorStatusForPayload();
       }
@@ -2476,8 +2623,8 @@
         (void)refreshSessionFromCloud();
         if (!gDryingOutputsLatched) {
           forceActuatorsOff();
-        } else {
-          applyDryingOutputsHard();
+        } else if (sessionStatusIsRunning()) {
+          applyDryingSessionLoads(dhtOk, cachedDhtT);
         }
         sendHeartbeat(dhtOk, moistureOk, doorOk);
         lastHeartbeatMs = millis();
@@ -2513,10 +2660,6 @@
         bool dhtOk = false, moistureOk = false, doorOk = false;
         readSensorsOnce(dhtOk, moistureOk, doorOk);
 
-        if (gDryingOutputsLatched) {
-          applyDryingOutputsHard();
-        }
-
         if (millis() - gLastAssignmentPollMs >= 1000UL) {
           gLastAssignmentPollMs = millis();
           if (refreshAssignmentFromCloud()) {
@@ -2536,9 +2679,6 @@
           gLastSessionPollMs = millis();
           refreshSessionFromCloud();
         }
-        if (gDryingOutputsLatched || sessionAllowsActuators()) {
-          applyDryingOutputsHard();
-        }
       #if ENABLE_RTDB_HARDWARE_TEST
         if (!gDryingOutputsLatched && !sessionStatusIsRunning() && !sessionStatusIsPaused()) {
           if (millis() - gLastTestCmdPollMs >= 400UL) {
@@ -2555,9 +2695,6 @@
         }
       #endif
         serviceBuzzer(dhtOk, moistureOk, doorSensorOkForAlerts(), cachedDhtT);
-        if (gDryingOutputsLatched || sessionAllowsActuators()) {
-          applyDryingOutputsHard();
-        }
         safetyCutLoadsUnlessRunning();
 
         if (millis() - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {

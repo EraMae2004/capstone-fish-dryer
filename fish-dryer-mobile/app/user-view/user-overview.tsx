@@ -410,14 +410,37 @@ export default function UserOverview({
         Number.parseFloat(String(temperature || "0").trim());
       const tt =
         Number.isFinite(ttRaw) && ttRaw > 1 ? ttRaw : 60;
+      const seq = Date.now();
       try {
-        await dbSet(dbRef(firebaseDb, `machines/${microcontrollerId}/session`), {
+        const payload: Record<string, unknown> = {
           status,
           fault_buzzer_armed: running || paused,
           fan_speed: fs,
           target_temperature: running || paused ? tt : 0,
           updated_at: new Date().toISOString(),
-        });
+        };
+        const commandPayload: Record<string, unknown> = {
+          action: status === "running" ? "start" : status === "paused" ? "pause" : "stop",
+          fan_speed: fs,
+          target_temperature: running || paused ? tt : 0,
+          seq,
+          updated_at: new Date().toISOString(),
+        };
+        if (status === "stopped") {
+          payload.command = "stop";
+          payload.session_active = false;
+        } else if (running) {
+          payload.command = "start";
+          payload.session_active = true;
+        } else if (paused) {
+          payload.command = "pause";
+          payload.session_active = false;
+        }
+        await dbSet(dbRef(firebaseDb, `machines/${microcontrollerId}/session`), payload);
+        await dbSet(
+          dbRef(firebaseDb, `machines/${microcontrollerId}/command`),
+          commandPayload
+        );
       } catch (e) {
         console.log("session RTDB write:", e);
       }

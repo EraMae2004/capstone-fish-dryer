@@ -10,11 +10,14 @@ export const RTDB_GO_ONLINE_MS = 5_000;
 /** Drop Offline ≤5s after the last RTDB delivery when unplugged / Wi‑Fi lost. */
 export const RTDB_GO_OFFLINE_MS = 5_000;
 
-/** While Online, allow one missed ~2s heartbeat before flipping Offline (prevents card flicker). */
-export const RTDB_STAY_ONLINE_MS = 5_500;
+/** While Online, tolerate ~2 missed heartbeats before age check fails. */
+export const RTDB_STAY_ONLINE_MS = 6_500;
 
 /** First snapshot only — ignore rows older than this (offline board on app open). */
 export const RTDB_INITIAL_STALE_MS = 5_000;
+
+/** Offline card flips only after this many presence ticks (not every React render). */
+export const RTDB_OFFLINE_CONFIRM_TICKS = 2;
 
 /** @deprecated Use API_LAST_SEEN_MS. */
 export const LIVE_LAST_SEEN_MS = API_LAST_SEEN_MS;
@@ -193,19 +196,21 @@ export function isRtdbMicrocontrollerLiveStable(
   return age <= RTDB_GO_ONLINE_MS;
 }
 
-/** Recompute stable online flags for all machines (call once per UI tick). */
+/** Recompute stable online flags — call from a timer and on RTDB receive updates only. */
 export function computeStableOnlineByMachineId(
   receiveById: Record<number, number>,
   prevStable: Record<number, boolean>,
   machineIds: number[],
   nowMs: number = Date.now(),
-  offlineStreakById: Record<number, number> = {}
+  offlineStreakById: Record<number, number> = {},
+  advanceOfflineDebounce: boolean = true
 ): Record<number, boolean> {
   const next: Record<number, boolean> = { ...prevStable };
   for (const id of machineIds) {
+    const wasOnline = prevStable[id] ?? false;
     const wouldBeOnline = isRtdbMicrocontrollerLiveStable(
       receiveById[id],
-      prevStable[id] ?? false,
+      wasOnline,
       nowMs
     );
     if (wouldBeOnline) {
@@ -213,11 +218,14 @@ export function computeStableOnlineByMachineId(
       next[id] = true;
       continue;
     }
-    if (prevStable[id]) {
+    if (wasOnline) {
+      if (!advanceOfflineDebounce) {
+        next[id] = true;
+        continue;
+      }
       const streak = (offlineStreakById[id] ?? 0) + 1;
       offlineStreakById[id] = streak;
-      // Require 2 consecutive offline evaluations before flipping the card (kills 1-tick flicker).
-      next[id] = streak < 2;
+      next[id] = streak < RTDB_OFFLINE_CONFIRM_TICKS;
       continue;
     }
     offlineStreakById[id] = 0;
@@ -234,8 +242,8 @@ export function useStableMachineOnline(
   const onlineRef = useRef(false);
   const lastReceiveRef = useRef<number | null>(null);
   const offlineStreakRef = useRef(0);
+  const lastTickRef = useRef(-1);
   const boundMachineRef = useRef<number | null | undefined>(undefined);
-  void presenceTick;
   const now = Date.now();
 
   if (machineId !== undefined && boundMachineRef.current !== machineId) {
@@ -243,6 +251,7 @@ export function useStableMachineOnline(
     lastReceiveRef.current = null;
     onlineRef.current = false;
     offlineStreakRef.current = 0;
+    lastTickRef.current = -1;
     return onlineRef.current;
   }
 
@@ -259,12 +268,19 @@ export function useStableMachineOnline(
   if (wouldBeOnline) {
     offlineStreakRef.current = 0;
     onlineRef.current = true;
-  } else if (onlineRef.current) {
-    offlineStreakRef.current += 1;
-    onlineRef.current = offlineStreakRef.current < 2;
-  } else {
-    offlineStreakRef.current = 0;
-    onlineRef.current = false;
+    return onlineRef.current;
+  }
+
+  const tickAdvanced = presenceTick !== lastTickRef.current;
+  if (tickAdvanced) {
+    lastTickRef.current = presenceTick;
+    if (onlineRef.current) {
+      offlineStreakRef.current += 1;
+      onlineRef.current = offlineStreakRef.current < RTDB_OFFLINE_CONFIRM_TICKS;
+    } else {
+      offlineStreakRef.current = 0;
+      onlineRef.current = false;
+    }
   }
 
   return onlineRef.current;
