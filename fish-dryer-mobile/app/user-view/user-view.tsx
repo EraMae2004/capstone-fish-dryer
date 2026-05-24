@@ -25,6 +25,8 @@ import UserHistory from './user-history';
 import UserNotifications from './user-notifications';
 import { API_BASE_URL } from '@/config/api';
 import { countUnreadHardwareNotifications } from '@/lib/hardware-notifications-store';
+import { getSelectedMachineId } from '@/lib/selected-machine';
+import { ShellSidebarOpenContext } from '@/lib/shell-sidebar-context';
 
 const { width } = Dimensions.get('window');
 const TOPBAR_HEIGHT = 80;
@@ -44,7 +46,8 @@ export default function UserView() {
   const slideAnim = useState(new Animated.Value(-width))[0];
 
   const refreshUnreadNotificationCount = useCallback(async () => {
-    const count = await countUnreadHardwareNotifications();
+    const machineId = await getSelectedMachineId();
+    const count = await countUnreadHardwareNotifications(machineId);
     setUnreadNotificationCount(count);
     return count;
   }, []);
@@ -132,6 +135,16 @@ export default function UserView() {
     }
   };
 
+  const sidebarHighlight =
+    activeScreen === 'notifications' ? 'overview' : activeScreen;
+
+  const navItems = [
+    { key: 'overview' as const, icon: 'dashboard' as const, label: 'Overview' },
+    { key: 'history' as const, icon: 'history' as const, label: 'History' },
+    { key: 'hardware' as const, icon: 'microchip' as const, label: 'Hardware Status' },
+    { key: 'profile' as const, icon: 'user' as const, label: 'Profile' },
+  ];
+
   return (
 
     
@@ -163,7 +176,9 @@ export default function UserView() {
       </View>
 
       {/* ================= CONTENT ================= */}
-      <View style={styles.content}>{renderContent()}</View>
+      <ShellSidebarOpenContext.Provider value={sidebarVisible}>
+        <View style={styles.content}>{renderContent()}</View>
+      </ShellSidebarOpenContext.Provider>
 
       {/* ================= OVERLAY ================= */}
       {sidebarVisible && (
@@ -180,64 +195,28 @@ export default function UserView() {
           { top: topbarTotalHeight, transform: [{ translateX: slideAnim }] },
         ]}
       >
-        {/* OVERVIEW */}
-        <TouchableOpacity
-          style={[
-            styles.menuItem,
-            activeScreen === 'overview' && styles.activeItem,
-          ]}
-          onPress={() => {
-            setActiveScreen('overview');
-            toggleSidebar();
-          }}
-        >
-          <FontAwesome name="dashboard" size={18} color="#2c3e50" />
-          <Text
-            style={
-              activeScreen === 'overview'
-                ? styles.menuTextActive
-                : styles.menuText
-            }
-          >
-            Overview
-          </Text>
-        </TouchableOpacity>
-
-        {/* HISTORY */}
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={() => {
-            setActiveScreen('history');
-            toggleSidebar();
-          }}
-        >
-          <FontAwesome name="history" size={18} color="#5f6b7a" />
-          <Text style={styles.menuText}>History</Text>
-        </TouchableOpacity>
-
-        {/* HARDWARE */}
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={() => {
-            setActiveScreen('hardware');
-            toggleSidebar();
-          }}
-        >
-          <FontAwesome name="microchip" size={18} color="#5f6b7a" />
-          <Text style={styles.menuText}>Hardware Status</Text>
-        </TouchableOpacity>
-
-        {/* PROFILE */}
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={() => {
-            setActiveScreen('profile');
-            toggleSidebar();
-          }}
-        >
-          <FontAwesome name="user" size={18} color="#5f6b7a" />
-          <Text style={styles.menuText}>Profile</Text>
-        </TouchableOpacity>
+        {navItems.map((item) => {
+          const active = sidebarHighlight === item.key;
+          return (
+            <TouchableOpacity
+              key={item.key}
+              style={[styles.menuItem, active && styles.activeItem]}
+              onPress={() => {
+                setActiveScreen(item.key);
+                toggleSidebar();
+              }}
+            >
+              <FontAwesome
+                name={item.icon}
+                size={18}
+                color={active ? '#2c3e50' : '#5f6b7a'}
+              />
+              <Text style={active ? styles.menuTextActive : styles.menuText}>
+                {item.label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
 
         <View style={styles.divider} />
 
@@ -317,6 +296,7 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     padding: 25,
+    zIndex: 1,
   },
 
   sidebar: {
@@ -328,8 +308,8 @@ const styles = StyleSheet.create({
     paddingTop: 20,
     paddingBottom: 20,
     paddingHorizontal: 10,
-    elevation: 20,
-    zIndex: 10,
+    elevation: 30,
+    zIndex: 100,
   },
 
   menuItem: {
@@ -375,6 +355,7 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     backgroundColor: 'rgba(0,0,0,0.3)',
-    zIndex: 5,
+    zIndex: 90,
+    elevation: 25,
   },
 });

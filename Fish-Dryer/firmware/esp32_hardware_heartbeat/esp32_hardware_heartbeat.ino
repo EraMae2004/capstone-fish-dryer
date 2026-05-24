@@ -4,6 +4,10 @@
       #include <Preferences.h>
       #include "DHT.h"
       #include <time.h>
+      #if defined(ESP32)
+      #include "esp_system.h"
+      #include "esp_task_wdt.h"
+      #endif
 
       // ============================================================================
       //                       IDENTITY & ASSIGNMENT (NO HARDCODE)
@@ -94,7 +98,7 @@
       // Must match fish-dryer-mobile/app.json -> expo.extra.apiBaseUrl (same IP, ends with /api).
       const char* API_URL = "http://10.173.245.15:8000/api/hardware/esp32/status";
 
-      static const char* FIRMWARE_BUILD_TAG = "drying-actuators-v40";
+      static const char* FIRMWARE_BUILD_TAG = "drying-actuators-v50";
 
       // Laravel heartbeat: keeps `last_seen` + hardware rows in MySQL and mirrors RTDB when enabled.
       // Set to 0 only while debugging (e.g. API returns 500). If the app shows "offline" but RTDB
@@ -138,16 +142,31 @@
       #endif
 
       // ================= ONE PIN PER COMPONENT (do not wire two things to one GPIO) =================
-      #define PIN_DHT22        4    // DHT22 DATA
-      #define PIN_MOISTURE    35    // YL-69 A0 only
-      #define PIN_DOOR        15    // MC38 reed (optional)
-      #define PIN_FAN          5    // Fan relay IN (blue module)
-      #define PIN_HEATER1     19    // Heater 1 SSR or relay IN
-      #define PIN_HEATER2     18    // Heater 2 SSR or relay IN
-      #define PIN_BUZZER      27    // Piezo + or active buzzer +
-      #define PIN_LED_GREEN   32    // Drying = running
-      #define PIN_LED_YELLOW  33    // Paused
-      #define PIN_LED_RED     13    // Stopped / idle
+      // NEVER use ESP32 strapping pins for loads: GPIO0 GPIO2 GPIO5 GPIO12 GPIO15.
+      //
+      // EXACT WIRING (one wire per line):
+      //   DHT22 VCC→3.3V  GND→GND  DATA→GPIO4
+      //   Moisture VCC→3.3V  GND→GND  AO→GPIO35  (DO pin unconnected)
+      //   Reed wire1→GPIO16  wire2→GND  (magnet near = LOW, open = HIGH)
+      //   LED green: GPIO32→220Ω→LED+  LED−→GND
+      //   LED yellow: GPIO33→220Ω→LED+  LED−→GND
+      //   LED red: GPIO13→220Ω→LED+  LED−→GND
+      //   Buzzer +: GPIO27→220Ω→+  Buzzer −→GND
+      //   Fan relay: VCC→5V  GND→GND  IN→GPIO23  JD-VCC jumper ON
+      //              COM→switching PSU +  NO→fan red  fan black→PSU −
+      //   SSR heater (ONE heater only): ~1→plug live  ~2→heater red
+      //              heater yellow→plug neutral  +3→GPIO19 ONLY  −4→GND
+      //              (GPIO18 NOT wired — leave H2 disconnected)
+      #define PIN_DHT22        4
+      #define PIN_MOISTURE    35
+      #define PIN_DOOR        16    // NOT GPIO15 (strapping — crashes when reed open)
+      #define PIN_FAN         23    // NOT GPIO5 (strapping — crashes with relay)
+      #define PIN_HEATER1     19    // SSR DC+ (single heater)
+      #define PIN_HEATER2     18    // leave UNWIRED unless you add a 2nd SSR
+      #define PIN_BUZZER      27
+      #define PIN_LED_GREEN   32
+      #define PIN_LED_YELLOW  33
+      #define PIN_LED_RED     13
 
       #define DHTPIN           PIN_DHT22
       #define MOISTURE_PIN     PIN_MOISTURE
@@ -163,16 +182,21 @@
       #define LED_YELLOW       PIN_LED_YELLOW
       #define LED_RED          PIN_LED_RED
 
-      // Fan relay: LOW on IN = ON (most blue 1-ch boards). If fan never clicks, set to 0.
+      // Fan relay IN: most blue boards = ACTIVE_LOW (LOW=ON, HIGH=OFF). If fan runs when
+      // Serial says OFF, set FAN_RELAY_ACTIVE_LOW to 0. Unplugging IN from ESP does NOT
+      // turn the fan off — a floating IN often keeps the relay ON (hardware, not firmware).
       #ifndef RELAY_ACTIVE_LOW
       #define RELAY_ACTIVE_LOW 1
+      #endif
+      #ifndef FAN_RELAY_ACTIVE_LOW
+      #define FAN_RELAY_ACTIVE_LOW RELAY_ACTIVE_LOW
       #endif
       // Heaters on SSR-60DA: HIGH = ON. If heaters use blue relays like fan, set to 0.
       #ifndef HEATER_CONTROL_IS_SSR
       #define HEATER_CONTROL_IS_SSR 1
       #endif
       #ifndef RELAY_BOOT_CLICK_MS
-      #define RELAY_BOOT_CLICK_MS 400
+      #define RELAY_BOOT_CLICK_MS 0
       #endif
       #ifndef LED_ON_IS_HIGH
       #define LED_ON_IS_HIGH 1
@@ -181,7 +205,7 @@
       #define START_WITH_OUTPUTS_ENERGIZED 0
       #endif
 
-      // Passive piezo — 4 kHz square wave is usually loudest (resonance ~2–4.5 kHz).
+      // Loudest passive piezo: ~4 kHz square wave, full rail (resonance band).
       #ifndef BUZZER_TONE_HZ
       #define BUZZER_TONE_HZ 4096
       #endif
@@ -193,13 +217,13 @@
       #define FALLBACK_MACHINE_ID 0
       #endif
       #ifndef ALLOW_ACTUATORS_WITHOUT_ASSIGNMENT
-      #define ALLOW_ACTUATORS_WITHOUT_ASSIGNMENT 1
+      #define ALLOW_ACTUATORS_WITHOUT_ASSIGNMENT 0
       #endif
       /** 1 = 3-pin active buzzer (steady HIGH). 0 = passive piezo on GPIO27 (needs PWM/tone). */
       #ifndef BUZZER_ACTIVE_HIGH
       #define BUZZER_ACTIVE_HIGH 0
       #endif
-      /** Loud beep when drying starts (proves piezo wiring). 0 = off. */
+      /** Loud chirp when drying starts. 0 = off. */
       #ifndef BUZZER_DRYING_START_CHIRP_MS
       #define BUZZER_DRYING_START_CHIRP_MS 1200
       #endif
@@ -242,26 +266,25 @@
       #define DOOR_SENSOR_TOUCH_DETACHED_THRESHOLD 120
       #endif
 
-      /** Set 1 to skip the touch "wire present" test and only use digital stability (reed only). */
+      /** Set 1 to skip touch "wire present" test (required when PIN_DOOR is GPIO16 — no touch pad). */
       #ifndef DOOR_SENSOR_SKIP_TOUCH_CHECK
-      #define DOOR_SENSOR_SKIP_TOUCH_CHECK 0
+      #define DOOR_SENSOR_SKIP_TOUCH_CHECK 1
       #endif
 
       /** Max LOW/HIGH toggles during the jitter window; raise if a noisy line fails a good sensor. */
       #ifndef DOOR_SENSOR_MAX_JITTER_TRANSITIONS
-      #define DOOR_SENSOR_MAX_JITTER_TRANSITIONS 48
+      #define DOOR_SENSOR_MAX_JITTER_TRANSITIONS 255
       #endif
 
       /**
-       * 0 = no door hardware in this build: always publish door_sensor as not_working and do not
-       *     count the door in the fault buzzer (GPIO15 may float).
-       * 1 = reed wired on GPIO15: run doorSensorElectricalOk() for status + alerts.
+       * 0 = no door hardware: always publish door_sensor as not_working.
+       * 1 = reed wired on PIN_DOOR (GPIO16): run doorSensorElectricalOk().
        */
       #ifndef HAVE_DOOR_SENSOR
-      #define HAVE_DOOR_SENSOR 0
+      #define HAVE_DOOR_SENSOR 1
       #endif
 
-      /** Touch channel for GPIO15. (ESP32 classic mapping.) */
+      /** Touch channel (only if PIN_DOOR is a touch pad, e.g. GPIO15=T3). Unused on GPIO16. */
       #ifndef REED_TOUCH_CHANNEL
       #define REED_TOUCH_CHANNEL T3
       #endif
@@ -284,11 +307,15 @@
         digitalWrite(pin, levelHigh ? HIGH : LOW);
       }
 
-      static inline int relayPinLevel(bool coilOn) {
-        if (RELAY_ACTIVE_LOW) {
+      static inline int relayPinLevelFor(bool coilOn, bool activeLow) {
+        if (activeLow) {
           return coilOn ? LOW : HIGH;
         }
         return coilOn ? HIGH : LOW;
+      }
+
+      static inline int relayPinLevel(bool coilOn) {
+        return relayPinLevelFor(coilOn, RELAY_ACTIVE_LOW != 0);
       }
 
       static inline void driveRelay(int pin, bool coilEnergized) {
@@ -296,9 +323,10 @@
         digitalWrite(pin, relayPinLevel(coilEnergized));
       }
 
-      /** Blue mechanical relay (fan): NO wiring, ACTIVE_LOW. */
+      /** Blue mechanical relay (fan): NO wiring. */
       static inline void driveFanLoad(bool on) {
-        driveRelay(RELAY_FAN, on);
+        pinMode(RELAY_FAN, OUTPUT);
+        digitalWrite(RELAY_FAN, relayPinLevelFor(on, FAN_RELAY_ACTIVE_LOW != 0));
       }
 
       /** SSR-60DA (heaters): terminals 1–2 = GPIO + GND; 3–4 = AC/DC load. HIGH = ON. */
@@ -315,7 +343,8 @@
       }
 
       static bool fanLoadIsOn() {
-        return relayOn(RELAY_FAN);
+        const int v = digitalRead(RELAY_FAN);
+        return FAN_RELAY_ACTIVE_LOW ? (v == LOW) : (v == HIGH);
       }
 
       static bool heaterLoadIsOn(int pin) {
@@ -388,9 +417,16 @@
         // in the order the Adafruit examples use (humidity first, then temperature).
         yield();
         delay(50);
-        const float h = dht.readHumidity();
-        const float t = dht.readTemperature();
-        const bool plausible = dhtReadPlausible(t, h);
+        float h = dht.readHumidity();
+        float t = dht.readTemperature();
+        bool plausible = dhtReadPlausible(t, h);
+        if (!plausible) {
+          delay(120);
+          yield();
+          h = dht.readHumidity();
+          t = dht.readTemperature();
+          plausible = dhtReadPlausible(t, h);
+        }
 
         // Timestamp after the acquisition so the next poll is ≥2 s later (library also enforces).
         lastDhtPollMs = millis();
@@ -490,9 +526,9 @@
       #ifndef MOISTURE_DISCONNECT_GOOD_RESET_SAMPLES
       #define MOISTURE_DISCONNECT_GOOD_RESET_SAMPLES 2
       #endif
-      /** 1 = moisture disconnect/fault triggers drying buzzer (with DHT/door faults). */
+      /** 0 = moisture faults do not drive buzzer (avoids false alarms from YL-69 thresholds). */
       #ifndef MOISTURE_FAULT_BUZZER
-      #define MOISTURE_FAULT_BUZZER 1
+      #define MOISTURE_FAULT_BUZZER 0
       #endif
 
       static bool gMoistureConnectedStable = false;
@@ -502,6 +538,11 @@
       static bool gDryingOutputsLatched = false;
       /** Last processed `machines/{id}/command.seq` (mobile + Laravel write here). */
       static unsigned long gLastCommandSeq = 0;
+      /** Ignore stale RTDB `running` until this time (prevents fan/heat on at boot). */
+      static unsigned long gBootMs = 0;
+      static unsigned long gIgnoreStaleRunningUntilMs = 0;
+      /** Fan/heat ONLY after app Start (command seq) — not stale RTDB status=running. */
+      static bool gDryRunAuthorized = false;
 
       /**
        * YL-69 A0: wet → low ADC, dry → high. Unplugged GPIO35 often hits 0 (min) with
@@ -525,8 +566,8 @@
         if (avgAdc > 3950 && spread < 180) {
           return false;
         }
-        /** GPIO35 only: unplugged ~0–120 ADC; probe connected usually ≥300. */
-        return avgAdc >= 300 && avgAdc <= 4080 && spread <= 600;
+        /** GPIO35: probe connected if ADC is in a sane range (not pegged floating). */
+        return avgAdc >= 80 && avgAdc <= 4080 && spread <= 900;
       }
 
       /** Stable connect/disconnect for RTDB + buzzer (breadboard noise). */
@@ -653,23 +694,19 @@
       }
 
       /**
-       * Final door health: must be physically wired (capacitive presence) AND electrically
-       * stable (no jitter / floating-line chaos). Either failure ⇒ not_working in the app.
+       * Reed on GPIO16: stable HIGH (door open) or stable LOW (magnet closed) = working.
+       * Only floating/noise (rapid toggling) = not_working.
        */
       static bool doorSensorElectricalOk() {
-        if (!doorWireConnected()) return false;
-
-        int transitions = 0;
-        int prev = digitalRead(REED_PIN);
-        for (int i = 0; i < 63; i++) {
-          delayMicroseconds(280);
-          const int v = digitalRead(REED_PIN);
-          if (v != prev) {
-            transitions++;
-            prev = v;
+        pinMode(REED_PIN, INPUT_PULLUP);
+        int highs = 0;
+        for (int i = 0; i < 12; i++) {
+          if (digitalRead(REED_PIN) == HIGH) {
+            highs++;
           }
+          delayMicroseconds(400);
         }
-        return transitions <= DOOR_SENSOR_MAX_JITTER_TRANSITIONS;
+        return highs >= 10 || highs <= 2;
       }
 
       /** RTDB/Laravel `components.door_sensor` — false when HAVE_DOOR_SENSOR is 0. */
@@ -752,15 +789,19 @@
         return (s == "paused");
       }
 
-      /** Fan, heaters, and moisture telemetry only while drying is actively running. */
+      static bool sessionAllowsActuators() {
+        return sessionStatusIsRunning();
+      }
+
+      /** Fan/heaters only after explicit app Start (not leftover RTDB status=running). */
       static bool dryingSessionOutputsActive() {
-        return gDryingOutputsLatched && sessionStatusIsRunning();
+        return gDryRunAuthorized && sessionStatusIsRunning();
       }
 
       static float gLastGoodAirC = NAN;
       static unsigned long gLastGoodAirMs = 0;
 
-      /** DHT can glitch; keep last good reading so heaters are not stuck OFF during a run. */
+      /** DHT can glitch; keep last good reading briefly — never fake a temp (that locked heaters ON). */
       static float airCToUseForHeater(bool dhtOk, float airC) {
         if (dhtOk && !isnan(airC)) {
           gLastGoodAirC = airC;
@@ -770,9 +811,6 @@
         if (!isnan(gLastGoodAirC) && (millis() - gLastGoodAirMs) < 180000UL) {
           return gLastGoodAirC;
         }
-        if (gSessionTargetC > 1.0f) {
-          return gSessionTargetC - 5.0f;
-        }
         return NAN;
       }
 
@@ -781,15 +819,9 @@
       }
 
       static bool sensorsBadForBuzzer(bool dhtOk, bool moistureOk, bool doorOk) {
-        if (!dhtOk || !doorOk) {
-          return true;
-        }
-      #if MOISTURE_FAULT_BUZZER
-        if (!moistureOk) {
-          return true;
-        }
-      #endif
-        return false;
+        (void)moistureOk;
+        (void)doorOk;
+        return !dhtOk;
       }
 
       /**
@@ -836,20 +868,15 @@
         driveFanLoad(true);
       }
 
-      /** Bang-bang heaters + 90s warm-up at session start (so loads are visibly active). */
+      /** Heaters: ON only while authorized drying + temp below target. */
       static void serviceHeatersForSession(bool dhtOk, float airC) {
         if (!dryingSessionOutputsActive()) {
           driveHeaterLoad(false);
           return;
         }
-        if (gDryingSessionStartMs != 0 &&
-            (millis() - gDryingSessionStartMs) < 90000UL) {
-          driveHeaterLoad(true);
-          return;
-        }
         const float t = airCToUseForHeater(dhtOk, airC);
-        if (isnan(t)) {
-          driveHeaterLoad(true);
+        if (isnan(t) || gSessionTargetC <= 1.0f) {
+          driveHeaterLoad(false);
           return;
         }
         driveHeaterLoad(t < (gSessionTargetC - TEMP_TARGET_MARGIN_C));
@@ -882,7 +909,7 @@
         if (!gBuzzerAlarmEngaged) {
           gBuzzerAlarmEngaged = true;
           gBuzzerCycleAnchorMs = nowMs;
-          Serial.println("[buzzer] fault — 10s ON / 10s OFF (wall clock)");
+          Serial.println("[buzzer] fault — LOUD 10s ON / 10s quiet until fixed");
         }
       }
 
@@ -909,21 +936,39 @@
       #endif
       }
 
-      /** Fan/heaters ON while drying latched (Overview Start or Serial 1). */
-      static bool sessionAllowsActuators() {
-        if (!gDryingOutputsLatched) {
-          return false;
-        }
-        if (gSessionTargetC <= 1.0f) {
-          gSessionTargetC = 60.0f;
-        }
-        return true;
+      /** Log GPIO levels for fan + SSR (proves MCU is driving OFF). */
+      static void logLoadPinLevels(const char* why) {
+        Serial.print("[gpio] ");
+        Serial.print(why);
+        Serial.print(" session=");
+        Serial.print(gSessionStatus);
+        Serial.print(" fanGPIO");
+        Serial.print(RELAY_FAN);
+        Serial.print("=");
+        Serial.print(digitalRead(RELAY_FAN));
+        Serial.print(FAN_RELAY_ACTIVE_LOW ? "(LOW=ON)" : "(HIGH=ON)");
+        Serial.print(" h1GPIO");
+        Serial.print(RELAY_HEATER1);
+        Serial.print("=");
+        Serial.print(digitalRead(RELAY_HEATER1));
+        Serial.print(HEATER_CONTROL_IS_SSR ? "(HIGH=ON)" : "");
+        Serial.print(" h2GPIO");
+        Serial.print(RELAY_HEATER2);
+        Serial.print("=");
+        Serial.println(digitalRead(RELAY_HEATER2));
+      }
+
+      /** Force fan + heater control pins to OFF before WiFi / session logic. */
+      static void initLoadPinsForcedOff() {
+        pinMode(RELAY_FAN, OUTPUT);
+        digitalWrite(RELAY_FAN, relayPinLevelFor(false, FAN_RELAY_ACTIVE_LOW != 0));
+        pinMode(RELAY_HEATER1, OUTPUT);
+        pinMode(RELAY_HEATER2, OUTPUT);
+        digitalWrite(RELAY_HEATER1, LOW);
+        digitalWrite(RELAY_HEATER2, LOW);
       }
 
       static void loadsHardwareAllOff() {
-        if (gDryingOutputsLatched) {
-          return;
-        }
         driveFanLoad(false);
         driveHeaterLoad(false);
       }
@@ -943,16 +988,23 @@
         Serial.println(gSessionTargetC, 1);
       }
 
-      /** Hard OFF — only from forceIdleSessionState (Stop), never from heartbeat/Laravel. */
+      /** Fan + heaters OFF immediately (pause/stop/safety). */
       static void forceActuatorsOff() {
-        if (gDryingOutputsLatched) {
-          return;
-        }
         driveFanLoad(false);
         driveHeaterLoad(false);
+        static unsigned long lastLogMs = 0;
+        const unsigned long now = millis();
+        if (lastLogMs == 0 || (now - lastLogMs) > 5000UL) {
+          lastLogMs = now;
+          logLoadPinLevels("FORCE-OFF");
+        }
       }
 
       static void beginDryingOutputs(bool chirp) {
+        gDryRunAuthorized = true;
+        if (gDryingSessionStartMs == 0) {
+          gDryingSessionStartMs = millis();
+        }
         gSessionStatus = "running";
         gSessionActiveFlag = true;
         gFaultBuzzerArmed = true;
@@ -988,7 +1040,7 @@
       }
 
       static void safetyCutLoadsUnlessRunning() {
-        if (gDryingOutputsLatched || hardwareTestActive() || sessionAllowsActuators()) {
+        if (dryingSessionOutputsActive() || hardwareTestActive()) {
           return;
         }
         if (!fanLoadIsOn() && !heaterLoadIsOn(RELAY_HEATER1) && !heaterLoadIsOn(RELAY_HEATER2)) {
@@ -1047,7 +1099,7 @@
         const unsigned long cycleMs = ALERT_BUZZ_ON_MS + ALERT_BUZZ_SILENT_MS;
         const unsigned long pos = (nowMs - gBuzzerCycleAnchorMs) % cycleMs;
         if (pos < ALERT_BUZZ_ON_MS) {
-          buzzerDriveMaxLoud();
+          buzzerDriveLoud();
         } else if (gBuzzerHwPwmOn || gBuzzerTonePlaying) {
           buzzerForceSilent();
         }
@@ -1072,8 +1124,14 @@
         gBuzzerPinHigh = false;
       }
 
-      /** Loudest drive for passive piezo: full rail square wave (PWM is quieter). */
-      static void buzzerDriveMaxLoud() {
+      /** Maximum volume: fast square wave on GPIO27 (loudest for passive piezo). */
+      static void buzzerDriveLoud() {
+      #if BUZZER_ACTIVE_HIGH
+        pinMode(BUZZER_PIN, OUTPUT);
+        digitalWrite(BUZZER_PIN, HIGH);
+        gBuzzerTonePlaying = true;
+        gBuzzerPinHigh = true;
+      #else
         if (gBuzzerHwPwmOn) {
           ledcWrite(BUZZER_PIN, 0);
           ledcDetach(BUZZER_PIN);
@@ -1089,35 +1147,23 @@
           digitalWrite(BUZZER_PIN, gBuzzerPinLevel ? HIGH : LOW);
         }
         gBuzzerTonePlaying = true;
-        gBuzzerPinHigh = gBuzzerPinLevel;
+      #endif
       }
 
       static void buzzerHwStart() {
-        #if BUZZER_ACTIVE_HIGH
-        noTone(BUZZER_PIN);
-        if (gBuzzerHwPwmOn) {
-          ledcDetach(BUZZER_PIN);
-          gBuzzerHwPwmOn = false;
-        }
-        pinMode(BUZZER_PIN, OUTPUT);
-        digitalWrite(BUZZER_PIN, HIGH);
-        gBuzzerTonePlaying = true;
-        gBuzzerPinHigh = true;
-        #else
-        buzzerDriveMaxLoud();
-        #endif
+        buzzerDriveLoud();
       }
 
       static void buzzerTickSquareWave() {
-        buzzerDriveMaxLoud();
+        buzzerDriveLoud();
       }
 
-      /** Block ~ms with maximum loudness (drying-start proof). */
+      /** Loud blocking chirp (drying start). */
       static void buzzerChirpLoudBlocking(unsigned long ms) {
         if (ms == 0) return;
         const unsigned long end = millis() + ms;
         while ((long)(end - millis()) > 0) {
-          buzzerDriveMaxLoud();
+          buzzerDriveLoud();
           delayMicroseconds(50);
           yield();
         }
@@ -1163,14 +1209,14 @@
         }
 
         applyBuzzerCycleFromClock(now);
-        if (gBuzzerAlarmEngaged) {
-          buzzerDriveMaxLoud();
-        }
       }
 
       void connectWifiBlocking(uint32_t timeoutMs = 15000) {
         if (WiFi.status() == WL_CONNECTED) return;
 
+        WiFi.persistent(false);
+        WiFi.disconnect(true, true);
+        delay(100);
         WiFi.mode(WIFI_STA);
         WiFi.setSleep(false);
         WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -1179,6 +1225,7 @@
         uint32_t start = millis();
         while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs) {
           delay(250);
+          yield();
           Serial.print(".");
         }
         Serial.println();
@@ -1436,6 +1483,50 @@
         return body.substring(start, i).toFloat();
       }
 
+      static void enterPausedSession() {
+        gDryRunAuthorized = false;
+        gDryingOutputsLatched = false;
+        gSessionStatus = "paused";
+        gSessionActiveFlag = false;
+        gFaultBuzzerArmed = false;
+        gDryingSessionStartMs = 0;
+        disengageBuzzerAlarm();
+        initLoadPinsForcedOff();
+        applyLedsForSession("paused");
+        Serial.println("[session] PAUSED — fan/heaters/buzzer OFF");
+      }
+
+      static void applySessionParamsFromBody(const String& body) {
+        const float tt = parseJsonFloatAfterKey(body, "target_temperature", gSessionTargetC);
+        if (tt > 1.0f && tt < 120.0f) {
+          gSessionTargetC = tt;
+        }
+        const int fs = parseJsonIntAfterKey(body, "fan_speed", gFanSpeedLevel);
+        gFanSpeedLevel = fs < 1 ? 1 : (fs > 3 ? 3 : fs);
+      }
+
+      static String parseSessionStatusFromBody(const String& body) {
+        String trimmed = body;
+        trimmed.trim();
+        if (trimmed.length() > 0 && trimmed != "null") {
+          const int sq = trimmed.indexOf("\"status\"");
+          if (sq >= 0) {
+            const int colon = trimmed.indexOf(':', sq);
+            const int q1 = trimmed.indexOf('"', colon + 1);
+            const int q2 = q1 >= 0 ? trimmed.indexOf('"', q1 + 1) : -1;
+            if (q1 >= 0 && q2 > q1) {
+              String status = trimmed.substring(q1 + 1, q2);
+              status.toLowerCase();
+              status.trim();
+              if (status.length() > 0) {
+                return status;
+              }
+            }
+          }
+        }
+        return String("stopped");
+      }
+
       static void commitLoadRelays(bool dhtOk, float airC) {
         if (dryingSessionOutputsActive()) {
           applyDryingSessionLoads(dhtOk, airC);
@@ -1446,7 +1537,7 @@
           return;
         }
       #endif
-        loadsHardwareAllOff();
+        initLoadPinsForcedOff();
       }
 
       /** Drive the 3 status LEDs from a session-state string. */
@@ -1478,7 +1569,34 @@
         }
       }
 
+      static void publishSessionStoppedToCloud(int mid) {
+        if (mid <= 0) return;
+        const String path = String("machines/") + String(mid) + "/session";
+        const String json =
+            "{\"status\":\"stopped\",\"command\":\"stop\",\"session_active\":false,"
+            "\"target_temperature\":0,\"fan_speed\":1}";
+        (void)rtdbPutJson(path, json);
+        const String cmdPath = String("machines/") + String(mid) + "/command";
+        const String cmdJson =
+            "{\"action\":\"stop\",\"target_temperature\":0,\"fan_speed\":1,"
+            "\"seq\":" + String((unsigned long)millis()) + "}";
+        (void)rtdbPutJson(cmdPath, cmdJson);
+      }
+
+      /** Mark cloud command seq as seen so an old `start` cannot energize loads after boot. */
+      static void consumeCloudCommandSeq(int mid) {
+        if (mid <= 0) return;
+        const String body = rtdbGetText(String("machines/") + String(mid) + "/command");
+        if (body.length() == 0 || body == "null") return;
+        const unsigned long seq =
+            (unsigned long)parseJsonFloatAfterKey(body, "seq", 0);
+        if (seq > gLastCommandSeq) {
+          gLastCommandSeq = seq;
+        }
+      }
+
       static void forceIdleSessionState() {
+        gDryRunAuthorized = false;
         gDryingOutputsLatched = false;
         gSessionStatus = "stopped";
         gFaultBuzzerArmed = false;
@@ -1490,7 +1608,7 @@
         gLastCommandSeq = 0;
         disengageBuzzerAlarm();
         pauseLocalHardwareTestOnly();
-        forceActuatorsOff();
+        initLoadPinsForcedOff();
         applyLedsForSession("stopped");
       }
 
@@ -1576,23 +1694,17 @@
             gLastCommandSeq = seq;
           }
           Serial.println("[command] pause");
-          gDryingOutputsLatched = false;
-          gSessionStatus = "paused";
-          gSessionActiveFlag = false;
-          gDryingSessionStartMs = 0;
-          disengageBuzzerAlarm();
-          driveFanLoad(false);
-          driveHeaterLoad(false);
-          applyLedsForSession("paused");
+          enterPausedSession();
           return;
         }
 
-        if (action == "start" || action == "running") {
+        if (action == "start") {
           if (seq > 0) {
             gLastCommandSeq = seq;
           }
-          const bool chirp = !gDryingOutputsLatched;
-          if (!gDryingOutputsLatched) {
+          gIgnoreStaleRunningUntilMs = 0;
+          const bool chirp = !sessionStatusIsRunning();
+          if (!sessionStatusIsRunning()) {
             gDryingSessionStartMs = millis();
           }
           Serial.print("[command] start mid=");
@@ -1616,6 +1728,9 @@
         }
         const int mid = sessionMachineId();
         if (mid <= 0) {
+          if (!gDryRunAuthorized) {
+            initLoadPinsForcedOff();
+          }
           return;
         }
 
@@ -1630,103 +1745,48 @@
           if (lastGetFailLogMs == 0 || (now - lastGetFailLogMs) > 8000UL) {
             lastGetFailLogMs = now;
             Serial.print("[session] GET failed ");
-            Serial.print(sessionPath);
-            Serial.print(" latched=");
-            Serial.println(gDryingOutputsLatched ? 1 : 0);
+            Serial.println(sessionPath);
           }
-          if (gDryingOutputsLatched && sessionStatusIsRunning()) {
+          if (gDryRunAuthorized && sessionStatusIsRunning()) {
             applyDryingSessionLoads(pollDhtIfDue(), cachedDhtT);
+          } else {
+            initLoadPinsForcedOff();
           }
           return;
         }
         if (body == "null") {
-          if (sessionStatusIsRunning()) {
-            static unsigned long lastNullKeepLogMs = 0;
-            const unsigned long now = millis();
-            if (lastNullKeepLogMs == 0 || (now - lastNullKeepLogMs) > 15000UL) {
-              lastNullKeepLogMs = now;
-              Serial.println(
-                  "[session] RTDB null — keeping DRYING until explicit stop");
-            }
-            return;
-          }
+          Serial.println("[session] RTDB null — stopped");
           forceIdleSessionState();
           return;
         }
         gNullSessionPollStreak = 0;
 
+        if (gAssignedId <= 0 && mid > 0) {
+          gAssignedId = mid;
+          persistAssignment(gAssignedId, gDeviceName);
+        }
+
         String command = parseJsonStringAfterKey(body, "command", "");
         command.toLowerCase();
         command.trim();
 
-        if (command == "stop") {
-          Serial.println("[session] command=stop");
-          forceIdleSessionState();
-          return;
-        }
-
-        const bool sessionActive =
-            parseJsonBoolAfterKey(body, "session_active", false);
-        if (command == "start" || sessionActive) {
-          const float tt0 =
-              parseJsonFloatAfterKey(body, "target_temperature", gSessionTargetC);
-          if (tt0 > 1.0f && tt0 < 120.0f) {
-            gSessionTargetC = tt0;
-          }
-          const int fs0 = parseJsonIntAfterKey(body, "fan_speed", gFanSpeedLevel);
-          gFanSpeedLevel = fs0 < 1 ? 1 : (fs0 > 3 ? 3 : fs0);
-          if (gAssignedId <= 0 && mid > 0) {
-            gAssignedId = mid;
-            persistAssignment(gAssignedId, gDeviceName);
-          }
-          const bool chirp = !gDryingOutputsLatched;
-          if (!gDryingOutputsLatched) {
-            gDryingSessionStartMs = millis();
-            Serial.print("[session] DRYING START mid=");
-            Serial.println(mid);
-          }
-          beginDryingOutputs(chirp);
-          return;
-        }
-
-        String parsed = "stopped";
-        String trimmed = body;
-        trimmed.trim();
-        if (trimmed.length() > 0 && trimmed != "null") {
-          const int sq = trimmed.indexOf("\"status\"");
-          if (sq >= 0) {
-            const int colon = trimmed.indexOf(':', sq);
-            const int q1 = trimmed.indexOf('"', colon + 1);
-            const int q2 = q1 >= 0 ? trimmed.indexOf('"', q1 + 1) : -1;
-            if (q1 >= 0 && q2 > q1) {
-              parsed = trimmed.substring(q1 + 1, q2);
-            }
-          } else if (trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length() >= 2) {
-            parsed = trimmed.substring(1, trimmed.length() - 1);
-          } else if (trimmed.indexOf('{') < 0) {
-            parsed = trimmed;
-          }
-        }
-
-        const int fs = parseJsonIntAfterKey(body, "fan_speed", gFanSpeedLevel);
-        gFanSpeedLevel = fs < 1 ? 1 : (fs > 3 ? 3 : fs);
-
+        String status = parseSessionStatusFromBody(body);
         if (command == "pause") {
-          parsed = "paused";
+          status = "paused";
+        } else if (command == "stop") {
+          status = "stopped";
+        } else if (command == "start") {
+          status = "running";
         }
 
-        parsed.toLowerCase();
-        parsed.trim();
-        if (parsed.length() == 0) {
-          parsed = "stopped";
-        }
+        applySessionParamsFromBody(body);
 
         {
           static String gLastCloudSessionStatus;
-          if (parsed != gLastCloudSessionStatus) {
-            gLastCloudSessionStatus = parsed;
+          if (status != gLastCloudSessionStatus) {
+            gLastCloudSessionStatus = status;
             Serial.print("[session] cloud status=");
-            Serial.print(parsed);
+            Serial.print(status);
             if (command.length() > 0) {
               Serial.print(" cmd=");
               Serial.print(command);
@@ -1735,49 +1795,33 @@
           }
         }
 
-        if (parsed == "stopped" || parsed == "idle" || parsed == "complete" ||
-            parsed == "completed") {
-          Serial.println("[session] cloud=stopped");
+        if (command == "stop" || status == "stopped" || status == "idle" ||
+            status == "complete" || status == "completed") {
           forceIdleSessionState();
           return;
         }
 
-        if (parsed == "paused") {
-          gDryingOutputsLatched = false;
-          gSessionStatus = "paused";
-          gSessionActiveFlag = false;
-          gSessionTargetC = 0.0f;
-          gDryingSessionStartMs = 0;
-          disengageBuzzerAlarm();
-          driveFanLoad(false);
-          driveHeaterLoad(false);
-          applyLedsForSession("paused");
+        if (command == "pause" || status == "paused") {
+          enterPausedSession();
           return;
         }
 
-        if (parsed == "running") {
-          const float tt =
-              parseJsonFloatAfterKey(body, "target_temperature", gSessionTargetC);
-          if (tt > 1.0f && tt < 120.0f) {
-            gSessionTargetC = tt;
+        if (status == "running" || command == "start") {
+          if (!gDryRunAuthorized) {
+            Serial.println(
+                "[session] stale RTDB running — OFF (tap Start in app)");
+            forceIdleSessionState();
+            publishSessionStoppedToCloud(mid);
+            return;
           }
-          if (gAssignedId <= 0 && mid > 0) {
-            gAssignedId = mid;
-            persistAssignment(gAssignedId, gDeviceName);
+          if (!sessionStatusIsRunning()) {
+            gDryingSessionStartMs = millis();
           }
-          beginDryingOutputs(!gDryingOutputsLatched);
+          applyDryingSessionLoads(pollDhtIfDue(), cachedDhtT);
           return;
         }
 
-        if (!gDryingOutputsLatched) {
-          static unsigned long lastUnkMs = 0;
-          const unsigned long now = millis();
-          if (lastUnkMs == 0 || (now - lastUnkMs) > 15000UL) {
-            lastUnkMs = now;
-            Serial.print("[session] idle parsed=");
-            Serial.println(parsed);
-          }
-        }
+        forceIdleSessionState();
       }
 
       static bool parseJsonBoolAfterKey(const String& body, const char* key, bool defV) {
@@ -2061,10 +2105,7 @@
       }
 
       static bool shouldForceLoadsOff() {
-        if (gDryingOutputsLatched) {
-          return false;
-        }
-        return !hardwareTestActive() && !sessionAllowsActuators();
+        return !sessionStatusIsRunning() && !hardwareTestActive();
       }
 
       void sendHeartbeat(bool /*dhtOk*/, bool /*moistureOk*/, bool /*doorOk*/) {
@@ -2084,15 +2125,11 @@
         int moistureMin = 0;
         int moistureMax = 0;
         bool moistureOkReport = false;
-        const bool dryingActive =
-            dryingSessionOutputsActive() || gDryingOutputsLatched;
-        if (dryingActive) {
-          readMoistureAdc(moistureRaw, spread, moistureMin, moistureMax);
-          moistureOkReport =
-              moistureSensorReportOk(moistureRaw, spread, moistureMin, moistureMax);
-          if (moistureOkReport) {
-            updateMoistureBounds(moistureRaw);
-          }
+        readMoistureAdc(moistureRaw, spread, moistureMin, moistureMax);
+        moistureOkReport =
+            moistureSensorReportOk(moistureRaw, spread, moistureMin, moistureMax);
+        if (moistureOkReport && sessionStatusIsRunning()) {
+          updateMoistureBounds(moistureRaw);
         }
         const int moisturePct =
             moistureOkReport ? moisturePercentFromAdc(moistureRaw) : -1;
@@ -2488,9 +2525,7 @@
       static void readSensorsOnce(bool& dhtOk, bool& moistureOk, bool& doorOk) {
         dhtOk = pollDhtIfDue();
 
-        const bool dryingActive =
-            dryingSessionOutputsActive() || gDryingOutputsLatched;
-        if (dryingActive && millis() - gLastMoistureSampleMs >= 250UL) {
+        if (millis() - gLastMoistureSampleMs >= 250UL) {
           gLastMoistureSampleMs = millis();
           int minV = 0;
           int maxV = 0;
@@ -2498,32 +2533,14 @@
           gMoistureMinCached = minV;
           gMoistureMaxCached = maxV;
         }
-        if (dryingActive) {
-          moistureOk = moistureSensorReportOk(
-              gMoistureAvgCached, gMoistureSpreadCached, gMoistureMinCached, gMoistureMaxCached);
-        } else {
-          moistureOk = false;
-        }
+        moistureOk = moistureSensorReportOk(
+            gMoistureAvgCached, gMoistureSpreadCached, gMoistureMinCached, gMoistureMaxCached);
 
         doorOk = doorSensorStatusForPayload();
       }
 
-      void setup() {
-        Serial.begin(115200);
-        delay(500);
-
-        Serial.println();
-        Serial.println("##############################################");
-        Serial.println("# Fish Dryer ESP32 — runtime-assigned identity");
-        Serial.println("# (no MICROCONTROLLER_ID hardcoded in source)");
-        Serial.print("# BUILD: ");
-        Serial.println(FIRMWARE_BUILD_TAG);
-        Serial.println("# PINS: DHT22=4 MOISTURE=35 DOOR=15 FAN=5 H1=19 H2=18 BUZZER=27");
-        Serial.println("#       LED green=32 yellow=33 red=13");
-        Serial.println("# Serial: 1+Enter = ON all loads+buzzer | 0+Enter = OFF");
-        Serial.println("##############################################");
-        Serial.printf("Reset reason: %d\n", (int)esp_reset_reason());
-
+      /** GPIO/actuator init — after WiFi so relay/fan cannot crash the radio stack. */
+      static void initHardwarePins() {
         pinMode(LED1, OUTPUT);
         pinMode(LED2, OUTPUT);
         pinMode(LED3, OUTPUT);
@@ -2532,7 +2549,6 @@
         pinMode(RELAY_HEATER1, OUTPUT);
         pinMode(RELAY_HEATER2, OUTPUT);
         loadsHardwareAllOff();
-        relayBootClickTest();
 
         pinMode(BUZZER_PIN, OUTPUT);
         buzzerForceSilent();
@@ -2542,13 +2558,12 @@
 
         pinMode(REED_PIN, INPUT_PULLUP);
 
-        // ADC1 on GPIO35 (input-only). Plain INPUT — module drives AO; pull-down breaks many boards.
         pinMode(PIN_MOISTURE, INPUT);
         analogReadResolution(12);
-        #ifdef ARDUINO_ARCH_ESP32
-          analogSetAttenuation(ADC_11db);
-          analogSetPinAttenuation(PIN_MOISTURE, ADC_11db);
-        #endif
+      #ifdef ARDUINO_ARCH_ESP32
+        analogSetAttenuation(ADC_11db);
+        analogSetPinAttenuation(PIN_MOISTURE, ADC_11db);
+      #endif
 
         applySafeOutputDefaults();
 
@@ -2560,12 +2575,38 @@
         runBootLedSweep();
       #endif
 
+      #if RELAY_BOOT_CLICK_MS > 0
+        relayBootClickTest();
+      #endif
+
+        dht.begin();
+      }
+
+      void setup() {
+        Serial.begin(115200);
+        delay(300);
+
+        gBootMs = millis();
+        gIgnoreStaleRunningUntilMs = gBootMs + 12000UL;
+        initLoadPinsForcedOff();
+
+      #if defined(ESP32)
+        esp_task_wdt_deinit();
+      #endif
+
+        Serial.println();
+        Serial.println("##############################################");
+        Serial.println("# Fish Dryer ESP32 — runtime-assigned identity");
+        Serial.print("# BUILD: ");
+        Serial.println(FIRMWARE_BUILD_TAG);
+        Serial.println("# PINS: DHT22=4 MOISTURE=35 DOOR=16 FAN=23 H1=19 BUZZER=27");
+        Serial.println("#       LED green=32 yellow=33 red=13  (H2/GPIO18 unwired)");
+        Serial.println("##############################################");
+        Serial.printf("Reset reason: %d\n", (int)esp_reset_reason());
+
         connectWifiBlocking();
         syncClockOnce();
 
-        // MAC is only valid after WiFi.mode/begin. Load persisted assignment from NVS,
-        // then immediately try to refresh from the cloud so the very first heartbeat
-        // already targets the correct machines/{id} path.
         initIdentity();
         (void)refreshAssignmentFromCloud();
         clearCloudTestCommand();
@@ -2575,7 +2616,6 @@
         gTestModeUntilMs = 0;
         gFaultBuzzerArmed = false;
         disengageBuzzerAlarm();
-        applyLedsForSession(gSessionStatus.length() ? gSessionStatus : String("stopped"));
 
         Serial.println("---- IDENTITY ----");
         Serial.print("MAC          : "); Serial.println(gDeviceMac);
@@ -2585,17 +2625,22 @@
           Serial.print("RTDB path    : machines/"); Serial.print(gAssignedId); Serial.println("/hardware_status");
         } else {
           Serial.println("RTDB path    : (none — id is 0)");
-          Serial.println("              Overview + sensors read machines/{id}/hardware_status.");
-          Serial.println("              Save the board in the app OR set RTDB assignments/{MAC} so id > 0.");
+          Serial.println("              Save the board in the app (Detect → Save).");
         }
         Serial.print("Discovery    : discovery/"); Serial.println(gDeviceMacSafe);
         Serial.println("------------------");
 
-        // Moisture bounds will self-calibrate during runtime.
+        Serial.println("[boot] hardware init...");
+        gDryRunAuthorized = false;
+        forceIdleSessionState();
+        initHardwarePins();
+        if (gAssignedId > 0) {
+          consumeCloudCommandSeq(gAssignedId);
+          publishSessionStoppedToCloud(gAssignedId);
+        }
+        applyLedsForSession("stopped");
+        Serial.println("[boot] hardware OK");
 
-        dht.begin();
-
-        // DHT22: allow sensor to stabilize after power-up before first read (avoids endless NaN).
         delay(2000);
 
         Serial.println("=== HEARTBEAT START ===");
@@ -2620,12 +2665,7 @@
 
         bool dhtOk = false, moistureOk = false, doorOk = false;
         readSensorsOnce(dhtOk, moistureOk, doorOk);
-        (void)refreshSessionFromCloud();
-        if (!gDryingOutputsLatched) {
-          forceActuatorsOff();
-        } else if (sessionStatusIsRunning()) {
-          applyDryingSessionLoads(dhtOk, cachedDhtT);
-        }
+        initLoadPinsForcedOff();
         sendHeartbeat(dhtOk, moistureOk, doorOk);
         lastHeartbeatMs = millis();
       }
@@ -2641,6 +2681,7 @@
             gSessionActiveFlag = true;
             applyDryingOutputsHard();
             Serial.println("[BENCH] Serial 1 — fan+heaters ON, loud buzzer 1.2s");
+            gDryRunAuthorized = true;
             buzzerChirpLoudBlocking(1200);
             applyDryingOutputsHard();
           } else if (c == '0') {
@@ -2689,6 +2730,9 @@
       #endif
         applySessionLedsOnly();
         commitLoadRelays(dhtOk, cachedDhtT);
+        if (!gDryRunAuthorized || !sessionStatusIsRunning()) {
+          initLoadPinsForcedOff();
+        }
       #if ENABLE_RTDB_HARDWARE_TEST
         if (!gDryingOutputsLatched) {
           tickHardwareTestOutputs();

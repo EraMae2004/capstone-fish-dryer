@@ -37,6 +37,8 @@ import {
   publishHardwareTestCommand,
 } from "@/lib/hardware-test-command";
 import { userTypography } from "@/lib/user-typography";
+import MachineDropdown from "./machine-dropdown";
+import { getSelectedMachineId, setSelectedMachineId } from "@/lib/selected-machine";
 
 type MachineOnlineStatus = "online" | "offline";
 
@@ -271,6 +273,7 @@ export default function HardwareStatus() {
     userPickedMachineRef.current = true;
     setSelectedMachine(m);
     selectedMachineIdRef.current = m.id;
+    void setSelectedMachineId(m.id);
   };
   useEffect(() => {
     selectedMachineIdRef.current = selectedMachine?.id ?? null;
@@ -513,7 +516,10 @@ export default function HardwareStatus() {
     }
 
     setMachines(list);
-    const sid = selectedMachineIdRef.current;
+    const storedId = await getSelectedMachineId();
+    const sid =
+      selectedMachineIdRef.current ??
+      (!userPickedMachineRef.current ? storedId : null);
     const next =
       list.find((m: Machine) => Number(m.id) === Number(sid)) ??
       (userPickedMachineRef.current ? null : list[0] ?? null);
@@ -1312,14 +1318,23 @@ export default function HardwareStatus() {
           </TouchableOpacity>
         </ScrollView>
 
-        {/* DROPDOWN DISPLAY */}
-        <View style={styles.dropdown}>
-          <Text style={styles.dropdownValue}>
-            {selectedMachine
-              ? selectedMachine.name
-              : "No Microcontrollers"}
-          </Text>
-        </View>
+        {/* MACHINE DROPDOWN */}
+        <MachineDropdown
+          machines={machines.map((m) => ({
+            id: m.id,
+            name: m.name,
+            status: m.status,
+          }))}
+          selectedId={selectedMachine?.id ?? null}
+          loading={false}
+          onSelect={(id) => {
+            const m = machines.find((row) => row.id === id);
+            if (!m) return;
+            selectMachine(m);
+            void loadComponents(id);
+          }}
+          style={styles.machineDropdown}
+        />
 
         {/* COMPONENTS */}
         <View style={styles.componentsCard}>
@@ -1659,15 +1674,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
 
-  dropdown: {
-    backgroundColor: "#fff",
-    padding: 10,
-    borderRadius: 8,
+  machineDropdown: {
     marginTop: 15,
-  },
-
-  dropdownValue: {
-    ...userTypography.body,
+    marginBottom: 4,
   },
 
   componentsCard: {

@@ -20,6 +20,8 @@ import {
   type StoredHardwareNotification,
 } from '@/lib/hardware-notifications-store';
 import { ListPaginationBar, useListPagination } from '@/lib/list-pagination';
+import MachineDropdown from './machine-dropdown';
+import { useSelectedMachine } from '@/lib/selected-machine';
 
 function formatRelativeTime(iso: string): string {
   const t = new Date(iso).getTime();
@@ -47,6 +49,12 @@ export default function UserNotifications({
   const [activeTab, setActiveTab] = useState('all');
   const [items, setItems] = useState<StoredHardwareNotification[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const {
+    machines: userMachines,
+    selectedId: selectedMachineId,
+    selectMachine,
+    loading: machinesLoading,
+  } = useSelectedMachine();
 
   const reload = useCallback(async () => {
     const list = await loadHardwareNotifications();
@@ -67,32 +75,31 @@ export default function UserNotifications({
     void reload();
   }, [reload]);
 
-  // Real notifications, mapped into the original UI shape ({ id, type, title, desc, time }).
-  const notifications = useMemo(
-    () =>
-      items.map((x) => ({
-        id: x.id,
-        type: x.type,
-        componentKey: x.componentKey,
-        title: x.title,
-        desc: x.desc,
-        time: formatRelativeTime(x.createdAt),
-        read: x.read,
-      })),
-    [items]
-  );
+  const machineFilteredItems = useMemo(() => {
+    if (selectedMachineId == null || selectedMachineId <= 0) return items;
+    return items.filter((x) => x.machineId === selectedMachineId);
+  }, [items, selectedMachineId]);
 
   const filteredNotifications = useMemo(() => {
-    if (activeTab === 'unread') return notifications.filter((n) => !n.read);
+    const base = machineFilteredItems.map((x) => ({
+      id: x.id,
+      type: x.type,
+      componentKey: x.componentKey,
+      title: x.title,
+      desc: x.desc,
+      time: formatRelativeTime(x.createdAt),
+      read: x.read,
+    }));
+    if (activeTab === 'unread') return base.filter((n) => !n.read);
     if (activeTab === 'alerts') {
-      return notifications.filter((n) => isHardwareAlert(n));
+      return base.filter((n) => isHardwareAlert(n));
     }
     if (activeTab === 'warnings') {
-      return notifications.filter((n) => isDryingTemperatureWarning(n));
+      return base.filter((n) => isDryingTemperatureWarning(n));
     }
-    if (activeTab === 'info') return notifications.filter((n) => n.type === 'info');
-    return notifications;
-  }, [notifications, activeTab]);
+    if (activeTab === 'info') return base.filter((n) => n.type === 'info');
+    return base;
+  }, [machineFilteredItems, activeTab]);
 
   const {
     pageItems: pagedNotifications,
@@ -104,15 +111,24 @@ export default function UserNotifications({
 
   useEffect(() => {
     resetPage();
-  }, [activeTab, resetPage]);
+  }, [activeTab, selectedMachineId, resetPage]);
 
-  const unreadCount = useMemo(() => notifications.filter((n) => !n.read).length, [notifications]);
-  const criticalCount = useMemo(() => notifications.filter((n) => n.type === 'critical').length, [notifications]);
-  const dryingWarningCount = useMemo(
-    () => items.filter((n) => isDryingTemperatureWarning(n)).length,
-    [items]
+  const unreadCount = useMemo(
+    () => machineFilteredItems.filter((n) => !n.read).length,
+    [machineFilteredItems]
   );
-  const infoCount = useMemo(() => notifications.filter((n) => n.type === 'info').length, [notifications]);
+  const criticalCount = useMemo(
+    () => machineFilteredItems.filter((n) => n.type === 'critical').length,
+    [machineFilteredItems]
+  );
+  const dryingWarningCount = useMemo(
+    () => machineFilteredItems.filter((n) => isDryingTemperatureWarning(n)).length,
+    [machineFilteredItems]
+  );
+  const infoCount = useMemo(
+    () => machineFilteredItems.filter((n) => n.type === 'info').length,
+    [machineFilteredItems]
+  );
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {
@@ -204,6 +220,18 @@ export default function UserNotifications({
           <Text style={styles.title}>Notifications</Text>
           <View style={styles.backPlaceholder} />
         </View>
+
+        <MachineDropdown
+          machines={userMachines}
+          selectedId={selectedMachineId}
+          loading={machinesLoading}
+          onSelect={selectMachine}
+          onMachineChange={() => {
+            setSelected(new Set());
+            void onNotificationsChanged?.();
+          }}
+          style={styles.machineDropdown}
+        />
 
         {/* FILTER TABS */}
         <ScrollView
@@ -380,6 +408,10 @@ const styles = StyleSheet.create({
     color: '#1f3b57',
     flex: 1,
     textAlign: 'center',
+  },
+
+  machineDropdown: {
+    marginBottom: 12,
   },
 
   tabsScroll: {

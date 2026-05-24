@@ -6,19 +6,19 @@ import { userTypography } from "@/lib/user-typography";
 type OverviewHeaderProps = {
   unreadCount: number;
   onPressNotifications: () => void;
-  machineName: string;
   machineStatusLabel: string;
   machineOnline: boolean | null | undefined;
   timerLabel?: string;
+  machineSelector?: React.ReactNode;
 };
 
 export default function OverviewHeader({
   unreadCount,
   onPressNotifications,
-  machineName,
   machineStatusLabel,
   machineOnline,
   timerLabel = "--",
+  machineSelector,
 }: OverviewHeaderProps) {
   const badgeLabel = unreadCount > 99 ? "99+" : String(unreadCount);
 
@@ -67,12 +67,7 @@ export default function OverviewHeader({
         <Text style={styles.timerText}>{timerLabel}</Text>
       </View>
 
-      <View style={styles.machineDropdown}>
-        <Text style={styles.dropdownName} numberOfLines={1}>
-          {machineName || "No Machine"}
-        </Text>
-        <FontAwesome name="chevron-down" size={14} color="#1f3b57" />
-      </View>
+      {machineSelector}
     </View>
   );
 }
@@ -142,23 +137,5 @@ const styles = StyleSheet.create({
   timerText: {
     ...userTypography.emphasis,
     color: "#1f3c5c",
-  },
-  machineDropdown: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    backgroundColor: "#fff",
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#ddd",
-    marginBottom: 4,
-  },
-  dropdownName: {
-    ...userTypography.body,
-    color: "#1f3b57",
-    flex: 1,
-    paddingRight: 12,
   },
 });

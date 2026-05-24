@@ -5,6 +5,8 @@ import { onValue, ref as dbRef, set as dbSet, type DataSnapshot } from "firebase
 import OverviewStatus from "./overview-status";
 import OverviewParameters from "./overview-parameters";
 import OverviewHeader from "./overview-header";
+import MachineDropdown from "./machine-dropdown";
+import { useSelectedMachine } from "@/lib/selected-machine";
 import { API_BASE_URL } from "@/config/api";
 import { firebaseDb } from "@/config/firebase";
 import {
@@ -154,6 +156,13 @@ export default function UserOverview({
   // ✅ DEFAULT = PARAMETERS
   const [activeTab, setActiveTab] = useState<"status" | "control">("control");
 
+  const {
+    machines: userMachines,
+    selectedId: selectedMachineId,
+    selectMachine,
+    loading: machinesLoading,
+  } = useSelectedMachine();
+
   const [machine, setMachine] = useState<any>(null);
   const [session, setSession] = useState<any>(null);
   const [hardwareStatuses, setHardwareStatuses] = useState<any[]>([]);
@@ -191,8 +200,9 @@ export default function UserOverview({
   const [needsExtension, setNeedsExtension] = useState(false);
 
   useEffect(() => {
+    if (machinesLoading) return;
     void fetchOverview();
-  }, []);
+  }, [selectedMachineId, machinesLoading]);
 
   /** Bind session fields to the form once per session id (never overwrite on pause/resume/poll). */
   const applyActiveSessionToForm = (s: any | null | undefined) => {
@@ -378,17 +388,21 @@ export default function UserOverview({
   const machineIdRef = useRef<number | null>(null);
 
   useEffect(() => {
-    const id = Number(machine?.id);
+    const id = Number(selectedMachineId ?? machine?.id);
     machineIdRef.current = Number.isFinite(id) && id > 0 ? id : null;
-  }, [machine?.id]);
+  }, [selectedMachineId, machine?.id]);
 
   const overviewApiUrl = useCallback((machineId?: number | null) => {
-    const id = machineId ?? machineIdRef.current ?? Number(machine?.id);
+    const id =
+      machineId ??
+      machineIdRef.current ??
+      selectedMachineId ??
+      Number(machine?.id);
     if (Number.isFinite(id) && id > 0) {
       return `${API_BASE_URL}/mobile/overview?machine_id=${id}`;
     }
     return `${API_BASE_URL}/mobile/overview`;
-  }, [machine?.id]);
+  }, [selectedMachineId, machine?.id]);
 
   type FirmwareSessionStatus = "running" | "paused" | "stopped";
 
@@ -1189,10 +1203,20 @@ export default function UserOverview({
       <OverviewHeader
         unreadCount={unreadNotificationCount}
         onPressNotifications={() => onOpenNotifications?.()}
-        machineName={machine?.name ?? "No Machine"}
         machineStatusLabel={displayMachineStatus}
         machineOnline={machineOnline}
         timerLabel={timerLabel}
+        machineSelector={
+          <MachineDropdown
+            machines={userMachines}
+            selectedId={selectedMachineId}
+            loading={machinesLoading}
+            onSelect={selectMachine}
+            onMachineChange={() => {
+              void fetchOverview();
+            }}
+          />
+        }
       />
 
       <View style={{ flex: 1 }}>

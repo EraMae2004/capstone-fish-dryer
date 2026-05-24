@@ -965,9 +965,11 @@ class DryingController extends Controller
             default => $now->copy()->subMonths(3),
         };
 
+        $machineFilter = $request->query('microcontroller_id', $request->query('machine_id'));
+
         $sessions = DryingSession::query()
-            ->when($request->filled('microcontroller_id'), function ($query) use ($request) {
-                $query->where('microcontroller_id', (int) $request->query('microcontroller_id'));
+            ->when($machineFilter !== null && $machineFilter !== '', function ($query) use ($machineFilter) {
+                $query->where('microcontroller_id', (int) $machineFilter);
             })
             ->whereIn('status', ['completed', 'stopped'])
             ->where(function ($query) use ($startDate) {

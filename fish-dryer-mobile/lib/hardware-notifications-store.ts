@@ -67,9 +67,17 @@ export async function loadHardwareNotifications(): Promise<StoredHardwareNotific
   return parseList(raw);
 }
 
-export async function countUnreadHardwareNotifications(): Promise<number> {
+export async function countUnreadHardwareNotifications(
+  machineId?: number | null
+): Promise<number> {
   const list = await loadHardwareNotifications();
-  return list.filter((x) => x.read !== true).length;
+  return list.filter((x) => {
+    if (x.read === true) return false;
+    if (machineId != null && machineId > 0 && x.machineId !== machineId) {
+      return false;
+    }
+    return true;
+  }).length;
 }
 
 /** One-shot events (session started, first sensor fault snapshot, etc.). */

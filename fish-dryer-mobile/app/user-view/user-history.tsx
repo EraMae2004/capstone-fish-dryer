@@ -16,6 +16,8 @@ import UserGraph from './user-graph';
 import { userTypography } from "@/lib/user-typography";
 import { formatMinutesAsHMS, formatSecondsAsHMS } from "@/lib/duration-format";
 import { ListPaginationBar, useListPagination } from '@/lib/list-pagination';
+import MachineDropdown from './machine-dropdown';
+import { useSelectedMachine } from '@/lib/selected-machine';
 
 function fmtPct(value: unknown): string {
   if (value === null || value === undefined || value === "") return "--";
@@ -53,15 +55,29 @@ export default function UserHistory() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
   const [range, setRange] = useState<'weekly' | 'monthly' | '3months'>('weekly');
+  const {
+    machines: userMachines,
+    selectedId: selectedMachineId,
+    selectMachine,
+    loading: machinesLoading,
+  } = useSelectedMachine();
 
   useEffect(() => {
-    void fetchHistory(range);
-  }, [range]);
+    if (machinesLoading) return;
+    void fetchHistory(range, selectedMachineId);
+  }, [range, selectedMachineId, machinesLoading]);
 
-  const fetchHistory = async (rangeKey: typeof range) => {
+  const fetchHistory = async (
+    rangeKey: typeof range,
+    machineId: number | null
+  ) => {
     try {
       setLoading(true);
-      const res = await fetch(`${API_BASE_URL}/drying-sessions?range=${rangeKey}`);
+      const params = new URLSearchParams({ range: rangeKey });
+      if (machineId != null && machineId > 0) {
+        params.set('microcontroller_id', String(machineId));
+      }
+      const res = await fetch(`${API_BASE_URL}/drying-sessions?${params.toString()}`);
       const data = await res.json();
 
       const rows = data?.sessions ?? data?.data ?? data ?? [];
@@ -88,7 +104,7 @@ export default function UserHistory() {
 
   useEffect(() => {
     resetPage();
-  }, [range, resetPage]);
+  }, [range, selectedMachineId, resetPage]);
 
   const toggleSelect = (id: number) => {
     setSelectedIds((prev) => {
@@ -127,7 +143,7 @@ export default function UserHistory() {
               next.delete(id);
               return next;
             });
-            void fetchHistory(range);
+            void fetchHistory(range, selectedMachineId);
           } catch (error) {
             console.log(error);
           }
@@ -158,7 +174,7 @@ export default function UserHistory() {
                 body: JSON.stringify({ ids }),
               });
               setSelectedSession(null);
-              void fetchHistory(range);
+              void fetchHistory(range, selectedMachineId);
             } catch (error) {
               console.log(error);
             }
@@ -180,6 +196,17 @@ export default function UserHistory() {
     <View style={styles.screen}>
       <Stack.Screen options={{ headerShown: false }} />
       <Text style={styles.title}>History</Text>
+
+      <MachineDropdown
+        machines={userMachines}
+        selectedId={selectedMachineId}
+        loading={machinesLoading}
+        onSelect={selectMachine}
+        onMachineChange={(id) => {
+          void fetchHistory(range, id);
+        }}
+        style={styles.machineDropdown}
+      />
 
       <ScrollView
         style={styles.scroll}
@@ -306,8 +333,12 @@ const styles = StyleSheet.create({
 
   title: {
     ...userTypography.pageTitle,
-    marginBottom: 20,
+    marginBottom: 12,
     color: '#1f3b57'
+  },
+
+  machineDropdown: {
+    marginBottom: 16,
   },
 
   tableHeader: {
