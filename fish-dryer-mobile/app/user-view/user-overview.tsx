@@ -23,7 +23,6 @@ import {
 import { resolveMoisturePercent } from "@/lib/duration-format";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
 import {
-  ingestRtdbHardwareSnapshot,
   isMachineOnlineForUi,
   RTDB_INITIAL_STALE_MS,
   useStableMachineOnline,
@@ -56,6 +55,11 @@ function durationDigitsToSeconds(digits: string): number | null {
   if (m > 59 || s > 59) return null;
   const total = h * 3600 + m * 60 + s;
   return total > 0 ? total : null;
+}
+
+function toPositiveId(value: unknown): number | null {
+  const id = Number(value);
+  return Number.isFinite(id) && id > 0 ? id : null;
 }
 
 /** Recompute RTDB staleness every second so offline appears soon after the ESP stops. */
@@ -168,6 +172,17 @@ export default function UserOverview({
   const [hardwareStatuses, setHardwareStatuses] = useState<any[]>([]);
   const [liveReadings, setLiveReadings] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const overviewRequestSeqRef = useRef(0);
+
+  const selectedMachineMeta = useMemo(
+    () => userMachines.find((m) => m.id === selectedMachineId) ?? null,
+    [userMachines, selectedMachineId]
+  );
+  const activeMachineId = toPositiveId(selectedMachineId) ?? toPositiveId(machine?.id);
+  const activeMachineForPresence =
+    toPositiveId(machine?.id) === activeMachineId
+      ? machine
+      : selectedMachineMeta;
 
   /** Wall clock when Firebase last delivered `hardware_status` for this machine. */
   const [overviewRtdbLastReceiveMs, setOverviewRtdbLastReceiveMs] = useState<number | null>(null);
@@ -187,7 +202,7 @@ export default function UserOverview({
   const overviewStableOnline = useStableMachineOnline(
     overviewRtdbLastReceiveMs,
     presenceTick,
-    machine?.id ?? null
+    activeMachineId
   );
 
   // PARAMETERS STATE
@@ -201,7 +216,39 @@ export default function UserOverview({
 
   useEffect(() => {
     if (machinesLoading) return;
-    void fetchOverview();
+    const nextMachineId = toPositiveId(selectedMachineId);
+
+    overviewRequestSeqRef.current += 1;
+    setSession(null);
+    setHardwareStatuses([]);
+    setLiveReadings(null);
+    setRecommendation(null);
+    setNeedsExtension(false);
+    setOverviewRtdbLastReceiveMs(null);
+    setOverviewRtdbPayloadAtMs(null);
+    overviewHardwareFromRtdbRef.current = false;
+    countdownEndMsRef.current = null;
+    pausedRemainingSecRef.current = null;
+    setPausedRemainingSec(null);
+    timerSessionIdRef.current = null;
+    formBoundSessionIdRef.current = null;
+    activeDryingMsRef.current = 0;
+    runningSinceMsRef.current = null;
+    pausedRemainingAtPauseRef.current = null;
+    timerZeroPauseRef.current = false;
+
+    if (nextMachineId == null) {
+      setMachine(null);
+      setLoading(false);
+      return;
+    }
+
+    setMachine((prev: any) =>
+      toPositiveId(prev?.id) === nextMachineId
+        ? prev
+        : selectedMachineMeta ?? { id: nextMachineId, name: `Machine #${nextMachineId}` }
+    );
+    void fetchOverview(nextMachineId);
   }, [selectedMachineId, machinesLoading]);
 
   /** Bind session fields to the form once per session id (never overwrite on pause/resume/poll). */
@@ -236,14 +283,15 @@ export default function UserOverview({
       return;
     }
 
-    if (!machine?.id) {
+    if (!activeMachineId) {
       setOverviewRtdbLastReceiveMs(null);
       setOverviewRtdbPayloadAtMs(null);
       overviewHardwareFromRtdbRef.current = false;
       return;
     }
 
-    const r = dbRef(firebaseDb, `machines/${machine.id}/hardware_status`);
+    const boundMachineId = activeMachineId;
+    const r = dbRef(firebaseDb, `machines/${boundMachineId}/hardware_status`);
     let hadAccepted = false;
     const unsub = onValue(
       r,
@@ -264,6 +312,13 @@ export default function UserOverview({
           return;
         }
         hadAccepted = true;
+
+        const payloadMachineId = toPositiveId(
+          (val as Record<string, unknown>).microcontroller_id
+        );
+        if (payloadMachineId != null && payloadMachineId !== boundMachineId) {
+          return;
+        }
 
         if (payloadMs != null) {
           setOverviewRtdbPayloadAtMs(payloadMs);
@@ -315,7 +370,7 @@ export default function UserOverview({
       unsub();
       overviewHardwareFromRtdbRef.current = false;
     };
-  }, [machine?.id]);
+  }, [activeMachineId]);
 
   // RTDB pushes hardware/readings; Laravel overview poll is for session metadata only.
 
@@ -364,8 +419,8 @@ export default function UserOverview({
     desc: string,
     componentKey = "session"
   ) => {
-    const mcId = Number(machine?.id);
-    if (!Number.isFinite(mcId) || mcId <= 0) return;
+    const mcId = toPositiveId(activeMachineId);
+    if (mcId == null) return;
     const throttleKey = `${key}:${mcId}`;
     const now = Date.now();
     const last = problemNotifyLastMsByKey[throttleKey] ?? 0;
@@ -388,21 +443,19 @@ export default function UserOverview({
   const machineIdRef = useRef<number | null>(null);
 
   useEffect(() => {
-    const id = Number(selectedMachineId ?? machine?.id);
-    machineIdRef.current = Number.isFinite(id) && id > 0 ? id : null;
-  }, [selectedMachineId, machine?.id]);
+    machineIdRef.current = activeMachineId;
+  }, [activeMachineId]);
 
   const overviewApiUrl = useCallback((machineId?: number | null) => {
     const id =
-      machineId ??
+      toPositiveId(machineId) ??
       machineIdRef.current ??
-      selectedMachineId ??
-      Number(machine?.id);
-    if (Number.isFinite(id) && id > 0) {
+      activeMachineId;
+    if (id != null && Number.isFinite(id) && id > 0) {
       return `${API_BASE_URL}/mobile/overview?machine_id=${id}`;
     }
     return `${API_BASE_URL}/mobile/overview`;
-  }, [selectedMachineId, machine?.id]);
+  }, [activeMachineId]);
 
   type FirmwareSessionStatus = "running" | "paused" | "stopped";
 
@@ -465,11 +518,11 @@ export default function UserOverview({
   /** While running only — update fan/target without touching paused/stopped status. */
   useEffect(() => {
     if (!firebaseDb) return;
-    const mcId = Number(machine?.id);
-    if (!Number.isFinite(mcId) || mcId <= 0) return;
+    const mcId = toPositiveId(activeMachineId);
+    if (mcId == null) return;
     if (String(session?.status ?? "").trim().toLowerCase() !== "running") return;
     void writeMachineSessionToRtdb(mcId, "running");
-  }, [firebaseDb, machine?.id, session?.status, fanSpeed, temperature, writeMachineSessionToRtdb]);
+  }, [firebaseDb, activeMachineId, session?.status, fanSpeed, temperature, writeMachineSessionToRtdb]);
 
   const applyOverviewPayload = useCallback(
     (data: any) => {
@@ -494,16 +547,27 @@ export default function UserOverview({
   );
 
   const fetchOverviewPresenceOnly = useCallback(async () => {
+    const requestSeq = ++overviewRequestSeqRef.current;
+    const requestedMachineId = machineIdRef.current ?? activeMachineId;
     try {
-      const res = await fetch(overviewApiUrl(), {
+      const res = await fetch(overviewApiUrl(requestedMachineId), {
         headers: { Accept: "application/json" },
       });
       const data = await res.json();
+      if (requestSeq !== overviewRequestSeqRef.current) return;
+      const responseMachineId = toPositiveId(data?.machine?.id);
+      if (
+        requestedMachineId != null &&
+        responseMachineId != null &&
+        responseMachineId !== requestedMachineId
+      ) {
+        return;
+      }
       applyOverviewPayload(data);
     } catch {
       // next tick retries
     }
-  }, [applyOverviewPayload, overviewApiUrl]);
+  }, [activeMachineId, applyOverviewPayload, overviewApiUrl]);
 
   useEffect(() => {
     if (loading) return;
@@ -558,8 +622,8 @@ export default function UserOverview({
         }
 
         const params = new URLSearchParams();
-        const mcId = Number(machine?.id);
-        if (Number.isFinite(mcId) && mcId > 0) {
+        const mcId = toPositiveId(activeMachineId);
+        if (mcId != null) {
           params.append("microcontroller_id", String(mcId));
         }
         params.append("fish_type", fishForRec);
@@ -600,27 +664,42 @@ export default function UserOverview({
         setNeedsExtension(false);
       }
     },
-    [session, machine?.id, fishType, temperature, fanSpeed, liveReadings]
+    [session, activeMachineId, fishType, temperature, fanSpeed, liveReadings]
   );
 
-  const fetchOverview = useCallback(async () => {
+  const fetchOverview = useCallback(async (machineIdOverride?: number | null) => {
+    const requestSeq = ++overviewRequestSeqRef.current;
+    const requestedMachineId =
+      toPositiveId(machineIdOverride) ?? machineIdRef.current ?? activeMachineId;
     try {
       if (!loading) setRefreshing(true);
-      const res = await fetch(overviewApiUrl(), {
+      const res = await fetch(overviewApiUrl(requestedMachineId), {
         headers: { Accept: "application/json" },
       });
 
       const data = await res.json();
+
+      if (requestSeq !== overviewRequestSeqRef.current) return;
+      const responseMachineId = toPositiveId(data?.machine?.id);
+      if (
+        requestedMachineId != null &&
+        responseMachineId != null &&
+        responseMachineId !== requestedMachineId
+      ) {
+        return;
+      }
 
       applyOverviewPayload(data);
       void fetchRecommendation(data.session);
     } catch (err) {
       console.log(err);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (requestSeq === overviewRequestSeqRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  }, [loading, applyOverviewPayload, overviewApiUrl, fetchRecommendation]);
+  }, [activeMachineId, loading, applyOverviewPayload, overviewApiUrl, fetchRecommendation]);
 
   const postSessionControl = async (
     action: "start" | "pause" | "stop",
@@ -637,14 +716,14 @@ export default function UserOverview({
 
       const user = JSON.parse(raw);
       const userId = Number(user?.id);
-      const microcontrollerId = Number(machine?.id);
+      const microcontrollerId = toPositiveId(activeMachineId);
 
       if (!Number.isFinite(userId) || userId <= 0) {
         Alert.alert("Missing user", "Could not read user id from storage.");
         return;
       }
 
-      if (!Number.isFinite(microcontrollerId) || microcontrollerId <= 0) {
+      if (microcontrollerId == null) {
         Alert.alert("No machine", "Overview has no selected microcontroller yet.");
         return;
       }
@@ -986,7 +1065,7 @@ export default function UserOverview({
   const machineOnline = isMachineOnlineForUi({
     firebaseConfigured: Boolean(firebaseDb),
     rtdbLastReceiveMs: overviewRtdbLastReceiveMs,
-    machine,
+    machine: activeMachineForPresence,
     stableOnline: overviewStableOnline,
   });
 
@@ -1008,7 +1087,7 @@ export default function UserOverview({
    * Idle when paused; Running when running; Offline when not live.
    */
   const displayMachineStatus = (() => {
-    if (!machine) return "—";
+    if (!activeMachineId) return "—";
     if (!machineOnline) return "Offline";
     if (sessionStatus === "paused") return "Idle";
     if (sessionStatus === "running") return "Running";
@@ -1114,8 +1193,8 @@ export default function UserOverview({
   }, [remainingSeconds, sessionStatus]);
 
   useEffect(() => {
-    const mcId = Number(machine?.id);
-    if (!Number.isFinite(mcId) || mcId <= 0) return;
+    const mcId = toPositiveId(activeMachineId);
+    if (mcId == null) return;
 
     if (sessionStatus !== "running" && sessionStatus !== "paused") {
       clearProblemNotifyThrottleForMachine(mcId);
@@ -1125,7 +1204,7 @@ export default function UserOverview({
     const machineOnlineForAlerts = isMachineOnlineForUi({
       firebaseConfigured: Boolean(firebaseDb),
       rtdbLastReceiveMs: overviewRtdbLastReceiveMs,
-      machine,
+      machine: activeMachineForPresence,
       stableOnline: overviewStableOnline,
     });
     if (!machineOnlineForAlerts) return;
@@ -1181,8 +1260,8 @@ export default function UserOverview({
     temperature,
     session?.started_at,
     tickNow,
-    machine?.id,
-    machine,
+    activeMachineId,
+    activeMachineForPresence,
     overviewRtdbLastReceiveMs,
     overviewStableOnline,
     firebaseDb,
@@ -1212,8 +1291,8 @@ export default function UserOverview({
             selectedId={selectedMachineId}
             loading={machinesLoading}
             onSelect={selectMachine}
-            onMachineChange={() => {
-              void fetchOverview();
+            onMachineChange={(machineId) => {
+              void fetchOverview(machineId);
             }}
           />
         }

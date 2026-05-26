@@ -4,17 +4,17 @@ import { parsePresenceMs } from "@/lib/parse-presence-ms";
 /** Laravel `last_seen` — API-only mode when Firebase is not configured. */
 export const API_LAST_SEEN_MS = 3 * 60 * 1000;
 
-/** ESP pushes ~every 2s — show Online once a live delivery lands (≤5s). */
-export const RTDB_GO_ONLINE_MS = 5_000;
+/** ESP nominally pushes ~every 2s, but Wi-Fi/Firebase writes can bunch up. */
+export const RTDB_GO_ONLINE_MS = 10_000;
 
-/** Drop Offline ≤5s after the last RTDB delivery when unplugged / Wi‑Fi lost. */
-export const RTDB_GO_OFFLINE_MS = 5_000;
+/** Raw offline threshold; UI uses the larger stable threshold below. */
+export const RTDB_GO_OFFLINE_MS = 10_000;
 
-/** While Online, tolerate ~2 missed heartbeats before age check fails. */
-export const RTDB_STAY_ONLINE_MS = 6_500;
+/** While Online, tolerate several missed heartbeats to avoid Wi-Fi jitter flicker. */
+export const RTDB_STAY_ONLINE_MS = 25_000;
 
-/** First snapshot only — ignore rows older than this (offline board on app open). */
-export const RTDB_INITIAL_STALE_MS = 5_000;
+/** First snapshot only — ignore clearly stale rows when opening the app. */
+export const RTDB_INITIAL_STALE_MS = 30_000;
 
 /** Offline card flips only after this many presence ticks (not every React render). */
 export const RTDB_OFFLINE_CONFIRM_TICKS = 2;

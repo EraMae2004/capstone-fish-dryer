@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -7,12 +7,18 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { FontAwesome } from "@expo/vector-icons";
+import { onValue, ref as dbRef, type DataSnapshot } from "firebase/database";
 import { userTypography } from "@/lib/user-typography";
 import {
   useSelectedMachine,
   type UserMachine,
 } from "@/lib/selected-machine";
 import { useShellSidebarOpen } from "@/lib/shell-sidebar-context";
+import { firebaseDb } from "@/config/firebase";
+import {
+  computeStableOnlineByMachineId,
+  recordMachineRtdbDelivery,
+} from "@/lib/machine-presence";
 
 type MachineDropdownProps = {
   onMachineChange?: (machineId: number) => void;
@@ -22,6 +28,13 @@ type MachineDropdownProps = {
   loading?: boolean;
   onSelect?: (machineId: number) => void;
 };
+
+const DROPDOWN_STATUS_TICK_MS = 500;
+
+function toPositiveId(value: unknown): number | null {
+  const id = Number(value);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
 
 export default function MachineDropdown({
   onMachineChange,
@@ -39,10 +52,99 @@ export default function MachineDropdown({
 
   const [open, setOpen] = useState(false);
   const sidebarOpen = useShellSidebarOpen();
+  const rtdbReceiveRef = useRef<Record<number, number>>({});
+  const rtdbPayloadRef = useRef<Record<number, number>>({});
+  const rtdbSeenRef = useRef<Record<number, boolean>>({});
+  const stableOnlineRef = useRef<Record<number, boolean>>({});
+  const offlineStreakRef = useRef<Record<number, number>>({});
+  const [stableOnlineById, setStableOnlineById] = useState<Record<number, boolean>>({});
+
+  const machineIds = useMemo(
+    () =>
+      machines
+        .map((m) => toPositiveId(m.id))
+        .filter((id): id is number => id != null),
+    [machines]
+  );
+  const machineIdsKey = machineIds.join(",");
 
   useEffect(() => {
     if (sidebarOpen) setOpen(false);
   }, [sidebarOpen]);
+
+  useEffect(() => {
+    if (!firebaseDb || machineIds.length === 0) {
+      stableOnlineRef.current = {};
+      setStableOnlineById({});
+      return;
+    }
+
+    const ids = [...machineIds];
+    const unsubs = ids.map((id) =>
+      onValue(dbRef(firebaseDb, `machines/${id}/hardware_status`), (snap: DataSnapshot) => {
+        const val = snap.val();
+        if (!val || typeof val !== "object") return;
+
+        const hw = val as Record<string, unknown>;
+        const payloadMachineId = toPositiveId(hw.microcontroller_id);
+        if (payloadMachineId != null && payloadMachineId !== id) return;
+
+        const bumped = recordMachineRtdbDelivery(
+          rtdbReceiveRef.current,
+          rtdbPayloadRef.current,
+          id,
+          hw.updated_at,
+          rtdbSeenRef.current,
+          Date.now()
+        );
+        if (!bumped.accepted) return;
+
+        rtdbReceiveRef.current = bumped.receiveById;
+        rtdbPayloadRef.current = bumped.payloadById;
+        const next = computeStableOnlineByMachineId(
+          rtdbReceiveRef.current,
+          stableOnlineRef.current,
+          ids,
+          Date.now(),
+          offlineStreakRef.current,
+          false
+        );
+        stableOnlineRef.current = next;
+        setStableOnlineById(next);
+      })
+    );
+
+    return () => {
+      ids.forEach((id) => {
+        delete rtdbSeenRef.current[id];
+        delete rtdbReceiveRef.current[id];
+        delete rtdbPayloadRef.current[id];
+        delete stableOnlineRef.current[id];
+        delete offlineStreakRef.current[id];
+      });
+      unsubs.forEach((unsub) => unsub());
+    };
+  }, [machineIdsKey]);
+
+  useEffect(() => {
+    if (!firebaseDb || machineIds.length === 0) return;
+
+    const ids = [...machineIds];
+    const interval = setInterval(() => {
+      const next = computeStableOnlineByMachineId(
+        rtdbReceiveRef.current,
+        stableOnlineRef.current,
+        ids,
+        Date.now(),
+        offlineStreakRef.current,
+        true
+      );
+      stableOnlineRef.current = next;
+      setStableOnlineById(next);
+    }, DROPDOWN_STATUS_TICK_MS);
+
+    return () => clearInterval(interval);
+  }, [machineIdsKey]);
 
   const selectedMachine =
     machines.find((m) => m.id === selectedId) ?? null;
@@ -55,6 +157,12 @@ export default function MachineDropdown({
   };
 
   const label = selectedMachine?.name ?? "No Machine";
+  const statusLabelFor = (machine: UserMachine) => {
+    if (firebaseDb) {
+      return stableOnlineById[machine.id] ? "Online" : "Offline";
+    }
+    return machine.status ? (machine.status === "online" ? "Online" : "Offline") : null;
+  };
 
   return (
     <View style={[styles.wrap, style]}>
@@ -83,6 +191,7 @@ export default function MachineDropdown({
         <View style={styles.menu}>
           {machines.map((m) => {
             const active = m.id === selectedId;
+            const statusLabel = statusLabelFor(m);
             return (
               <TouchableOpacity
                 key={m.id}
@@ -95,9 +204,14 @@ export default function MachineDropdown({
                 >
                   {m.name}
                 </Text>
-                {m.status ? (
-                  <Text style={styles.menuItemMeta}>
-                    {m.status === "online" ? "Online" : "Offline"}
+                {statusLabel ? (
+                  <Text
+                    style={[
+                      styles.menuItemMeta,
+                      statusLabel === "Online" ? styles.menuItemOnline : styles.menuItemOffline,
+                    ]}
+                  >
+                    {statusLabel}
                   </Text>
                 ) : null}
               </TouchableOpacity>
@@ -165,7 +279,12 @@ const styles = StyleSheet.create({
   },
   menuItemMeta: {
     fontSize: 11,
-    color: "#888",
     marginTop: 2,
+  },
+  menuItemOnline: {
+    color: "#2ecc71",
+  },
+  menuItemOffline: {
+    color: "#e74c3c",
   },
 });

@@ -89,6 +89,14 @@
       static unsigned long gLastTestCmdPollMs = 0;
       static unsigned long gLastSessionPollMs = 0;
       static int           gTestFanLevel = 3;
+      static const unsigned long ASSIGNMENT_POLL_UNASSIGNED_MS = 1000UL;
+      static const unsigned long ASSIGNMENT_POLL_ASSIGNED_MS = 10000UL;
+      static const unsigned long SESSION_POLL_MS = 1500UL;
+      static const unsigned long TEST_COMMAND_POLL_MS = 750UL;
+      static const unsigned long RTDB_GET_TIMEOUT_MS = 2500UL;
+      static const unsigned long RTDB_GET_CONNECT_TIMEOUT_MS = 1500UL;
+      static const unsigned long RTDB_PUT_TIMEOUT_MS = 3500UL;
+      static const unsigned long RTDB_PUT_CONNECT_TIMEOUT_MS = 1500UL;
 
       // ================= WIFI / API — CHANGE PC IP HERE (must match phone app) =================
       const char* WIFI_SSID = "XuMinghao";
@@ -1289,7 +1297,8 @@
         WiFiClientSecure client;
         client.setInsecure();
         HTTPClient http;
-        http.setTimeout(6000);
+        http.setTimeout(RTDB_GET_TIMEOUT_MS);
+        http.setConnectTimeout(RTDB_GET_CONNECT_TIMEOUT_MS);
         String url = String(FIREBASE_DATABASE_URL);
         if (!url.endsWith("/")) url += "/";
         url += pathNoJsonSuffix;
@@ -2008,7 +2017,8 @@
       static bool rtdbPutJson(const String& pathNoJsonSuffix, const String& jsonBody) {
         if (WiFi.status() != WL_CONNECTED) return false;
         HTTPClient http;
-        http.setTimeout(8000);
+        http.setTimeout(RTDB_PUT_TIMEOUT_MS);
+        http.setConnectTimeout(RTDB_PUT_CONNECT_TIMEOUT_MS);
 
         // Firebase RTDB requires HTTPS. For quick test-mode validation, we skip cert validation.
         // (Do NOT ship like this; use certificate pinning or a proper client.)
@@ -2109,9 +2119,6 @@
       }
 
       void sendHeartbeat(bool /*dhtOk*/, bool /*moistureOk*/, bool /*doorOk*/) {
-        (void)refreshAssignmentFromCloud();
-        refreshSessionFromCloud();
-
         const bool esp32Ok = esp32SelfCheckOk();
         // `components.esp32` in JSON/RTDB = "MCU online" (Wi‑Fi path works). Heap/reset
         // self-check still drives Serial + alert buzzer via `esp32Ok`.
@@ -2701,7 +2708,9 @@
         bool dhtOk = false, moistureOk = false, doorOk = false;
         readSensorsOnce(dhtOk, moistureOk, doorOk);
 
-        if (millis() - gLastAssignmentPollMs >= 1000UL) {
+        const unsigned long assignmentPollMs =
+            gAssignedId > 0 ? ASSIGNMENT_POLL_ASSIGNED_MS : ASSIGNMENT_POLL_UNASSIGNED_MS;
+        if (millis() - gLastAssignmentPollMs >= assignmentPollMs) {
           gLastAssignmentPollMs = millis();
           if (refreshAssignmentFromCloud()) {
             Serial.print("[assignment] active id=");
@@ -2716,13 +2725,13 @@
             }
           }
         }
-        if (millis() - gLastSessionPollMs >= 400UL) {
+        if (millis() - gLastSessionPollMs >= SESSION_POLL_MS) {
           gLastSessionPollMs = millis();
           refreshSessionFromCloud();
         }
       #if ENABLE_RTDB_HARDWARE_TEST
         if (!gDryingOutputsLatched && !sessionStatusIsRunning() && !sessionStatusIsPaused()) {
-          if (millis() - gLastTestCmdPollMs >= 400UL) {
+          if (millis() - gLastTestCmdPollMs >= TEST_COMMAND_POLL_MS) {
             gLastTestCmdPollMs = millis();
             refreshTestCommandFromCloud();
           }

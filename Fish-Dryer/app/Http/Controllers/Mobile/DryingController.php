@@ -1882,7 +1882,7 @@ class DryingController extends Controller
                     'mac' => $this->microcontrollersHasMacColumn() ? $machine->mac : null,
                     'display_name' => $machine->display_name,
                     'last_seen' => $lastSeen ? $lastSeen->toIso8601String() : null,
-                    'status' => $this->isMicrocontrollerOnline($machine)
+                    'status' => $this->isMicrocontrollerReachable($machine)
                         ? 'online'
                         : 'offline',
                 ];
