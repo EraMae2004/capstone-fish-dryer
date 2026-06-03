@@ -93,8 +93,8 @@ export async function appendHardwareNotification(
 }
 
 /**
- * Recurring alerts (temp / hardware while fault persists): one row per stable `id`.
- * Replaces the previous row instead of stacking a new unread entry every refresh.
+ * @deprecated Prefer {@link appendHardwareNotification} with a unique `id` per alert.
+ * Kept for callers that intentionally replace one row (e.g. legacy upsert by stable key).
  */
 export async function upsertHardwareNotification(
   item: Omit<StoredHardwareNotification, "read">

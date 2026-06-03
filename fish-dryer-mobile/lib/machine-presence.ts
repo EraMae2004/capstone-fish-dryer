@@ -56,6 +56,19 @@ export function isMachineLive(machine: MachinePresenceRow | null | undefined): b
   return Date.now() - lastSeenMs <= API_LAST_SEEN_MS;
 }
 
+/** Stricter than {@link isMachineLive} — for Add Machine scan (Firebase heartbeat window). */
+export function isMachineDetectable(
+  machine: MachinePresenceRow | null | undefined,
+  nowMs: number = Date.now()
+): boolean {
+  if (!machine) return false;
+  if (!isApiStatusOnline(machine.status)) return false;
+  const lastSeenMs = parsePresenceMs(machine.last_seen);
+  if (lastSeenMs === null) return false;
+  if (lastSeenMs > nowMs + 2000) return false;
+  return nowMs - lastSeenMs <= RTDB_GO_ONLINE_MS;
+}
+
 export function ingestRtdbHardwareSnapshot(
   updatedAtRaw: unknown,
   nowMs: number = Date.now()
@@ -95,6 +108,7 @@ export function isRtdbPayloadFresh(
   nowMs: number = Date.now()
 ): boolean {
   if (payloadMs == null || !Number.isFinite(payloadMs)) return false;
+  if (payloadMs > nowMs + 2000) return false;
   return nowMs - payloadMs <= RTDB_GO_ONLINE_MS;
 }
 

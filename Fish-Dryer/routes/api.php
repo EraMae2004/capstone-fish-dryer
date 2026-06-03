@@ -27,6 +27,7 @@ Route::get('/notifications', [MobileDryingController::class, 'notificationsIndex
 Route::post('/notifications/mark-read', [MobileDryingController::class, 'notificationsMarkRead']);
 Route::post('/notifications/delete-batch', [MobileDryingController::class, 'notificationsDestroyBatch']);
 Route::post('/mobile/update-profile/{id}', [MobileAuthController::class, 'updateProfile']);
+Route::post('/mobile/update-profile-photo/{id}', [MobileAuthController::class, 'updateProfilePhoto']);
 Route::post('/mobile/change-password/{id}', [MobileAuthController::class, 'changePassword']);
 Route::get('/machines', [MobileDryingController::class, 'getMachines']);
 Route::post('/machines', [MobileDryingController::class, 'addMachine']);

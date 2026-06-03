@@ -9,16 +9,22 @@ import {
   ScrollView,
   Image,
   Alert,
+  ActivityIndicator,
 } from "react-native";
 import { Ionicons, FontAwesome } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
-import { API_BASE_URL } from "@/config/api";
+import { API_BASE_URL, apiStorageUrl } from "@/config/api";
+import { saveProfileComplete, type ProfileUser } from "@/lib/profile-photo-upload";
 
+type UserProfileProps = {
+  /** Called after Save so the shell header can show the new photo/name. */
+  onProfileSaved?: (user: ProfileUser) => void;
+};
 
-export default function UserProfile() {
-  const [user, setUser] = useState<any>(null);
-  const [originalData, setOriginalData] = useState<any>(null);
+export default function UserProfile({ onProfileSaved }: UserProfileProps) {
+  const [user, setUser] = useState<ProfileUser | null>(null);
+  const [originalData, setOriginalData] = useState<ProfileUser | null>(null);
 
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
@@ -41,36 +47,39 @@ export default function UserProfile() {
   const [showNew, setShowNew] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
 
-  // ================= LOAD USER =================
+  const [saving, setSaving] = useState(false);
+
+  const applyUser = (u: ProfileUser) => {
+    setUser(u);
+    setName(u.name || "");
+    setPhone(u.phone || "");
+    setBirthdate(u.birthdate ? String(u.birthdate).split("T")[0] : "");
+    setEmail(u.email || "");
+    setAddress(u.address || "");
+  };
+
   useEffect(() => {
     const loadUser = async () => {
       const storedUser = await AsyncStorage.getItem("user");
       if (!storedUser) return;
 
-      const parsed = JSON.parse(storedUser);
+      const parsed = JSON.parse(storedUser) as ProfileUser;
 
-      const response = await fetch(
-        `${API_BASE_URL}/mobile/user/${parsed.id}`
-      );
-      const data = await response.json();
+      try {
+        const response = await fetch(`${API_BASE_URL}/mobile/user/${parsed.id}`);
+        const data = await response.json();
 
-      if (data.success) {
-        setUser(data.user);
-        setOriginalData(data.user);
-
-        setName(data.user.name || "");
-        setPhone(data.user.phone || "");
-        setBirthdate(
-          data.user.birthdate
-            ? data.user.birthdate.split("T")[0]
-            : ""
-        );
-        setEmail(data.user.email || "");
-        setAddress(data.user.address || "");
+        if (data.success) {
+          applyUser(data.user);
+          setOriginalData(data.user);
+        }
+      } catch {
+        applyUser(parsed);
+        setOriginalData(parsed);
       }
     };
 
-    loadUser();
+    void loadUser();
   }, []);
 
   const initials =
@@ -81,25 +90,33 @@ export default function UserProfile() {
       .substring(0, 2)
       .toUpperCase() || "";
 
-  // ================= IMAGE PICKER =================
+  const persistUser = async (updated: ProfileUser) => {
+    setUser(updated);
+    setOriginalData(updated);
+    await AsyncStorage.setItem("user", JSON.stringify(updated));
+    setSelectedImage(null);
+    setRemoveImageFlag(false);
+    onProfileSaved?.(updated);
+  };
+
   const pickImage = async () => {
-    const permission =
-      await ImagePicker.requestMediaLibraryPermissionsAsync();
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) {
-      Alert.alert("Permission required");
+      Alert.alert("Permission required", "Allow photo library access to set a profile picture.");
       return;
     }
 
-    const result =
-      await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        quality: 0.8,
-      });
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.7,
+    });
 
-    if (!result.canceled) {
-      setSelectedImage(result.assets[0].uri);
-      setRemoveImageFlag(false);
-    }
+    if (result.canceled || !result.assets[0]?.uri) return;
+
+    setSelectedImage(result.assets[0].uri);
+    setRemoveImageFlag(false);
   };
 
   const removeImage = () => {
@@ -107,103 +124,57 @@ export default function UserProfile() {
     setRemoveImageFlag(true);
   };
 
-  // ================= SAVE PROFILE =================
   const saveProfile = async () => {
-    if (!user) return;
+    if (!user?.id) return;
 
-    const formData = new FormData();
-
-    formData.append("name", name);
-    formData.append("phone", phone);
-    formData.append("email", email);
-    formData.append("birthdate", birthdate);
-    formData.append("address", address);
-
-    if (selectedImage) {
-      const filename = selectedImage.split("/").pop();
-      const match = /\.(\w+)$/.exec(filename ?? "");
-      const type = match ? `image/${match[1]}` : `image`;
-
-      formData.append("profile_picture", {
-        uri: selectedImage,
-        name: filename,
-        type,
-      } as any);
-    }
-
-    if (removeImageFlag) {
-      formData.append("remove_image", "1");
-    }
-
-    const response = await fetch(
-      `${API_BASE_URL}/mobile/update-profile/${user.id}`,
-      {
-        method: "POST",
-        body: formData,
-        headers: { Accept: "application/json" },
-      }
-    );
-
-    const data = await response.json();
-
-    if (data.success) {
-      setUser(data.user);
-      setOriginalData(data.user);
-      await AsyncStorage.setItem(
-        "user",
-        JSON.stringify(data.user)
+    setSaving(true);
+    try {
+      const updated = await saveProfileComplete(
+        user.id,
+        { name, phone, email, birthdate, address },
+        {
+          imageUri: selectedImage,
+          remove: removeImageFlag,
+        }
       );
-
-      setSelectedImage(null);
-      setRemoveImageFlag(false);
+      await persistUser(updated);
 
       setSuccessMessage("Profile Changes Saved!");
       setSuccessModal(true);
-    } else {
-      Alert.alert("Error", "Failed to save profile.");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Could not reach the server.";
+      Alert.alert("Error", msg);
+    } finally {
+      setSaving(false);
     }
   };
 
-  // ================= CANCEL =================
   const discardProfile = () => {
     if (!originalData) return;
 
-    setName(originalData.name || "");
-    setPhone(originalData.phone || "");
-    setBirthdate(
-      originalData.birthdate
-        ? originalData.birthdate.split("T")[0]
-        : ""
-    );
-    setEmail(originalData.email || "");
-    setAddress(originalData.address || "");
-
+    applyUser(originalData);
     setSelectedImage(null);
     setRemoveImageFlag(false);
   };
 
-  // ================= CHANGE PASSWORD =================
   const handlePasswordSave = async () => {
-    if (!currentPass || !newPass || !confirmPass)
+    if (!currentPass || !newPass || !confirmPass) {
       return Alert.alert("Fill all fields");
+    }
 
-    if (newPass !== confirmPass)
+    if (newPass !== confirmPass) {
       return Alert.alert("Passwords do not match");
+    }
 
-    const response = await fetch(
-      `${API_BASE_URL}/mobile/change-password/${user.id}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          current_password: currentPass,
-          new_password: newPass,
-          new_password_confirmation: confirmPass,
-        }),
-      }
-    );
+    const response = await fetch(`${API_BASE_URL}/mobile/change-password/${user?.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        current_password: currentPass,
+        new_password: newPass,
+        new_password_confirmation: confirmPass,
+      }),
+    });
 
     const data = await response.json();
 
@@ -220,6 +191,13 @@ export default function UserProfile() {
     }
   };
 
+  const storedPhotoUri =
+    !removeImageFlag && user?.profile_picture
+      ? apiStorageUrl(user.profile_picture)
+      : null;
+
+  const displayUri = selectedImage ?? storedPhotoUri;
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <View style={styles.header}>
@@ -229,40 +207,42 @@ export default function UserProfile() {
           onPress={() => setPasswordModal(true)}
         >
           <FontAwesome name="key" size={14} color="white" />
-          <Text style={styles.changePasswordText}>
-            {" "}Change Password
-          </Text>
+          <Text style={styles.changePasswordText}> Change Password</Text>
         </TouchableOpacity>
       </View>
 
       <View style={styles.card}>
         <View style={styles.profileSection}>
           <View style={styles.profileCircle}>
-            {selectedImage ? (
-              <Image source={{ uri: selectedImage }} style={styles.image} />
-            ) : !removeImageFlag && user?.profile_picture ? (
-              <Image
-                source={{
-                  uri: `${API_BASE_URL.replace('/api','')}/storage/${user.profile_picture}`,
-                }}
-                style={styles.image}
-              />
+            {displayUri ? (
+              <Image source={{ uri: displayUri }} style={styles.image} />
             ) : (
               <Text style={styles.initialText}>{initials}</Text>
             )}
           </View>
 
           <View style={styles.imageButtons}>
-            <TouchableOpacity style={styles.editBtn} onPress={pickImage}>
+            <TouchableOpacity
+              style={[styles.editBtn, saving && styles.btnDisabled]}
+              onPress={() => void pickImage()}
+              disabled={saving}
+            >
               <FontAwesome name="pencil" size={13} color="white" />
               <Text style={styles.smallBtnText}> Edit</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.removeBtn} onPress={removeImage}>
+            <TouchableOpacity
+              style={[styles.removeBtn, saving && styles.btnDisabled]}
+              onPress={removeImage}
+              disabled={saving || (!displayUri && !user?.profile_picture)}
+            >
               <FontAwesome name="trash" size={13} color="white" />
               <Text style={styles.smallBtnText}> Remove</Text>
             </TouchableOpacity>
           </View>
+          {(selectedImage || removeImageFlag) && (
+            <Text style={styles.photoHint}>Photo changes apply when you tap Save.</Text>
+          )}
         </View>
 
         <Input label="Name" icon="user" value={name} onChange={setName} />
@@ -272,23 +252,48 @@ export default function UserProfile() {
         <Input label="Email" icon="envelope" value={email} onChange={setEmail} />
 
         <View style={styles.footer}>
-          <TouchableOpacity style={styles.saveBtn} onPress={saveProfile}>
-            <Text style={styles.footerBtnText}>Save</Text>
+          <TouchableOpacity
+            style={[styles.saveBtn, saving && styles.btnDisabled]}
+            onPress={() => void saveProfile()}
+            disabled={saving}
+          >
+            {saving ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <Text style={styles.footerBtnText}>Save</Text>
+            )}
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.cancelBtn} onPress={discardProfile}>
+          <TouchableOpacity style={styles.cancelBtn} onPress={discardProfile} disabled={saving}>
             <Text style={styles.footerBtnText}>Cancel</Text>
           </TouchableOpacity>
         </View>
       </View>
 
-      {/* PASSWORD MODAL */}
       <Modal visible={passwordModal} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.passwordCard}>
-            <PasswordInput label="Current Password" value={currentPass} setValue={setCurrentPass} show={showCurrent} setShow={setShowCurrent} />
-            <PasswordInput label="New Password" value={newPass} setValue={setNewPass} show={showNew} setShow={setShowNew} />
-            <PasswordInput label="Confirm Password" value={confirmPass} setValue={setConfirmPass} show={showConfirm} setShow={setShowConfirm} />
+            <PasswordInput
+              label="Current Password"
+              value={currentPass}
+              setValue={setCurrentPass}
+              show={showCurrent}
+              setShow={setShowCurrent}
+            />
+            <PasswordInput
+              label="New Password"
+              value={newPass}
+              setValue={setNewPass}
+              show={showNew}
+              setShow={setShowNew}
+            />
+            <PasswordInput
+              label="Confirm Password"
+              value={confirmPass}
+              setValue={setConfirmPass}
+              show={showConfirm}
+              setShow={setShowConfirm}
+            />
 
             <TouchableOpacity style={styles.updateBtn} onPress={handlePasswordSave}>
               <Text style={{ color: "white" }}>Save</Text>
@@ -304,16 +309,13 @@ export default function UserProfile() {
         </View>
       </Modal>
 
-      {/* SUCCESS MODAL */}
       <Modal visible={successModal} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.successCard}>
             <View style={styles.checkIcon}>
               <Ionicons name="checkmark" size={26} color="white" />
             </View>
-            <Text style={{ marginTop: 20, fontWeight: "600" }}>
-              {successMessage}
-            </Text>
+            <Text style={{ marginTop: 20, fontWeight: "600" }}>{successMessage}</Text>
             <TouchableOpacity
               style={styles.modalCancelBtn}
               onPress={() => setSuccessModal(false)}
@@ -340,8 +342,18 @@ const PasswordInput = ({ label, value, setValue, show, setShow }: any) => (
   <View style={{ marginBottom: 15 }}>
     <Text style={styles.label}>{label}</Text>
     <View style={styles.passwordInput}>
-      <TextInput secureTextEntry={!show} style={{ flex: 1 }} value={value} onChangeText={setValue} />
-      <Ionicons name={show ? "eye-off" : "eye"} size={20} color="#4fb0d9" onPress={() => setShow(!show)} />
+      <TextInput
+        secureTextEntry={!show}
+        style={{ flex: 1 }}
+        value={value}
+        onChangeText={setValue}
+      />
+      <Ionicons
+        name={show ? "eye-off" : "eye"}
+        size={20}
+        color="#4fb0d9"
+        onPress={() => setShow(!show)}
+      />
     </View>
   </View>
 );
@@ -379,6 +391,13 @@ const styles = StyleSheet.create({
 
   imageButtons: { flexDirection: "row", gap: 20, marginTop: 15 },
 
+  photoHint: {
+    marginTop: 10,
+    fontSize: 12,
+    color: "#6c757d",
+    textAlign: "center",
+  },
+
   editBtn: {
     backgroundColor: "#495057",
     padding: 8,
@@ -394,6 +413,8 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
   },
+
+  btnDisabled: { opacity: 0.55 },
 
   smallBtnText: { color: "white", fontSize: 12 },
   initialText: { fontSize: 28, fontWeight: "700" },

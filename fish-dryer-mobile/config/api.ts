@@ -19,3 +19,10 @@ function readApiBaseUrl(): string {
 }
 
 export const API_BASE_URL = readApiBaseUrl();
+
+/** Laravel `storage/app/public` files (profile pictures, etc.). */
+export function apiStorageUrl(relativePath: string): string {
+  const base = API_BASE_URL.replace(/\/api\/?$/i, "");
+  const path = String(relativePath ?? "").replace(/^\/+/, "");
+  return `${base}/storage/${path}`;
+}

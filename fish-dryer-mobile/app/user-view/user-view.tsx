@@ -23,7 +23,7 @@ import UserProfile from './user-profile';
 import HardwareStatus from './hardware-status';
 import UserHistory from './user-history';
 import UserNotifications from './user-notifications';
-import { API_BASE_URL } from '@/config/api';
+import { apiStorageUrl } from '@/config/api';
 import { countUnreadHardwareNotifications } from '@/lib/hardware-notifications-store';
 import { getSelectedMachineId } from '@/lib/selected-machine';
 import { ShellSidebarOpenContext } from '@/lib/shell-sidebar-context';
@@ -52,20 +52,26 @@ export default function UserView() {
     return count;
   }, []);
 
+  const reloadUserFromStorage = useCallback(async () => {
+    const storedUser = await AsyncStorage.getItem('user');
+
+    if (!storedUser) {
+      router.replace('/authentication/login');
+      return;
+    }
+
+    setUser(JSON.parse(storedUser));
+  }, [router]);
+
   useEffect(() => {
-    const loadUser = async () => {
-      const storedUser = await AsyncStorage.getItem('user');
+    void reloadUserFromStorage();
+  }, [reloadUserFromStorage]);
 
-      if (!storedUser) {
-        router.replace('/authentication/login');
-        return;
-      }
-
-      setUser(JSON.parse(storedUser));
-    };
-
-    loadUser();
-  }, []);
+  useEffect(() => {
+    if (activeScreen === 'profile') {
+      void reloadUserFromStorage();
+    }
+  }, [activeScreen, reloadUserFromStorage]);
 
   useEffect(() => {
     void refreshUnreadNotificationCount();
@@ -129,7 +135,7 @@ export default function UserView() {
       case 'hardware':
         return <HardwareStatus />;
       case 'profile':
-        return <UserProfile />;
+        return <UserProfile onProfileSaved={setUser} />;
       default:
         return null;
     }
@@ -164,7 +170,8 @@ export default function UserView() {
           <View style={styles.profileCircle}>
             {user?.profile_picture ? (
               <Image
-                source={{ uri: `${API_BASE_URL.replace('/api','')}/storage/${user.profile_picture}` }}
+                key={user.profile_picture}
+                source={{ uri: apiStorageUrl(user.profile_picture) }}
                 style={styles.profileImage}
               />
             ) : (

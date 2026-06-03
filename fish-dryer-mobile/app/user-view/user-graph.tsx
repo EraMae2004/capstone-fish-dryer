@@ -1,6 +1,22 @@
-import React, { useMemo } from "react";
-import { View, Text, StyleSheet, useWindowDimensions, TouchableOpacity } from "react-native";
+import React, { useMemo, useState } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  useWindowDimensions,
+  TouchableOpacity,
+} from "react-native";
+import { FontAwesome } from "@expo/vector-icons";
 import { LineChart } from "react-native-gifted-charts";
+
+export type HistoryRange = "all" | "weekly" | "monthly" | "3months";
+
+const RANGE_OPTIONS: { value: HistoryRange; label: string }[] = [
+  { value: "all", label: "All session" },
+  { value: "weekly", label: "Weekly" },
+  { value: "monthly", label: "Monthly" },
+  { value: "3months", label: "Last 3 months ago" },
+];
 
 function parseSessionDate(raw: unknown): Date | null {
   if (raw == null || raw === "") return null;
@@ -13,8 +29,23 @@ function sessionDurationMinutes(row: any): number {
   return Number.isFinite(sec) && sec > 0 ? sec / 60 : 0;
 }
 
-export default function UserGraph({ sessions = [], summary, range, onChangeRange }: any) {
+export default function UserGraph({
+  sessions = [],
+  summary,
+  range,
+  onChangeRange,
+}: {
+  sessions?: any[];
+  summary?: { total_batches?: number };
+  range?: HistoryRange;
+  onChangeRange?: (r: HistoryRange) => void;
+}) {
   const { width } = useWindowDimensions();
+  const activeRange = range ?? "weekly";
+  const [rangeOpen, setRangeOpen] = useState(false);
+
+  const activeLabel =
+    RANGE_OPTIONS.find((o) => o.value === activeRange)?.label ?? "Weekly";
 
   const groupedByPeriod = useMemo(() => {
     const grouped = sessions.reduce((acc: Record<string, any[]>, session: any) => {
@@ -88,10 +119,60 @@ export default function UserGraph({ sessions = [], summary, range, onChangeRange
     2
   );
 
+  const selectRange = (value: HistoryRange) => {
+    setRangeOpen(false);
+    onChangeRange?.(value);
+  };
+
   return (
     <View style={styles.container}>
       <View style={styles.headerRow}>
-        <Text style={styles.title}>USER DRYING TREND</Text>
+        <View style={styles.titleBlock}>
+          <Text style={styles.title}>USER DRYING TREND</Text>
+
+          <View style={styles.rangeDropdownWrap}>
+            <TouchableOpacity
+              style={styles.rangeTrigger}
+              onPress={() => setRangeOpen((v) => !v)}
+              accessibilityRole="button"
+              accessibilityLabel="Select graph time range"
+            >
+              <Text style={styles.rangeTriggerText} numberOfLines={1}>
+                {activeLabel}
+              </Text>
+              <FontAwesome
+                name={rangeOpen ? "chevron-up" : "chevron-down"}
+                size={12}
+                color="#1f3b57"
+              />
+            </TouchableOpacity>
+
+            {rangeOpen ? (
+              <View style={styles.rangeMenu}>
+                {RANGE_OPTIONS.map((opt) => {
+                  const active = opt.value === activeRange;
+                  return (
+                    <TouchableOpacity
+                      key={opt.value}
+                      style={[styles.rangeMenuItem, active && styles.rangeMenuItemActive]}
+                      onPress={() => selectRange(opt.value)}
+                    >
+                      <Text
+                        style={[
+                          styles.rangeMenuItemText,
+                          active && styles.rangeMenuItemTextActive,
+                        ]}
+                      >
+                        {opt.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            ) : null}
+          </View>
+        </View>
+
         <View style={styles.sideInfo}>
           <Text style={styles.sideLabel}>Total Batches</Text>
           <Text style={styles.totalBatches}>{totalBatches}</Text>
@@ -152,18 +233,6 @@ export default function UserGraph({ sessions = [], summary, range, onChangeRange
             <Text style={styles.emptyText}>No saved sessions in this period.</Text>
           </View>
         )}
-
-        <View style={styles.rangeWrap}>
-          <TouchableOpacity style={[styles.rangeBtn, range === "weekly" && styles.rangeBtnActive]} onPress={() => onChangeRange?.("weekly")}>
-            <Text style={[styles.rangeText, range === "weekly" && styles.rangeTextActive]}>Weekly</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.rangeBtn, range === "monthly" && styles.rangeBtnActive]} onPress={() => onChangeRange?.("monthly")}>
-            <Text style={[styles.rangeText, range === "monthly" && styles.rangeTextActive]}>Monthly</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.rangeBtn, range === "3months" && styles.rangeBtnActive]} onPress={() => onChangeRange?.("3months")}>
-            <Text style={[styles.rangeText, range === "3months" && styles.rangeTextActive]}>Last 3 Months</Text>
-          </TouchableOpacity>
-        </View>
       </View>
     </View>
   );
@@ -181,12 +250,78 @@ const styles = StyleSheet.create({
   headerRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "center",
+    alignItems: "flex-start",
     marginBottom: 10,
+  },
+
+  titleBlock: {
+    flex: 1,
+    marginRight: 12,
   },
 
   title: {
     fontSize: 15,
+    fontWeight: "700",
+    color: "#1f3b57",
+    marginBottom: 8,
+  },
+
+  rangeDropdownWrap: {
+    alignSelf: "stretch",
+    maxWidth: 220,
+  },
+
+  rangeTrigger: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#fff",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#ddd",
+  },
+
+  rangeTriggerText: {
+    flex: 1,
+    paddingRight: 10,
+    fontSize: 13,
+    fontWeight: "600",
+    color: "#1f3b57",
+  },
+
+  rangeMenu: {
+    marginTop: 4,
+    backgroundColor: "#fff",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    overflow: "hidden",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+  },
+
+  rangeMenuItem: {
+    paddingVertical: 11,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#eee",
+  },
+
+  rangeMenuItemActive: {
+    backgroundColor: "#e8f4fc",
+  },
+
+  rangeMenuItemText: {
+    fontSize: 13,
+    color: "#334155",
+  },
+
+  rangeMenuItemTextActive: {
     fontWeight: "700",
     color: "#1f3b57",
   },
@@ -252,37 +387,5 @@ const styles = StyleSheet.create({
   noDataHint: {
     marginTop: 8,
     alignItems: "center",
-  },
-
-  rangeWrap: {
-    marginTop: 12,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    gap: 8,
-  },
-
-  rangeBtn: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: "#d1d5db",
-    borderRadius: 8,
-    paddingVertical: 6,
-    alignItems: "center",
-    backgroundColor: "#fff",
-  },
-
-  rangeBtnActive: {
-    backgroundColor: "#1f3b57",
-    borderColor: "#1f3b57",
-  },
-
-  rangeText: {
-    color: "#334155",
-    fontSize: 11,
-    fontWeight: "600",
-  },
-
-  rangeTextActive: {
-    color: "#fff",
   },
 });

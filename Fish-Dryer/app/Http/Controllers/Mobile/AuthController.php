@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use App\Models\User;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\Rule;
 
 class AuthController extends Controller
 {
@@ -182,17 +183,32 @@ class AuthController extends Controller
             ], 404);
         }
 
-        $request->validate([
-            'profile_picture' => 'nullable|image|mimes:jpg,jpeg,png|max:2048',
-            'name' => 'nullable|string|max:255',
-            'phone' => 'nullable|string|max:20',
-            'email' => 'nullable|email|max:255',
-            'birthdate' => 'nullable|date',
-            'address' => 'nullable|string|max:255',
+        $request->merge([
+            'birthdate' => $request->filled('birthdate') ? $request->input('birthdate') : null,
+            'phone' => $request->filled('phone') ? $request->input('phone') : null,
+            'address' => $request->filled('address') ? $request->input('address') : null,
         ]);
 
+        $validator = Validator::make($request->all(), [
+            'profile_picture' => 'nullable|file|image|mimes:jpg,jpeg,png|max:5120',
+            'name' => 'nullable|string|max:255',
+            'phone' => 'nullable|string|max:20',
+            'email' => ['nullable', 'email', 'max:255', Rule::unique('users', 'email')->ignore($user->id)],
+            'birthdate' => 'nullable|date',
+            'address' => 'nullable|string|max:255',
+            'remove_image' => 'nullable',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => $validator->errors()->first(),
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
         // ================= REMOVE IMAGE =================
-        if ($request->remove_image == "1") {
+        if ($request->boolean('remove_image') || $request->input('remove_image') === '1') {
 
             if ($user->profile_picture &&
                 \Storage::disk('public')->exists($user->profile_picture)) {
@@ -231,6 +247,112 @@ class AuthController extends Controller
             'success' => true,
             'user' => $user
         ]);
+    }
+
+    /**
+     * Photo-only update — JSON base64 works reliably from React Native (multipart often fails).
+     */
+    public function updateProfilePhoto(Request $request, $id)
+    {
+        $user = User::find($id);
+
+        if (!$user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'User not found',
+            ], 404);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'profile_picture' => 'nullable|file|image|mimes:jpg,jpeg,png|max:5120',
+            'profile_picture_base64' => 'nullable|string',
+            'profile_picture_ext' => 'nullable|string|in:jpg,jpeg,png',
+            'remove_image' => 'nullable',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => $validator->errors()->first(),
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        if ($request->boolean('remove_image') || $request->input('remove_image') === '1') {
+            if ($user->profile_picture &&
+                \Storage::disk('public')->exists($user->profile_picture)) {
+                \Storage::disk('public')->delete($user->profile_picture);
+            }
+            $user->profile_picture = null;
+            $user->save();
+
+            return response()->json([
+                'success' => true,
+                'user' => $user,
+            ]);
+        }
+
+        if ($request->hasFile('profile_picture')) {
+            if ($user->profile_picture &&
+                \Storage::disk('public')->exists($user->profile_picture)) {
+                \Storage::disk('public')->delete($user->profile_picture);
+            }
+
+            $path = $request->file('profile_picture')
+                ->store('profile_pictures', 'public');
+
+            $user->profile_picture = $path;
+            $user->save();
+
+            return response()->json([
+                'success' => true,
+                'user' => $user,
+            ]);
+        }
+
+        $b64 = (string) $request->input('profile_picture_base64', '');
+        if ($b64 !== '') {
+            $raw = preg_replace('#^data:image/[^;]+;base64,#i', '', trim($b64));
+            $decoded = base64_decode($raw, true);
+
+            if ($decoded === false || strlen($decoded) < 32) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Invalid image data.',
+                ], 422);
+            }
+
+            if (strlen($decoded) > 5 * 1024 * 1024) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Image is too large (max 5MB).',
+                ], 422);
+            }
+
+            if ($user->profile_picture &&
+                \Storage::disk('public')->exists($user->profile_picture)) {
+                \Storage::disk('public')->delete($user->profile_picture);
+            }
+
+            $ext = strtolower((string) $request->input('profile_picture_ext', 'jpg'));
+            $ext = $ext === 'png' ? 'png' : 'jpg';
+
+            $path = 'profile_pictures/' . uniqid('pp_', true) . '.' . $ext;
+            \Storage::disk('public')->put($path, $decoded);
+
+            $user->profile_picture = $path;
+            $user->save();
+
+            return response()->json([
+                'success' => true,
+                'user' => $user,
+            ]);
+        }
+
+        return response()->json([
+            'success' => false,
+            'message' => 'No image provided.',
+        ], 422);
     }
 
 

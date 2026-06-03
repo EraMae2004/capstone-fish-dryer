@@ -2,6 +2,7 @@ import React from "react";
 import { View, Text, StyleSheet, TextInput, TouchableOpacity, ScrollView } from "react-native";
 import { userTypography } from "@/lib/user-typography";
 import { formatDigitsAsHMS } from "@/lib/duration-format";
+import RecommendationParamsCard from "./recommendation-params-card";
 
 export default function OverviewParameters({
   fishType,
@@ -285,9 +286,10 @@ export default function OverviewParameters({
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Recommendation</Text>
 
-        <Text style={styles.recommendationText}>
-          {recommendation?.description || "No recommendation available"}
-        </Text>
+        <RecommendationParamsCard
+          recommendation={recommendation}
+          extensionMode={extensionMode}
+        />
 
         <TouchableOpacity
           style={[
@@ -472,13 +474,6 @@ const styles = StyleSheet.create({
   btnText: {
     color: "#fff",
     ...userTypography.bodyStrong,
-  },
-
-  recommendationText:{
-    textAlign:"center",
-    marginVertical:20,
-    ...userTypography.body,
-    color:"#555"
   },
 
   applyBtn:{

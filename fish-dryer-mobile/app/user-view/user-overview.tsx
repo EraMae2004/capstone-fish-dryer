@@ -11,7 +11,6 @@ import { API_BASE_URL } from "@/config/api";
 import { firebaseDb } from "@/config/firebase";
 import {
   appendHardwareNotification,
-  upsertHardwareNotification,
 } from "@/lib/hardware-notifications-store";
 import {
   digitsToMinutes,
@@ -21,6 +20,7 @@ import {
   minutesToDigits,
 } from "@/lib/duration-format";
 import { resolveMoisturePercent } from "@/lib/duration-format";
+import { formatRecommendationParams } from "@/lib/format-recommendation";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
 import {
   isMachineOnlineForUi,
@@ -64,7 +64,8 @@ function toPositiveId(value: unknown): number | null {
 
 /** Recompute RTDB staleness every second so offline appears soon after the ESP stops. */
 const PRESENCE_UI_TICK_MS = 500;
-const PROBLEM_NOTIFY_INTERVAL_MS = 60_000;
+/** Same problem may fire again only after this gap; each fire creates a new list row. */
+const PROBLEM_NOTIFY_INTERVAL_MS = 120_000;
 
 /** Survives Overview unmount (notifications screen) so open/close does not spam alerts. */
 const problemNotifyLastMsByKey: Record<string, number> = {};
@@ -412,7 +413,7 @@ export default function UserOverview({
   const getUsedDryingMinutes = (): number =>
     Math.floor(getUsedDryingSeconds() / 60);
 
-  const notifyProblemEveryMinute = (
+  const notifyProblemOnInterval = (
     key: string,
     type: "warning" | "critical",
     title: string,
@@ -426,8 +427,8 @@ export default function UserOverview({
     const last = problemNotifyLastMsByKey[throttleKey] ?? 0;
     if (now - last < PROBLEM_NOTIFY_INTERVAL_MS) return;
     problemNotifyLastMsByKey[throttleKey] = now;
-    void upsertHardwareNotification({
-      id: throttleKey,
+    void appendHardwareNotification({
+      id: `${throttleKey}:${now}`,
       type,
       title,
       desc,
@@ -972,18 +973,6 @@ export default function UserOverview({
   const stopMachine = () => {
     void postSessionControl("stop");
   };
-  const buildRecommendationSummary = (
-    rec: { temperature?: unknown; fan_speed?: unknown; extension_minutes?: unknown; duration_minutes?: unknown },
-    forExtension: boolean
-  ) => {
-    const tt = rec.temperature ?? "—";
-    const fs = rec.fan_speed ?? "—";
-    const mins = forExtension ? rec.extension_minutes : rec.duration_minutes;
-    const dm = Number(mins);
-    const timeStr = Number.isFinite(dm) && dm >= 1 ? formatMinutesAsHMS(dm) : "—";
-    return `${tt}°C, fan level ${fs}, ${forExtension ? "extend by " : "drying time "}${timeStr}`;
-  };
-
   const executeApplyRecommendation = async () => {
     if (!recommendation) return;
 
@@ -1035,19 +1024,14 @@ export default function UserOverview({
     const continueDrying =
       (st === "running" || st === "paused") && (needsExtension || atZero);
     if (recommendation.temperature == null || recommendation.fan_speed == null) {
-      Alert.alert(
-        "No recommendation",
-        recommendation.description?.trim() || "No recommendation available."
-      );
+      Alert.alert("No recommendation", "No recommendation available.");
       return;
     }
 
-    const summary = buildRecommendationSummary(recommendation, continueDrying);
-    const detail =
-      recommendation.description?.trim() ||
-      (continueDrying
-        ? `Apply ${summary} and resume drying?`
-        : `Apply ${summary} to the control panel?`);
+    const paramsText = formatRecommendationParams(recommendation, continueDrying);
+    const detail = continueDrying
+      ? `Apply these settings and resume drying?\n\n${paramsText}`
+      : `Apply these settings to the control panel?\n\n${paramsText}`;
 
     if (continueDrying) {
       Alert.alert("Continue drying?", detail, [
@@ -1219,7 +1203,7 @@ export default function UserOverview({
       if (alertType) {
         const meta = SENSOR_ALERT_META[key]?.[alertType];
         if (meta) {
-          notifyProblemEveryMinute(`hw:${key}:${alertType}`, alertType, meta.title, meta.desc, key);
+          notifyProblemOnInterval(`hw:${key}:${alertType}`, alertType, meta.title, meta.desc, key);
         }
       } else if (isGoodSensorStatus(st)) {
         delete problemNotifyLastMsByKey[`hw:${key}:warning:${mcId}`];
@@ -1237,7 +1221,7 @@ export default function UserOverview({
     const runningMin = (Date.now() - startedMs) / 60000;
 
     if (runningMin >= 30 && current < target - 0.5) {
-      notifyProblemEveryMinute(
+      notifyProblemOnInterval(
         "temp-below-target",
         "warning",
         "Target temperature not reached",
@@ -1246,7 +1230,7 @@ export default function UserOverview({
       );
     }
     if (current > target + 0.5) {
-      notifyProblemEveryMinute(
+      notifyProblemOnInterval(
         "temp-above-target",
         "warning",
         "Temperature exceeded target",

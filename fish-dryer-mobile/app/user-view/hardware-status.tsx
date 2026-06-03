@@ -24,8 +24,10 @@ import {
   computeStableOnlineByMachineId,
   hardwareStatusBelongsToMachine,
   ingestRtdbHardwareSnapshot,
+  isMachineDetectable,
   isMachineLive,
   isMachineOnlineForUi,
+  isRtdbPayloadFresh,
   normalizeHardwareMacKey,
   recordMachineRtdbDelivery,
 } from "@/lib/machine-presence";
@@ -883,8 +885,6 @@ export default function HardwareStatus() {
     const runId = Date.now();
     activeTestRunRef.current = runId;
     testDismissedRef.current = false;
-    const deferModalUntilEnd = opts?.deferModalUntilEnd === true;
-
     onStart();
     const endAt = Date.now() + durationMs;
 
@@ -904,9 +904,23 @@ export default function HardwareStatus() {
       if (activeTestRunRef.current !== runId || testDismissedRef.current) return;
       const snapshot = await fetchLatestSnapshot(machineId);
       if (activeTestRunRef.current !== runId || testDismissedRef.current) return;
-      if (!snapshot) return;
-      const results = keys.map((k) => buildDiagnostic(k, snapshot));
-      applyDiagnosticData(results, snapshot.updatedAtMs);
+      const results = snapshot
+        ? keys.map((k) => buildDiagnostic(k, snapshot))
+        : keys.map((k) => ({
+            key: k,
+            label:
+              k === "esp32"
+                ? "ESP32"
+                : k === "dht22"
+                  ? "DHT22"
+                  : k === "moisture_sensor"
+                    ? "Moisture Sensor"
+                    : "Door Sensor",
+            ok: false,
+            headline: "Waiting for data…",
+            details: "Listening for a fresh hardware heartbeat from the board.",
+          }));
+      applyDiagnosticData(results, snapshot?.updatedAtMs ?? null);
       if (openAfterUpdate && !testDismissedRef.current) {
         setDiagModalOpen(true);
       }
@@ -914,7 +928,6 @@ export default function HardwareStatus() {
 
     const finishTest = async () => {
       if (activeTestRunRef.current !== runId) return;
-      activeTestRunRef.current = null;
       stopTestPolling();
       if (firebaseDb) {
         void clearHardwareTestCommand(firebaseDb, machineId).catch(() => {});
@@ -922,13 +935,13 @@ export default function HardwareStatus() {
       if (!testDismissedRef.current) {
         await refreshModal(true);
       }
+      activeTestRunRef.current = null;
       onEnd();
     };
 
     try {
-      if (!deferModalUntilEnd) {
-        await refreshModal(true);
-      }
+      setDiagModalOpen(true);
+      await refreshModal(true);
       stopTestPolling();
       testPollRef.current = setInterval(() => {
         void refreshModal(false);
@@ -972,8 +985,7 @@ export default function HardwareStatus() {
       "Test All (10s)",
       HARDWARE_TEST_ALL_MS,
       () => setTestingAll(true),
-      () => setTestingAll(false),
-      { deferModalUntilEnd: true }
+      () => setTestingAll(false)
     );
   };
 
@@ -1075,9 +1087,14 @@ export default function HardwareStatus() {
             if (assigned || (Number.isFinite(mcId) && mcId > 0)) continue;
             const disc = ingestRtdbHardwareSnapshot(obj.updated_at);
             if (!disc.acceptDelivery || disc.payloadMs == null) continue;
+            if (!isRtdbPayloadFresh(disc.payloadMs)) continue;
             const id = String(obj.microcontroller_id ?? obj.id ?? "0");
             const macFromNode = String(obj.mac ?? "");
             const mac = macFromNode || macSafe.match(/.{1,2}/g)?.join(":") || "";
+            const macKey = normalizeHardwareMacKey(mac);
+            if (macKey && machinesRef.current.some((m) => normalizeHardwareMacKey(m.mac) === macKey)) {
+              continue;
+            }
             const dev = String(obj.device_id ?? obj.name ?? mac);
             const name = String(obj.name ?? obj.device_id ?? `Board ${mac || id}`);
             upsert({
@@ -1109,38 +1126,23 @@ export default function HardwareStatus() {
             if (!hw) continue;
             const snapIng = ingestRtdbHardwareSnapshot(hw.updated_at);
             if (!snapIng.acceptDelivery || snapIng.payloadMs == null) continue;
-            const pathId = Number(rawId);
+            if (!isRtdbPayloadFresh(snapIng.payloadMs)) continue;
             const hwMacRaw = String(hw.mac ?? obj.mac ?? "").trim();
             const hwMacKey = normalizeHardwareMacKey(hwMacRaw);
-            const hwMcId = Number(hw.microcontroller_id);
-            const registered =
-              Number.isFinite(pathId) &&
-              hwMacKey != null &&
-              known.some(
-                (m) => m.id === pathId && normalizeHardwareMacKey(m.mac) === hwMacKey
-              );
-            const claimedOnPath =
-              registered && Number.isFinite(hwMcId) && hwMcId === pathId;
-            if (claimedOnPath) {
-              upsert({
-                id: String(pathId),
-                name: String(obj.name ?? hw.name ?? `Machine ${rawId}`),
-                device_id: String(obj.device_id ?? hw.device_id ?? "") || undefined,
-                mac: hwMacRaw || undefined,
-                last_seen: new Date(snapIng.payloadMs).toISOString(),
-                status: "online",
-              });
-            } else if (hwMacKey) {
-              // Physical board not linked to this path id — treat as new hardware by MAC.
-              upsert({
-                id: hwMacKey,
-                name: String(hw.name ?? obj.name ?? `Board ${hwMacKey.slice(-4)}`),
-                device_id: String(hw.device_id ?? obj.device_id ?? hwMacRaw) || undefined,
-                mac: hwMacRaw || macWithColonsFromKey(hwMacKey),
-                last_seen: new Date(snapIng.payloadMs).toISOString(),
-                status: "online",
-              });
-            }
+            if (!hwMacKey) continue;
+            const alreadyOwned = known.some(
+              (m) => normalizeHardwareMacKey(m.mac) === hwMacKey
+            );
+            if (alreadyOwned) continue;
+            // Unassigned board publishing hardware_status — offer for add-by-MAC only.
+            upsert({
+              id: hwMacKey,
+              name: String(hw.name ?? obj.name ?? `Board ${hwMacKey.slice(-4)}`),
+              device_id: String(hw.device_id ?? obj.device_id ?? hwMacRaw) || undefined,
+              mac: hwMacRaw || macWithColonsFromKey(hwMacKey),
+              last_seen: new Date(snapIng.payloadMs).toISOString(),
+              status: "online",
+            });
           }
         }
       } catch (e) {
@@ -1168,7 +1170,7 @@ export default function HardwareStatus() {
           last_seen: d.last_seen ?? null,
           status: machineStatusFromApi(d.status ?? (d.recent ? "online" : "offline")),
         };
-        if (isMachineLive({ last_seen: row.last_seen, status: row.status })) {
+        if (d.recent === true && isMachineDetectable({ last_seen: row.last_seen, status: row.status })) {
           upsert(row);
         }
       });
@@ -1176,7 +1178,9 @@ export default function HardwareStatus() {
       console.log("/machines/detect failed (ignored):", e);
     }
 
-    return Array.from(merged.values());
+    return Array.from(merged.values()).filter((row) =>
+      isMachineDetectable({ last_seen: row.last_seen, status: row.status })
+    );
   };
 
   /** Refresh machine names from API; online/offline comes from Firebase when configured. */

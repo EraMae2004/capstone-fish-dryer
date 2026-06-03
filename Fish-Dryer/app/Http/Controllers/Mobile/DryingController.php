@@ -962,7 +962,8 @@ class DryingController extends Controller
         $startDate = match ($range) {
             'weekly' => $now->copy()->subDays(7),
             'monthly' => $now->copy()->subMonth(),
-            default => $now->copy()->subMonths(3),
+            '3months' => $now->copy()->subMonths(3),
+            default => null,
         };
 
         $machineFilter = $request->query('microcontroller_id', $request->query('machine_id'));
@@ -972,11 +973,13 @@ class DryingController extends Controller
                 $query->where('microcontroller_id', (int) $machineFilter);
             })
             ->whereIn('status', ['completed', 'stopped'])
-            ->where(function ($query) use ($startDate) {
-                $query->whereNotNull('ended_at')->where('ended_at', '>=', $startDate)
-                    ->orWhere(function ($sub) use ($startDate) {
-                        $sub->whereNull('ended_at')->where('created_at', '>=', $startDate);
-                    });
+            ->when($startDate !== null, function ($query) use ($startDate) {
+                $query->where(function ($sub) use ($startDate) {
+                    $sub->whereNotNull('ended_at')->where('ended_at', '>=', $startDate)
+                        ->orWhere(function ($inner) use ($startDate) {
+                            $inner->whereNull('ended_at')->where('created_at', '>=', $startDate);
+                        });
+                });
             })
             ->with(['sensorLogs:id,drying_session_id,temperature,humidity,moisture,fan_speed,recorded_at'])
             ->latest('ended_at')
@@ -1437,6 +1440,8 @@ class DryingController extends Controller
             ->values();
 
         $recommendedTemperature = round((float) $nearest->avg('avg_temperature'), 1);
+        $recommendedHumidity = round((float) $nearest->avg('avg_humidity'), 1);
+        $recommendedMoisture = round((float) $nearest->avg('avg_moisture'), 1);
         $recommendedFanSpeed = (int) max(1, min(3, round((float) $nearest->avg('avg_fan_speed'))));
         $recommendedDuration = (int) max(1, round((float) $nearest->avg('duration_minutes')));
         $elapsedMinutes = (int) (
@@ -1455,16 +1460,11 @@ class DryingController extends Controller
             'needs_extension' => $needsExtension,
             'recommendation' => [
                 'temperature' => $recommendedTemperature,
+                'humidity' => $recommendedHumidity,
+                'moisture' => $recommendedMoisture,
                 'fan_speed' => $recommendedFanSpeed,
                 'duration_minutes' => $recommendedDuration,
                 'extension_minutes' => $extensionMinutes,
-                'description' => $needsExtension
-                    ? "Drying time is up. Suggested extension: {$extensionMinutes} minute(s) with the settings below."
-                    : (
-                        $successful->isNotEmpty()
-                            ? 'Suggested temperature, fan speed, and drying time based on similar successful dries.'
-                            : 'Suggested settings based on your previous drying sessions.'
-                    ),
             ],
         ]);
     }
