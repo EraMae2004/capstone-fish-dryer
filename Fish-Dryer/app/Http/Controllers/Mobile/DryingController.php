@@ -79,6 +79,14 @@ class DryingController extends Controller
                 default => $st,
             };
 
+            $firebase->setMachineCommand($microcontrollerId, [
+                'action' => $command,
+                'fan_speed' => $fs,
+                'target_temperature' => $tt,
+                'seq' => (int) round(microtime(true) * 1000),
+                'updated_at' => now()->toIso8601String(),
+            ]);
+
             $firebase->setMachineSession($microcontrollerId, [
                 'command' => $command,
                 'status' => $st,
@@ -86,14 +94,6 @@ class DryingController extends Controller
                 'fan_speed' => $fs,
                 'fault_buzzer_armed' => $running,
                 'session_active' => $running,
-                'updated_at' => now()->toIso8601String(),
-            ]);
-
-            $firebase->setMachineCommand($microcontrollerId, [
-                'action' => $command,
-                'fan_speed' => $fs,
-                'target_temperature' => $tt,
-                'seq' => (int) round(microtime(true) * 1000),
                 'updated_at' => now()->toIso8601String(),
             ]);
 

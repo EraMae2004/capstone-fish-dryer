@@ -237,6 +237,10 @@ export default function HardwareStatus() {
   const [testingAll, setTestingAll] = useState(false);
   const [testingComponent, setTestingComponent] = useState<string | null>(null);
   const testPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** User closed the diagnostic modal — do not reopen until the next test starts. */
+  const testDismissedRef = useRef(false);
+  /** Guards async refreshModal from a previous or cancelled test run. */
+  const activeTestRunRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
@@ -846,13 +850,27 @@ export default function HardwareStatus() {
     }
   };
 
+  const closeDiagnosticModal = useCallback(() => {
+    testDismissedRef.current = true;
+    activeTestRunRef.current = null;
+    setDiagModalOpen(false);
+    stopTestPolling();
+    setTestingAll(false);
+    setTestingComponent(null);
+    const mid = selectedMachineIdRef.current;
+    if (mid != null && firebaseDb) {
+      void clearHardwareTestCommand(firebaseDb, mid).catch(() => {});
+    }
+  }, []);
+
   const runLiveSensorTest = async (
     machineId: number,
     keys: SensorDiagnostic["key"][],
     title: string,
     durationMs: number,
     onStart: () => void,
-    onEnd: () => void
+    onEnd: () => void,
+    opts?: { deferModalUntilEnd?: boolean }
   ) => {
     if (!firebaseDb) {
       Alert.alert(
@@ -862,41 +880,65 @@ export default function HardwareStatus() {
       return;
     }
 
+    const runId = Date.now();
+    activeTestRunRef.current = runId;
+    testDismissedRef.current = false;
+    const deferModalUntilEnd = opts?.deferModalUntilEnd === true;
+
     onStart();
     const endAt = Date.now() + durationMs;
 
-    const refreshModal = async () => {
-      const snapshot = await fetchLatestSnapshot(machineId);
-      if (!snapshot) return;
-      const results = keys.map((k) => buildDiagnostic(k, snapshot));
+    const applyDiagnosticData = (
+      results: SensorDiagnostic[],
+      updatedAtMs: number | null
+    ) => {
+      if (activeTestRunRef.current !== runId || testDismissedRef.current) return;
       setDiagModalTitle(title);
       setDiagModalResults(results);
       setDiagModalAgeSec(
-        snapshot.updatedAtMs ? Math.round((Date.now() - snapshot.updatedAtMs) / 1000) : null
+        updatedAtMs != null ? Math.round((Date.now() - updatedAtMs) / 1000) : null
       );
-      setDiagModalOpen(true);
     };
 
-    const finishTest = () => {
+    const refreshModal = async (openAfterUpdate: boolean) => {
+      if (activeTestRunRef.current !== runId || testDismissedRef.current) return;
+      const snapshot = await fetchLatestSnapshot(machineId);
+      if (activeTestRunRef.current !== runId || testDismissedRef.current) return;
+      if (!snapshot) return;
+      const results = keys.map((k) => buildDiagnostic(k, snapshot));
+      applyDiagnosticData(results, snapshot.updatedAtMs);
+      if (openAfterUpdate && !testDismissedRef.current) {
+        setDiagModalOpen(true);
+      }
+    };
+
+    const finishTest = async () => {
+      if (activeTestRunRef.current !== runId) return;
+      activeTestRunRef.current = null;
       stopTestPolling();
       if (firebaseDb) {
         void clearHardwareTestCommand(firebaseDb, machineId).catch(() => {});
+      }
+      if (!testDismissedRef.current) {
+        await refreshModal(true);
       }
       onEnd();
     };
 
     try {
-      await refreshModal();
+      if (!deferModalUntilEnd) {
+        await refreshModal(true);
+      }
       stopTestPolling();
       testPollRef.current = setInterval(() => {
-        void refreshModal();
+        void refreshModal(false);
         if (Date.now() >= endAt) {
-          finishTest();
+          void finishTest();
         }
       }, 1000);
     } catch (e) {
       console.log(e);
-      finishTest();
+      await finishTest();
       Alert.alert("Test failed", e instanceof Error ? e.message : "Request failed.");
     }
   };
@@ -930,7 +972,8 @@ export default function HardwareStatus() {
       "Test All (10s)",
       HARDWARE_TEST_ALL_MS,
       () => setTestingAll(true),
-      () => setTestingAll(false)
+      () => setTestingAll(false),
+      { deferModalUntilEnd: true }
     );
   };
 
@@ -1436,7 +1479,7 @@ export default function HardwareStatus() {
         results={diagModalResults}
         ageSec={diagModalAgeSec}
         machineName={selectedMachine?.name ?? null}
-        onClose={() => setDiagModalOpen(false)}
+        onClose={closeDiagnosticModal}
       />
     </SafeAreaView>
   );

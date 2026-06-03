@@ -503,11 +503,12 @@ export default function UserOverview({
           payload.command = "pause";
           payload.session_active = false;
         }
-        await dbSet(dbRef(firebaseDb, `machines/${microcontrollerId}/session`), payload);
+        // Command first so ESP sees start/stop before session status changes.
         await dbSet(
           dbRef(firebaseDb, `machines/${microcontrollerId}/command`),
           commandPayload
         );
+        await dbSet(dbRef(firebaseDb, `machines/${microcontrollerId}/session`), payload);
       } catch (e) {
         console.log("session RTDB write:", e);
       }

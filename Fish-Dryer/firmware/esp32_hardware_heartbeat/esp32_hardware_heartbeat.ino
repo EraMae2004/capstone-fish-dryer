@@ -91,7 +91,7 @@
       static int           gTestFanLevel = 3;
       static const unsigned long ASSIGNMENT_POLL_UNASSIGNED_MS = 1000UL;
       static const unsigned long ASSIGNMENT_POLL_ASSIGNED_MS = 10000UL;
-      static const unsigned long SESSION_POLL_MS = 1500UL;
+      static const unsigned long SESSION_POLL_MS = 500UL;
       static const unsigned long TEST_COMMAND_POLL_MS = 750UL;
       static const unsigned long RTDB_GET_TIMEOUT_MS = 2500UL;
       static const unsigned long RTDB_GET_CONNECT_TIMEOUT_MS = 1500UL;
@@ -168,7 +168,7 @@
       #define PIN_DHT22        4
       #define PIN_MOISTURE    35
       #define PIN_DOOR        16    // NOT GPIO15 (strapping — crashes when reed open)
-      #define PIN_FAN         23    // NOT GPIO5 (strapping — crashes with relay)
+      #define PIN_FAN         23
       #define PIN_HEATER1     19    // SSR DC+ (single heater)
       #define PIN_HEATER2     18    // leave UNWIRED unless you add a 2nd SSR
       #define PIN_BUZZER      27
@@ -190,14 +190,18 @@
       #define LED_YELLOW       PIN_LED_YELLOW
       #define LED_RED          PIN_LED_RED
 
-      // Fan relay IN: most blue boards = ACTIVE_LOW (LOW=ON, HIGH=OFF). If fan runs when
-      // Serial says OFF, set FAN_RELAY_ACTIVE_LOW to 0. Unplugging IN from ESP does NOT
+      // Fan relay IN: this board = ACTIVE_HIGH (HIGH=ON, LOW=OFF). If fan runs when
+      // session is stopped, set FAN_RELAY_ACTIVE_LOW to 1. Unplugging IN from ESP does NOT
       // turn the fan off — a floating IN often keeps the relay ON (hardware, not firmware).
       #ifndef RELAY_ACTIVE_LOW
       #define RELAY_ACTIVE_LOW 1
       #endif
       #ifndef FAN_RELAY_ACTIVE_LOW
-      #define FAN_RELAY_ACTIVE_LOW RELAY_ACTIVE_LOW
+      #define FAN_RELAY_ACTIVE_LOW 0
+      #endif
+      /** OFF→ON gap so the blue relay opto sees an edge (fixes "wiggle IN wire" on start). */
+      #ifndef FAN_RELAY_WAKE_MS
+      #define FAN_RELAY_WAKE_MS 8
       #endif
       // Heaters on SSR-60DA: HIGH = ON. If heaters use blue relays like fan, set to 0.
       #ifndef HEATER_CONTROL_IS_SSR
@@ -248,6 +252,10 @@
       static bool gBuzzerPinLevel = false;
 
       static bool sessionAllowsActuators();
+      static bool dryingSessionOutputsActive();
+      static bool intendedHeaterOnForSession(bool dhtOk, float airC);
+      static bool parseJsonBoolAfterKey(const String& body, const char* key, bool defV);
+      static void beginDryingOutputs(bool chirp);
       static int findMachineIdForMacInMachinesJson();
       static int effectiveSessionMachineId();
       static bool rtdbPutJson(const String& pathNoJsonSuffix, const String& jsonBody);
@@ -331,10 +339,33 @@
         digitalWrite(pin, relayPinLevel(coilEnergized));
       }
 
-      /** Blue mechanical relay (fan): NO wiring. */
+      /** Last commanded fan coil state (not GPIO read — initLoadPins must stay in sync). */
+      static bool sFanRelayCoilCommandedOn = false;
+
+      /** Blue mechanical relay (fan): NO wiring. Pulse OFF before ON when energizing. */
       static inline void driveFanLoad(bool on) {
         pinMode(RELAY_FAN, OUTPUT);
-        digitalWrite(RELAY_FAN, relayPinLevelFor(on, FAN_RELAY_ACTIVE_LOW != 0));
+        const int levelOff = relayPinLevelFor(false, FAN_RELAY_ACTIVE_LOW != 0);
+        const int levelOn  = relayPinLevelFor(true, FAN_RELAY_ACTIVE_LOW != 0);
+        if (on) {
+          if (!sFanRelayCoilCommandedOn) {
+            digitalWrite(RELAY_FAN, levelOff);
+            delay((unsigned long)FAN_RELAY_WAKE_MS);
+            digitalWrite(RELAY_FAN, levelOn);
+            sFanRelayCoilCommandedOn = true;
+          } else {
+            digitalWrite(RELAY_FAN, levelOn);
+          }
+        } else {
+          digitalWrite(RELAY_FAN, levelOff);
+          sFanRelayCoilCommandedOn = false;
+        }
+      }
+
+      /** Force a relay click on drying start (after buzzer / stale tracking). */
+      static inline void forceFanRelayWakeOn() {
+        sFanRelayCoilCommandedOn = false;
+        driveFanLoad(true);
       }
 
       /** SSR-60DA (heaters): terminals 1–2 = GPIO + GND; 3–4 = AC/DC load. HIGH = ON. */
@@ -363,7 +394,7 @@
       #endif
       }
 
-      /** RTDB `outputs` — session intent, not GPIO sampled mid-heartbeat. */
+      /** RTDB `outputs` — report session intent (fan on while running; heat when below target). */
       static void appendOutputsTelemetry(String& root, bool dhtOk, float airC) {
         bool fanRep = false;
         bool h1Rep = false;
@@ -373,9 +404,9 @@
           h1Rep = heaterLoadIsOn(RELAY_HEATER1);
           h2Rep = heaterLoadIsOn(RELAY_HEATER2);
         } else if (dryingSessionOutputsActive()) {
-          fanRep = fanLoadIsOn();
-          h1Rep = heaterLoadIsOn(RELAY_HEATER1);
-          h2Rep = heaterLoadIsOn(RELAY_HEATER2);
+          fanRep = true;
+          h1Rep = intendedHeaterOnForSession(dhtOk, airC);
+          h2Rep = h1Rep;
         }
         root += "\"fan_on\":"; root += fanRep ? "true" : "false";
         root += ",\"heater1_on\":"; root += h1Rep ? "true" : "false";
@@ -386,7 +417,7 @@
         root += ",\"buzzer_on\":"; root += gBuzzerTonePlaying ? "true" : "false";
       }
 
-      /** Boot bench test: you should hear/feel one relay click if VCC=5V and IN on GPIO5. */
+      /** Boot bench test: you should hear/feel one relay click if VCC=5V and IN on GPIO23. */
       static void relayBootClickTest() {
       #if RELAY_BOOT_CLICK_MS > 0
         Serial.println("[relay] boot click test — should hear relay CLICK once");
@@ -822,6 +853,18 @@
         return NAN;
       }
 
+      /** Heater demand while drying (matches serviceHeatersForSession). */
+      static bool intendedHeaterOnForSession(bool dhtOk, float airC) {
+        if (!dryingSessionOutputsActive()) {
+          return false;
+        }
+        const float t = airCToUseForHeater(dhtOk, airC);
+        if (isnan(t) || gSessionTargetC <= 1.0f) {
+          return false;
+        }
+        return t < (gSessionTargetC - TEMP_TARGET_MARGIN_C);
+      }
+
       static bool dryingSessionRunning() {
         return sessionStatusIsRunning();
       }
@@ -968,8 +1011,7 @@
 
       /** Force fan + heater control pins to OFF before WiFi / session logic. */
       static void initLoadPinsForcedOff() {
-        pinMode(RELAY_FAN, OUTPUT);
-        digitalWrite(RELAY_FAN, relayPinLevelFor(false, FAN_RELAY_ACTIVE_LOW != 0));
+        driveFanLoad(false);
         pinMode(RELAY_HEATER1, OUTPUT);
         pinMode(RELAY_HEATER2, OUTPUT);
         digitalWrite(RELAY_HEATER1, LOW);
@@ -1020,6 +1062,7 @@
         if (gSessionTargetC <= 1.0f) {
           gSessionTargetC = 60.0f;
         }
+        forceFanRelayWakeOn();
         {
           const bool dhtOkNow = pollDhtIfDue();
           applyDryingSessionLoads(dhtOkNow, cachedDhtT);
@@ -1029,6 +1072,8 @@
         #if BUZZER_DRYING_START_CHIRP_MS > 0
           Serial.println("[buzzer] drying-start");
           buzzerChirpLoudBlocking((unsigned long)BUZZER_DRYING_START_CHIRP_MS);
+          forceFanRelayWakeOn();
+          applyDryingSessionLoads(pollDhtIfDue(), cachedDhtT);
         #endif
         }
         logActuatorState("drying-on");
@@ -1614,7 +1659,6 @@
         gNullSessionPollStreak = 0;
         gDrySessionLatched = false;
         gDryingSessionStartMs = 0;
-        gLastCommandSeq = 0;
         disengageBuzzerAlarm();
         pauseLocalHardwareTestOnly();
         initLoadPinsForcedOff();
@@ -1816,14 +1860,27 @@
         }
 
         if (status == "running" || command == "start") {
+          const bool sessionStartIntent =
+              (command == "start") ||
+              parseJsonBoolAfterKey(body, "session_active", false);
           if (!gDryRunAuthorized) {
-            Serial.println(
-                "[session] stale RTDB running — OFF (tap Start in app)");
-            forceIdleSessionState();
-            publishSessionStoppedToCloud(mid);
-            return;
+            if (sessionStartIntent) {
+              Serial.println("[session] RTDB running — authorize fan/heaters");
+              beginDryingOutputs(false);
+            } else if (millis() < gIgnoreStaleRunningUntilMs) {
+              initLoadPinsForcedOff();
+              return;
+            } else {
+              Serial.println(
+                  "[session] stale RTDB running — OFF (tap Start in app)");
+              forceIdleSessionState();
+              publishSessionStoppedToCloud(mid);
+              return;
+            }
           }
           if (!sessionStatusIsRunning()) {
+            gSessionStatus = "running";
+            gSessionActiveFlag = true;
             gDryingSessionStartMs = millis();
           }
           applyDryingSessionLoads(pollDhtIfDue(), cachedDhtT);
@@ -2739,8 +2796,11 @@
       #endif
         applySessionLedsOnly();
         commitLoadRelays(dhtOk, cachedDhtT);
-        if (!gDryRunAuthorized || !sessionStatusIsRunning()) {
-          initLoadPinsForcedOff();
+        if (!dryingSessionOutputsActive()) {
+          if (sFanRelayCoilCommandedOn ||
+              heaterLoadIsOn(RELAY_HEATER1) || heaterLoadIsOn(RELAY_HEATER2)) {
+            initLoadPinsForcedOff();
+          }
         }
       #if ENABLE_RTDB_HARDWARE_TEST
         if (!gDryingOutputsLatched) {
