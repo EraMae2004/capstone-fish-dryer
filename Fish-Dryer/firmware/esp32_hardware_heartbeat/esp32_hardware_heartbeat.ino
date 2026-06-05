@@ -111,7 +111,7 @@
       // Must match fish-dryer-mobile/app.json -> expo.extra.apiBaseUrl (same IP, ends with /api).
       const char* API_URL = "http://10.38.125.15:8000/api/hardware/esp32/status";
 
-      static const char* FIRMWARE_BUILD_TAG = "fan-wake-pulse-v57";
+      static const char* FIRMWARE_BUILD_TAG = "fan-gpio22-v61";
 
       // Laravel heartbeat: keeps `last_seen` + hardware rows in MySQL and mirrors RTDB when enabled.
       // Set to 0 only while debugging (e.g. API returns 500). If the app shows "offline" but RTDB
@@ -165,7 +165,7 @@
       //   LED yellow: GPIO33→220Ω→LED+  LED−→GND
       //   LED red: GPIO13→220Ω→LED+  LED−→GND
       //   Buzzer +: GPIO27→220Ω→+  Buzzer −→GND
-      //   Fan relay: VCC→5V  GND→GND  IN→GPIO23  JD-VCC jumper ON
+      //   Fan relay: VCC→5V  GND→GND  IN→GPIO22  JD-VCC jumper ON
       //              COM→switching PSU +  NO→fan red  fan black→PSU −
       //   SSR-60 DA heater (ONE SSR):
       //     AC OUTPUT terminals 1–2: 1→plug LIVE  2→heater wire
@@ -176,7 +176,7 @@
       #define PIN_DHT22        4
       #define PIN_MOISTURE    35
       #define PIN_DOOR        16    // NOT GPIO15 (strapping — crashes when reed open)
-      #define PIN_FAN         23
+      #define PIN_FAN         22
       #define PIN_HEATER1     19    // SSR DC+ (single heater)
       #define PIN_HEATER2     18    // leave UNWIRED unless you add a 2nd SSR
       #define PIN_BUZZER      27
@@ -198,18 +198,20 @@
       #define LED_YELLOW       PIN_LED_YELLOW
       #define LED_RED          PIN_LED_RED
 
-      // Fan relay IN: this board = ACTIVE_HIGH (HIGH=ON, LOW=OFF). If fan runs when
-      // session is stopped, set FAN_RELAY_ACTIVE_LOW to 1. Unplugging IN from ESP does NOT
-      // turn the fan off — a floating IN often keeps the relay ON (hardware, not firmware).
+      // Fan relay IN on GPIO22: HIGH = ON while drying, LOW = OFF when stopped/paused.
       #ifndef RELAY_ACTIVE_LOW
       #define RELAY_ACTIVE_LOW 1
       #endif
       #ifndef FAN_RELAY_ACTIVE_LOW
       #define FAN_RELAY_ACTIVE_LOW 0
       #endif
-      /** OFF→ON gap so the blue relay opto sees an edge (fixes "wiggle IN wire" on start). */
-      #ifndef FAN_RELAY_WAKE_MS
-      #define FAN_RELAY_WAKE_MS 60
+      /** Float IN like unplugging jumper (ms). */
+      #ifndef FAN_RELAY_FLOAT_MS
+      #define FAN_RELAY_FLOAT_MS 250
+      #endif
+      /** Hold ON after reconnect (ms) so relay latches. */
+      #ifndef FAN_RELAY_HOLD_MS
+      #define FAN_RELAY_HOLD_MS 400
       #endif
       // Heaters on SSR-60DA. If heaters use blue relays like fan, set HEATER_CONTROL_IS_SSR to 0.
       #ifndef HEATER_CONTROL_IS_SSR
@@ -369,30 +371,65 @@
 
       /** Last commanded fan coil state (not GPIO read — initLoadPins must stay in sync). */
       static bool sFanRelayCoilCommandedOn = false;
-      /** Mechanical relay needs OFF→ON edge after every idle period. */
+      /** Mechanical relay needs reconnect edge after every idle period. */
       static bool sFanNeedWakePulse = true;
+      static bool sFanSessionOutputsWereActive = false;
       /** Last commanded heater state (open-drain sink mode cannot rely on digitalRead). */
       static bool sHeaterCommandedOn = false;
       static bool sHeaterSinkOdReady = false;
 
-      /** Blue mechanical relay (fan): pulse OFF before ON so the coil always clicks. */
+      /** Levels for fan relay IN (separate from heater SSR polarity). */
+      static inline int fanRelayLevelOff() {
+        return relayPinLevelFor(false, FAN_RELAY_ACTIVE_LOW != 0);
+      }
+      static inline int fanRelayLevelOn() {
+        return relayPinLevelFor(true, FAN_RELAY_ACTIVE_LOW != 0);
+      }
+
+      /**
+       * Mimics unplugging GPIO22 (true hi-z), then plugging back in at HIGH.
+       * Wiggling the IN wire works because of float→connected, not LOW→HIGH.
+       */
+      static void fanRelayHardKick() {
+        const int levelOn = fanRelayLevelOn();
+      #if defined(ESP32)
+        gpio_reset_pin((gpio_num_t)RELAY_FAN);
+        gpio_set_pull_mode((gpio_num_t)RELAY_FAN, GPIO_FLOATING);
+        gpio_set_direction((gpio_num_t)RELAY_FAN, GPIO_MODE_INPUT);
+        delay((unsigned long)FAN_RELAY_FLOAT_MS);
+        gpio_set_direction((gpio_num_t)RELAY_FAN, GPIO_MODE_OUTPUT);
+        gpio_set_drive_capability((gpio_num_t)RELAY_FAN, GPIO_DRIVE_CAP_3);
+        digitalWrite(RELAY_FAN, levelOn);
+      #else
+        pinMode(RELAY_FAN, INPUT);
+        delay((unsigned long)FAN_RELAY_FLOAT_MS);
+        pinMode(RELAY_FAN, OUTPUT);
+        digitalWrite(RELAY_FAN, levelOn);
+      #endif
+        delay((unsigned long)FAN_RELAY_HOLD_MS);
+        sFanRelayCoilCommandedOn = true;
+        sFanNeedWakePulse = false;
+        Serial.print("[fan] reconnect-kick GPIO");
+        Serial.print(RELAY_FAN);
+        Serial.print(" level=");
+        Serial.println(levelOn);
+      }
+
+      /** Steady fan drive (no float) — use after hard kick. */
       static inline void driveFanLoad(bool on) {
         pinMode(RELAY_FAN, OUTPUT);
       #if defined(ESP32)
         gpio_set_drive_capability((gpio_num_t)RELAY_FAN, GPIO_DRIVE_CAP_3);
       #endif
-        const int levelOff = relayPinLevelFor(false, FAN_RELAY_ACTIVE_LOW != 0);
-        const int levelOn  = relayPinLevelFor(true, FAN_RELAY_ACTIVE_LOW != 0);
+        const int levelOff = fanRelayLevelOff();
+        const int levelOn  = fanRelayLevelOn();
         if (on) {
-          if (!sFanRelayCoilCommandedOn || sFanNeedWakePulse) {
-            digitalWrite(RELAY_FAN, levelOff);
-            delay((unsigned long)FAN_RELAY_WAKE_MS);
-            digitalWrite(RELAY_FAN, levelOn);
-            sFanRelayCoilCommandedOn = true;
-            sFanNeedWakePulse = false;
-          } else {
-            digitalWrite(RELAY_FAN, levelOn);
+          if (sFanNeedWakePulse) {
+            fanRelayHardKick();
+            return;
           }
+          digitalWrite(RELAY_FAN, levelOn);
+          sFanRelayCoilCommandedOn = true;
         } else {
           digitalWrite(RELAY_FAN, levelOff);
           sFanRelayCoilCommandedOn = false;
@@ -400,11 +437,11 @@
         }
       }
 
-      /** Force OFF→ON edge (fixes fan that only spins after wiggling IN wire). */
+      /** Session start: always float + multi-pulse (like wiggling IN wire). */
       static inline void forceFanRelayWakeOn() {
         sFanRelayCoilCommandedOn = false;
         sFanNeedWakePulse = true;
-        driveFanLoad(true);
+        fanRelayHardKick();
       }
 
       #if defined(ESP32) && HEATER_CONTROL_IS_SSR && HEATER_SSR_SINK_5V
@@ -506,7 +543,7 @@
         root += ",\"buzzer_on\":"; root += gBuzzerTonePlaying ? "true" : "false";
       }
 
-      /** Boot bench test: you should hear/feel one relay click if VCC=5V and IN on GPIO23. */
+      /** Boot bench test: you should hear/feel one relay click if VCC=5V and IN on GPIO22. */
       static void relayBootClickTest() {
       #if RELAY_BOOT_CLICK_MS > 0
         Serial.println("[relay] boot click test — should hear relay CLICK once");
@@ -1028,15 +1065,18 @@
       /** Single relay fan: keep ON while drying (mechanical relays cannot PWM fast). */
       static void serviceFanSpeedRelay(unsigned long nowMs) {
         (void)nowMs;
-        if (!dryingSessionOutputsActive()) {
+        const bool active = dryingSessionOutputsActive();
+        if (!active) {
+          sFanSessionOutputsWereActive = false;
           driveFanLoad(false);
           return;
         }
-        if (sFanNeedWakePulse) {
+        if (!sFanSessionOutputsWereActive) {
+          sFanSessionOutputsWereActive = true;
           forceFanRelayWakeOn();
-        } else {
-          driveFanLoad(true);
+          return;
         }
+        driveFanLoad(true);
       }
 
       /** Heaters: mirror fan while drying (HEATER_MIRROR_FAN) or thermostat below target. */
@@ -1218,19 +1258,17 @@
         if (gSessionTargetC <= 1.0f) {
           gSessionTargetC = 60.0f;
         }
-        forceFanRelayWakeOn();
-        {
-          const bool dhtOkNow = pollDhtIfDue();
-          applyDryingSessionLoads(dhtOkNow, cachedDhtT);
-        }
         applyLedsForSession("running");
         if (chirp) {
         #if BUZZER_DRYING_START_CHIRP_MS > 0
           Serial.println("[buzzer] drying-start");
           buzzerChirpLoudBlocking((unsigned long)BUZZER_DRYING_START_CHIRP_MS);
-          forceFanRelayWakeOn();
-          applyDryingSessionLoads(pollDhtIfDue(), cachedDhtT);
         #endif
+        }
+        forceFanRelayWakeOn();
+        {
+          const bool dhtOkNow = pollDhtIfDue();
+          applyDryingSessionLoads(dhtOkNow, cachedDhtT);
         }
         logActuatorState("drying-on");
         logActualLoadGpios("drying");
@@ -2807,7 +2845,7 @@
         Serial.println("# Fish Dryer ESP32 — runtime-assigned identity");
         Serial.print("# BUILD: ");
         Serial.println(FIRMWARE_BUILD_TAG);
-        Serial.println("# PINS: DHT22=4 MOISTURE=35 DOOR=16 FAN=23 H1=19 BUZZER=27");
+        Serial.println("# PINS: DHT22=4 MOISTURE=35 DOOR=16 FAN=22 H1=19 BUZZER=27");
         Serial.println("#       LED green=32 yellow=33 red=13  (H2/GPIO18 unwired)");
       #if HEATER_CONTROL_IS_SSR && !HEATER_SSR_SINK_5V
         Serial.println("# HEATER SSR: GPIO19->SSR3(+), GND->SSR4(-), HIGH=running, LOW=stopped");
