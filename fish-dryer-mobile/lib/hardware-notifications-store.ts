@@ -1,7 +1,14 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const STORAGE_KEY = "fish_dryer_hardware_notifications_v1";
-const MAX_ITEMS = 80;
+const MAX_ITEMS = 500;
+
+/** Critical alerts: undetected hardware only (not ESP32 unstable, etc.). */
+export const CRITICAL_SENSOR_KEYS = new Set([
+  "dht22",
+  "moisture_sensor",
+  "door_sensor",
+]);
 
 export type StoredHardwareNotification = {
   id: string;
@@ -31,11 +38,48 @@ export function isDryingTemperatureWarning(
   return id.startsWith("temp-below-target:") || id.startsWith("temp-above-target:");
 }
 
+export function isCriticalSensorAlert(
+  n: Pick<StoredHardwareNotification, "componentKey" | "type">
+): boolean {
+  return n.type === "critical" && CRITICAL_SENSOR_KEYS.has(n.componentKey);
+}
+
 export function isHardwareAlert(
   n: Pick<StoredHardwareNotification, "id" | "componentKey" | "type">
 ): boolean {
   if (isDryingTemperatureWarning(n)) return false;
-  return n.type === "critical" || n.type === "warning";
+  return isCriticalSensorAlert(n);
+}
+
+export type NotificationSummary = {
+  total: number;
+  unread: number;
+  critical: number;
+  dryingWarnings: number;
+  info: number;
+};
+
+/** Counts across the full list for a machine (all pages, not just current page). */
+export function summarizeHardwareNotifications(
+  list: StoredHardwareNotification[]
+): NotificationSummary {
+  let unread = 0;
+  let critical = 0;
+  let dryingWarnings = 0;
+  let info = 0;
+  for (const n of list) {
+    if (!n.read) unread++;
+    if (isCriticalSensorAlert(n)) critical++;
+    else if (isDryingTemperatureWarning(n)) dryingWarnings++;
+    else if (n.type === "info") info++;
+  }
+  return {
+    total: list.length,
+    unread,
+    critical,
+    dryingWarnings,
+    info,
+  };
 }
 
 function normalizeItem(x: Record<string, unknown>): StoredHardwareNotification {
@@ -80,14 +124,14 @@ export async function countUnreadHardwareNotifications(
   }).length;
 }
 
-/** One-shot events (session started, first sensor fault snapshot, etc.). */
+/** Append a new row every time — never replace or merge by id. */
 export async function appendHardwareNotification(
   item: Omit<StoredHardwareNotification, "read">
 ): Promise<void> {
   const list = await loadHardwareNotifications();
   const next: StoredHardwareNotification[] = [
     { ...item, read: false },
-    ...list.filter((x) => x.id !== item.id),
+    ...list,
   ].slice(0, MAX_ITEMS);
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
 }

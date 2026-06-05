@@ -141,8 +141,8 @@ const SENSOR_ALERT_META: Record<
       desc: "Reed switch signal is bouncing. Verify the door magnet alignment and wiring.",
     },
     critical: {
-      title: "Door sensor not detected",
-      desc: "The reed switch (MC38) is not responding. Check wiring on GPIO15.",
+      title: "Reed switch not detected",
+      desc: "The reed switch (MC38) is not responding. Check wiring on GPIO16.",
     },
   },
 };
@@ -942,7 +942,7 @@ export default function UserOverview({
           };
         }
         return {
-          title: "Drying session saved",
+          title: "Drying session stopped",
           desc: "The drying session was stopped and saved to History.",
         };
       })();
@@ -1194,19 +1194,18 @@ export default function UserOverview({
     });
     if (!machineOnlineForAlerts) return;
 
-    const watched = new Set(["esp32", "dht22", "moisture_sensor", "door_sensor"]);
+    const criticalSensors = new Set(["dht22", "moisture_sensor", "door_sensor"]);
     for (const row of hardwareStatuses ?? []) {
       const key = normalizeHardwareKey(String(row.component_name ?? ""));
-      if (!watched.has(key)) continue;
+      if (!criticalSensors.has(key)) continue;
       const st = String(row.status ?? "");
       const alertType = alertTypeForStatus(st);
-      if (alertType) {
-        const meta = SENSOR_ALERT_META[key]?.[alertType];
+      if (alertType === "critical") {
+        const meta = SENSOR_ALERT_META[key]?.critical;
         if (meta) {
-          notifyProblemOnInterval(`hw:${key}:${alertType}`, alertType, meta.title, meta.desc, key);
+          notifyProblemOnInterval(`hw:${key}:critical`, "critical", meta.title, meta.desc, key);
         }
       } else if (isGoodSensorStatus(st)) {
-        delete problemNotifyLastMsByKey[`hw:${key}:warning:${mcId}`];
         delete problemNotifyLastMsByKey[`hw:${key}:critical:${mcId}`];
       }
     }
@@ -1217,15 +1216,14 @@ export default function UserOverview({
     const current = Number(liveReadings?.temperature);
     if (!Number.isFinite(target) || !Number.isFinite(current)) return;
 
-    const startedMs = parsePresenceMs(session?.started_at) ?? Date.now();
-    const runningMin = (Date.now() - startedMs) / 60000;
+    const dryingMin = getUsedDryingMinutes();
 
-    if (runningMin >= 30 && current < target - 0.5) {
+    if (dryingMin >= 10 && current < target - 0.5) {
       notifyProblemOnInterval(
         "temp-below-target",
         "warning",
         "Target temperature not reached",
-        `Drying has run ${Math.floor(runningMin)} min but temperature is ${current.toFixed(1)}°C (target ${target}°C).`,
+        `Drying has run ${dryingMin} min but temperature is ${current.toFixed(1)}°C (target ${target}°C).`,
         "drying_temp"
       );
     }

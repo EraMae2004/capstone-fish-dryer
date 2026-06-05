@@ -111,7 +111,7 @@
       // Must match fish-dryer-mobile/app.json -> expo.extra.apiBaseUrl (same IP, ends with /api).
       const char* API_URL = "http://10.38.125.15:8000/api/hardware/esp32/status";
 
-      static const char* FIRMWARE_BUILD_TAG = "heater-high-run-low-idle-v56";
+      static const char* FIRMWARE_BUILD_TAG = "fan-wake-pulse-v57";
 
       // Laravel heartbeat: keeps `last_seen` + hardware rows in MySQL and mirrors RTDB when enabled.
       // Set to 0 only while debugging (e.g. API returns 500). If the app shows "offline" but RTDB
@@ -209,7 +209,7 @@
       #endif
       /** OFF→ON gap so the blue relay opto sees an edge (fixes "wiggle IN wire" on start). */
       #ifndef FAN_RELAY_WAKE_MS
-      #define FAN_RELAY_WAKE_MS 8
+      #define FAN_RELAY_WAKE_MS 60
       #endif
       // Heaters on SSR-60DA. If heaters use blue relays like fan, set HEATER_CONTROL_IS_SSR to 0.
       #ifndef HEATER_CONTROL_IS_SSR
@@ -369,33 +369,41 @@
 
       /** Last commanded fan coil state (not GPIO read — initLoadPins must stay in sync). */
       static bool sFanRelayCoilCommandedOn = false;
+      /** Mechanical relay needs OFF→ON edge after every idle period. */
+      static bool sFanNeedWakePulse = true;
       /** Last commanded heater state (open-drain sink mode cannot rely on digitalRead). */
       static bool sHeaterCommandedOn = false;
       static bool sHeaterSinkOdReady = false;
 
-      /** Blue mechanical relay (fan): NO wiring. Pulse OFF before ON when energizing. */
+      /** Blue mechanical relay (fan): pulse OFF before ON so the coil always clicks. */
       static inline void driveFanLoad(bool on) {
         pinMode(RELAY_FAN, OUTPUT);
+      #if defined(ESP32)
+        gpio_set_drive_capability((gpio_num_t)RELAY_FAN, GPIO_DRIVE_CAP_3);
+      #endif
         const int levelOff = relayPinLevelFor(false, FAN_RELAY_ACTIVE_LOW != 0);
         const int levelOn  = relayPinLevelFor(true, FAN_RELAY_ACTIVE_LOW != 0);
         if (on) {
-          if (!sFanRelayCoilCommandedOn) {
+          if (!sFanRelayCoilCommandedOn || sFanNeedWakePulse) {
             digitalWrite(RELAY_FAN, levelOff);
             delay((unsigned long)FAN_RELAY_WAKE_MS);
             digitalWrite(RELAY_FAN, levelOn);
             sFanRelayCoilCommandedOn = true;
+            sFanNeedWakePulse = false;
           } else {
             digitalWrite(RELAY_FAN, levelOn);
           }
         } else {
           digitalWrite(RELAY_FAN, levelOff);
           sFanRelayCoilCommandedOn = false;
+          sFanNeedWakePulse = true;
         }
       }
 
-      /** Force a relay click on drying start (after buzzer / stale tracking). */
+      /** Force OFF→ON edge (fixes fan that only spins after wiggling IN wire). */
       static inline void forceFanRelayWakeOn() {
         sFanRelayCoilCommandedOn = false;
+        sFanNeedWakePulse = true;
         driveFanLoad(true);
       }
 
@@ -1024,7 +1032,11 @@
           driveFanLoad(false);
           return;
         }
-        driveFanLoad(true);
+        if (sFanNeedWakePulse) {
+          forceFanRelayWakeOn();
+        } else {
+          driveFanLoad(true);
+        }
       }
 
       /** Heaters: mirror fan while drying (HEATER_MIRROR_FAN) or thermostat below target. */

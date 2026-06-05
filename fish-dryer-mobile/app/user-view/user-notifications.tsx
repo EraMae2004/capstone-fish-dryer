@@ -15,8 +15,9 @@ import {
   markHardwareNotificationsReadByIds,
   deleteHardwareNotificationsByIds,
   clearHardwareNotifications,
+  isCriticalSensorAlert,
   isDryingTemperatureWarning,
-  isHardwareAlert,
+  summarizeHardwareNotifications,
   type StoredHardwareNotification,
 } from '@/lib/hardware-notifications-store';
 import { ListPaginationBar, useListPagination } from '@/lib/list-pagination';
@@ -37,11 +38,13 @@ function formatRelativeTime(iso: string): string {
 }
 
 type UserNotificationsProps = {
+  visible?: boolean;
   onBack?: () => void;
   onNotificationsChanged?: () => void;
 };
 
 export default function UserNotifications({
+  visible = true,
   onBack,
   onNotificationsChanged,
 }: UserNotificationsProps) {
@@ -75,6 +78,15 @@ export default function UserNotifications({
     void reload();
   }, [reload]);
 
+  useEffect(() => {
+    if (!visible) return;
+    void reload();
+    const id = setInterval(() => {
+      void reload();
+    }, 2000);
+    return () => clearInterval(id);
+  }, [visible, reload]);
+
   const machineFilteredItems = useMemo(() => {
     if (selectedMachineId == null || selectedMachineId <= 0) return items;
     return items.filter((x) => x.machineId === selectedMachineId);
@@ -92,7 +104,7 @@ export default function UserNotifications({
     }));
     if (activeTab === 'unread') return base.filter((n) => !n.read);
     if (activeTab === 'alerts') {
-      return base.filter((n) => isHardwareAlert(n));
+      return base.filter((n) => isCriticalSensorAlert(n));
     }
     if (activeTab === 'warnings') {
       return base.filter((n) => isDryingTemperatureWarning(n));
@@ -113,22 +125,16 @@ export default function UserNotifications({
     resetPage();
   }, [activeTab, selectedMachineId, resetPage]);
 
-  const unreadCount = useMemo(
-    () => machineFilteredItems.filter((n) => !n.read).length,
+  /** Summary totals — entire store for this machine (all pages, not just current page). */
+  const summary = useMemo(
+    () => summarizeHardwareNotifications(machineFilteredItems),
     [machineFilteredItems]
   );
-  const criticalCount = useMemo(
-    () => machineFilteredItems.filter((n) => n.type === 'critical').length,
-    [machineFilteredItems]
-  );
-  const dryingWarningCount = useMemo(
-    () => machineFilteredItems.filter((n) => isDryingTemperatureWarning(n)).length,
-    [machineFilteredItems]
-  );
-  const infoCount = useMemo(
-    () => machineFilteredItems.filter((n) => n.type === 'info').length,
-    [machineFilteredItems]
-  );
+  const unreadCount = summary.unread;
+  const criticalCount = summary.critical;
+  const dryingWarningCount = summary.dryingWarnings;
+  const infoCount = summary.info;
+  const totalCount = summary.total;
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {
@@ -244,8 +250,8 @@ export default function UserNotifications({
             [
               { key: 'all', label: 'All' },
               { key: 'unread', label: 'Unread' },
-              { key: 'alerts', label: 'Alerts' },
-              { key: 'warnings', label: 'Warning' },
+              { key: 'alerts', label: 'Critical Alerts' },
+              { key: 'warnings', label: 'Drying Warnings' },
               { key: 'info', label: 'Info' },
             ] as const
           ).map((tab) => (
@@ -291,7 +297,9 @@ export default function UserNotifications({
 
         {/* NOTIFICATION LIST */}
         <View style={styles.listContainer}>
-          <Text style={styles.listTitle}>All Notifications</Text>
+          <Text style={styles.listTitle}>
+            Notifications ({totalCount} total · showing {filteredNotifications.length} in this filter)
+          </Text>
 
           {pagedNotifications.length === 0 ? (
             <Text style={styles.emptyList}>No notifications in this filter.</Text>
