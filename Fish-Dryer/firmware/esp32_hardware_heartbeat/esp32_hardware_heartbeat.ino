@@ -7,6 +7,7 @@
       #if defined(ESP32)
       #include "esp_system.h"
       #include "esp_task_wdt.h"
+      #include "driver/gpio.h"
       #endif
 
       // ============================================================================
@@ -63,6 +64,10 @@
       #ifndef TEMP_TARGET_MARGIN_C
       #define TEMP_TARGET_MARGIN_C 0.5f
       #endif
+      /** Heat while DHT has no reading yet (session just started). */
+      #ifndef HEATER_DHT_BOOTSTRAP_MS
+      #define HEATER_DHT_BOOTSTRAP_MS (5UL * 60UL * 1000UL)
+      #endif
       #ifndef ALERT_BUZZ_PERIOD_MS
       #define ALERT_BUZZ_PERIOD_MS (ALERT_BUZZ_ON_MS + ALERT_BUZZ_SILENT_MS)
       #endif
@@ -104,9 +109,9 @@
 
       // PC IPv4 from `ipconfig` + run: php artisan serve --host=0.0.0.0 --port=8000
       // Must match fish-dryer-mobile/app.json -> expo.extra.apiBaseUrl (same IP, ends with /api).
-      const char* API_URL = "http://10.173.245.15:8000/api/hardware/esp32/status";
+      const char* API_URL = "http://10.38.125.15:8000/api/hardware/esp32/status";
 
-      static const char* FIRMWARE_BUILD_TAG = "drying-actuators-v50";
+      static const char* FIRMWARE_BUILD_TAG = "heater-high-run-low-idle-v56";
 
       // Laravel heartbeat: keeps `last_seen` + hardware rows in MySQL and mirrors RTDB when enabled.
       // Set to 0 only while debugging (e.g. API returns 500). If the app shows "offline" but RTDB
@@ -162,9 +167,12 @@
       //   Buzzer +: GPIO27→220Ω→+  Buzzer −→GND
       //   Fan relay: VCC→5V  GND→GND  IN→GPIO23  JD-VCC jumper ON
       //              COM→switching PSU +  NO→fan red  fan black→PSU −
-      //   SSR heater (ONE heater only): ~1→plug live  ~2→heater red
-      //              heater yellow→plug neutral  +3→GPIO19 ONLY  −4→GND
-      //              (GPIO18 NOT wired — leave H2 disconnected)
+      //   SSR-60 DA heater (ONE SSR):
+      //     AC OUTPUT terminals 1–2: 1→plug LIVE  2→heater wire
+      //        (heater return → plug NEUTRAL — not through the SSR)
+      //     DC INPUT terminals 3–4: 3(+)→GPIO19  4(−)→GND
+      //     GPIO19 HIGH = drying session running. GPIO19 LOW = stopped/paused.
+      //     GPIO18 NOT wired unless you add a second SSR.
       #define PIN_DHT22        4
       #define PIN_MOISTURE    35
       #define PIN_DOOR        16    // NOT GPIO15 (strapping — crashes when reed open)
@@ -203,9 +211,29 @@
       #ifndef FAN_RELAY_WAKE_MS
       #define FAN_RELAY_WAKE_MS 8
       #endif
-      // Heaters on SSR-60DA: HIGH = ON. If heaters use blue relays like fan, set to 0.
+      // Heaters on SSR-60DA. If heaters use blue relays like fan, set HEATER_CONTROL_IS_SSR to 0.
       #ifndef HEATER_CONTROL_IS_SSR
       #define HEATER_CONTROL_IS_SSR 1
+      #endif
+      /** 0 = GPIO19→SSR3(+), GND→SSR4(−). 1 = alternate 5V→SSR3, GPIO19→SSR4. */
+      #ifndef HEATER_SSR_SINK_5V
+      #define HEATER_SSR_SINK_5V 0
+      #endif
+      /** 0 = GPIO HIGH when session running, LOW when stopped/paused (this board). */
+      #ifndef HEATER_SSR_ACTIVE_LOW
+      #define HEATER_SSR_ACTIVE_LOW 0
+      #endif
+      /** Boot pulse (0 = off — heater must stay cold until app Start). */
+      #ifndef HEATER_BOOT_CLICK_MS
+      #define HEATER_BOOT_CLICK_MS 0
+      #endif
+      /** Always heat this long after Start (even if DHT missing / reads high). */
+      #ifndef SESSION_HEATER_WARMUP_MS
+      #define SESSION_HEATER_WARMUP_MS (60UL * 1000UL)
+      #endif
+      /** 1 = heater ON entire drying session (same as fan). No thermostat gate. */
+      #ifndef HEATER_MIRROR_FAN
+      #define HEATER_MIRROR_FAN 1
       #endif
       #ifndef RELAY_BOOT_CLICK_MS
       #define RELAY_BOOT_CLICK_MS 0
@@ -341,6 +369,9 @@
 
       /** Last commanded fan coil state (not GPIO read — initLoadPins must stay in sync). */
       static bool sFanRelayCoilCommandedOn = false;
+      /** Last commanded heater state (open-drain sink mode cannot rely on digitalRead). */
+      static bool sHeaterCommandedOn = false;
+      static bool sHeaterSinkOdReady = false;
 
       /** Blue mechanical relay (fan): NO wiring. Pulse OFF before ON when energizing. */
       static inline void driveFanLoad(bool on) {
@@ -368,14 +399,50 @@
         driveFanLoad(true);
       }
 
-      /** SSR-60DA (heaters): terminals 1–2 = GPIO + GND; 3–4 = AC/DC load. HIGH = ON. */
+      #if defined(ESP32) && HEATER_CONTROL_IS_SSR && HEATER_SSR_SINK_5V
+      static void heaterSinkOdInitOnce() {
+        if (sHeaterSinkOdReady) return;
+        gpio_config_t c = {};
+        c.pin_bit_mask = (1ULL << RELAY_HEATER1);
+        c.mode = GPIO_MODE_OUTPUT_OD;
+        c.pull_up_en = GPIO_PULLUP_DISABLE;
+        c.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        c.intr_type = GPIO_INTR_DISABLE;
+        gpio_config(&c);
+        gpio_set_drive_capability((gpio_num_t)RELAY_HEATER1, GPIO_DRIVE_CAP_3);
+        sHeaterSinkOdReady = true;
+      }
+      #endif
+
+      /** SSR-60DA: sink = 5V on term 3, GPIO19 open-drain on term 4, LOW = ON. */
       static inline void driveHeaterLoad(bool on) {
-        pinMode(RELAY_HEATER1, OUTPUT);
+        sHeaterCommandedOn = on;
         pinMode(RELAY_HEATER2, OUTPUT);
       #if HEATER_CONTROL_IS_SSR
-        digitalWrite(RELAY_HEATER1, on ? HIGH : LOW);
-        digitalWrite(RELAY_HEATER2, on ? HIGH : LOW);
+      #if HEATER_SSR_SINK_5V
+      #if defined(ESP32)
+        heaterSinkOdInitOnce();
+        gpio_set_level((gpio_num_t)RELAY_HEATER1, on ? 0 : 1);
       #else
+        pinMode(RELAY_HEATER1, OUTPUT);
+        digitalWrite(RELAY_HEATER1, on ? LOW : HIGH);
+      #endif
+        digitalWrite(RELAY_HEATER2, HIGH);
+      #else
+        pinMode(RELAY_HEATER1, OUTPUT);
+      #if defined(ESP32)
+        gpio_set_drive_capability((gpio_num_t)RELAY_HEATER1, GPIO_DRIVE_CAP_3);
+      #endif
+      #if HEATER_SSR_ACTIVE_LOW
+        digitalWrite(RELAY_HEATER1, on ? LOW : HIGH);
+        digitalWrite(RELAY_HEATER2, HIGH);
+      #else
+        digitalWrite(RELAY_HEATER1, on ? HIGH : LOW);
+        digitalWrite(RELAY_HEATER2, LOW);
+      #endif
+      #endif
+      #else
+        pinMode(RELAY_HEATER1, OUTPUT);
         driveRelay(RELAY_HEATER1, on);
         driveRelay(RELAY_HEATER2, on);
       #endif
@@ -387,30 +454,44 @@
       }
 
       static bool heaterLoadIsOn(int pin) {
-      #if HEATER_CONTROL_IS_SSR
+        if (pin != RELAY_HEATER1) {
+        #if HEATER_CONTROL_IS_SSR
+          return false;
+        #else
+          return relayOn(pin);
+        #endif
+        }
+      #if HEATER_CONTROL_IS_SSR && HEATER_SSR_SINK_5V
+        return sHeaterCommandedOn;
+      #elif HEATER_CONTROL_IS_SSR && HEATER_SSR_ACTIVE_LOW
+        return digitalRead(pin) == LOW;
+      #elif HEATER_CONTROL_IS_SSR
         return digitalRead(pin) == HIGH;
       #else
         return relayOn(pin);
       #endif
       }
 
-      /** RTDB `outputs` — report session intent (fan on while running; heat when below target). */
+      /** RTDB `outputs` — report actual GPIO levels (not thermostat intent alone). */
       static void appendOutputsTelemetry(String& root, bool dhtOk, float airC) {
         bool fanRep = false;
         bool h1Rep = false;
         bool h2Rep = false;
+        bool h1Demand = false;
         if (hardwareTestActive()) {
           fanRep = fanLoadIsOn();
           h1Rep = heaterLoadIsOn(RELAY_HEATER1);
           h2Rep = heaterLoadIsOn(RELAY_HEATER2);
         } else if (dryingSessionOutputsActive()) {
-          fanRep = true;
-          h1Rep = intendedHeaterOnForSession(dhtOk, airC);
-          h2Rep = h1Rep;
+          fanRep = fanLoadIsOn();
+          h1Demand = intendedHeaterOnForSession(dhtOk, airC);
+          h1Rep = heaterLoadIsOn(RELAY_HEATER1);
+          h2Rep = heaterLoadIsOn(RELAY_HEATER2);
         }
         root += "\"fan_on\":"; root += fanRep ? "true" : "false";
         root += ",\"heater1_on\":"; root += h1Rep ? "true" : "false";
         root += ",\"heater2_on\":"; root += h2Rep ? "true" : "false";
+        root += ",\"heater1_demand\":"; root += h1Demand ? "true" : "false";
         root += ",\"led1_on\":"; root += ledPinOn(LED1) ? "true" : "false";
         root += ",\"led2_on\":"; root += ledPinOn(LED2) ? "true" : "false";
         root += ",\"led3_on\":"; root += ledPinOn(LED3) ? "true" : "false";
@@ -429,6 +510,18 @@
         Serial.print(" level after test=");
         Serial.println(digitalRead(RELAY_FAN));
         Serial.println("[relay] No click? Use 5V on VCC, GND shared, JD-VCC jumper on. Try RELAY_ACTIVE_LOW 0.");
+      #endif
+      }
+
+      /** Boot SSR pulse — GPIO19 HIGH = ON (GPIO19→SSR3+, GND→SSR4-). */
+      static void heaterBootClickTest() {
+      #if HEATER_BOOT_CLICK_MS > 0 && HEATER_CONTROL_IS_SSR
+        Serial.println("[heater] boot test — GPIO19 LOW ~3s, SSR LED should light");
+        driveHeaterLoad(true);
+        delay((unsigned long)HEATER_BOOT_CLICK_MS);
+        driveHeaterLoad(false);
+        Serial.print("[heater] gpio19=");
+        Serial.println(digitalRead(RELAY_HEATER1));
       #endif
       }
 
@@ -858,9 +951,24 @@
         if (!dryingSessionOutputsActive()) {
           return false;
         }
-        const float t = airCToUseForHeater(dhtOk, airC);
-        if (isnan(t) || gSessionTargetC <= 1.0f) {
+      #if HEATER_MIRROR_FAN
+        return true;
+      #endif
+        if (gSessionTargetC <= 1.0f) {
           return false;
+        }
+        const float t = airCToUseForHeater(dhtOk, airC);
+        const bool bootstrap =
+            (gDryingSessionStartMs > 0) &&
+            ((millis() - gDryingSessionStartMs) < HEATER_DHT_BOOTSTRAP_MS);
+        const bool warmup =
+            (gDryingSessionStartMs > 0) &&
+            ((millis() - gDryingSessionStartMs) < SESSION_HEATER_WARMUP_MS);
+        if (warmup) {
+          return true;
+        }
+        if (isnan(t)) {
+          return bootstrap;
         }
         return t < (gSessionTargetC - TEMP_TARGET_MARGIN_C);
       }
@@ -919,18 +1027,51 @@
         driveFanLoad(true);
       }
 
-      /** Heaters: ON only while authorized drying + temp below target. */
+      /** Heaters: mirror fan while drying (HEATER_MIRROR_FAN) or thermostat below target. */
       static void serviceHeatersForSession(bool dhtOk, float airC) {
         if (!dryingSessionOutputsActive()) {
           driveHeaterLoad(false);
           return;
         }
-        const float t = airCToUseForHeater(dhtOk, airC);
-        if (isnan(t) || gSessionTargetC <= 1.0f) {
+      #if HEATER_MIRROR_FAN
+        driveHeaterLoad(true);
+        static unsigned long lastHeaterLogMs = 0;
+        const unsigned long now = millis();
+        if (lastHeaterLogMs == 0 || (now - lastHeaterLogMs) > 8000UL) {
+          lastHeaterLogMs = now;
+          Serial.print("[heater] SESSION ON authorized=");
+          Serial.print(gDryRunAuthorized ? 1 : 0);
+          Serial.print(" status=");
+          Serial.print(gSessionStatus);
+          Serial.print(" cmdOn=");
+          Serial.print(sHeaterCommandedOn ? 1 : 0);
+          Serial.print(" gpio19=");
+          Serial.println(digitalRead(RELAY_HEATER1));
+        }
+        (void)dhtOk;
+        (void)airC;
+        return;
+      #endif
+        if (gSessionTargetC <= 1.0f) {
           driveHeaterLoad(false);
           return;
         }
-        driveHeaterLoad(t < (gSessionTargetC - TEMP_TARGET_MARGIN_C));
+        const float t = airCToUseForHeater(dhtOk, airC);
+        const bool bootstrap =
+            (gDryingSessionStartMs > 0) &&
+            ((millis() - gDryingSessionStartMs) < HEATER_DHT_BOOTSTRAP_MS);
+        const bool warmup =
+            (gDryingSessionStartMs > 0) &&
+            ((millis() - gDryingSessionStartMs) < SESSION_HEATER_WARMUP_MS);
+        bool heatOn = warmup;
+        if (!heatOn) {
+          if (isnan(t)) {
+            heatOn = bootstrap;
+          } else {
+            heatOn = t < (gSessionTargetC - TEMP_TARGET_MARGIN_C);
+          }
+        }
+        driveHeaterLoad(heatOn);
       }
 
       static void logActualLoadGpios(const char* why) {
@@ -1002,7 +1143,13 @@
         Serial.print(RELAY_HEATER1);
         Serial.print("=");
         Serial.print(digitalRead(RELAY_HEATER1));
-        Serial.print(HEATER_CONTROL_IS_SSR ? "(HIGH=ON)" : "");
+      #if HEATER_CONTROL_IS_SSR && HEATER_SSR_SINK_5V
+        Serial.print("(LOW=run)");
+      #elif HEATER_CONTROL_IS_SSR && HEATER_SSR_ACTIVE_LOW
+        Serial.print("(LOW=run)");
+      #elif HEATER_CONTROL_IS_SSR
+        Serial.print("(HIGH=run)");
+      #endif
         Serial.print(" h2GPIO");
         Serial.print(RELAY_HEATER2);
         Serial.print("=");
@@ -1012,10 +1159,7 @@
       /** Force fan + heater control pins to OFF before WiFi / session logic. */
       static void initLoadPinsForcedOff() {
         driveFanLoad(false);
-        pinMode(RELAY_HEATER1, OUTPUT);
-        pinMode(RELAY_HEATER2, OUTPUT);
-        digitalWrite(RELAY_HEATER1, LOW);
-        digitalWrite(RELAY_HEATER2, LOW);
+        driveHeaterLoad(false);
       }
 
       static void loadsHardwareAllOff() {
@@ -1100,13 +1244,6 @@
           return;
         }
         forceActuatorsOff();
-        static unsigned long lastWarnMs = 0;
-        const unsigned long now = millis();
-        if (lastWarnMs == 0 || (now - lastWarnMs) > 8000UL) {
-          lastWarnMs = now;
-          Serial.println("[SAFETY] fan/heaters OFF — not in active drying session");
-          logActuatorState("safety-cut");
-        }
       }
 
       static void updateBuzzerFaultLatch(bool dhtOk, bool moistureOk, bool doorOk, float airC) {
@@ -1860,21 +1997,17 @@
         }
 
         if (status == "running" || command == "start") {
-          const bool sessionStartIntent =
-              (command == "start") ||
-              parseJsonBoolAfterKey(body, "session_active", false);
           if (!gDryRunAuthorized) {
-            if (sessionStartIntent) {
-              Serial.println("[session] RTDB running — authorize fan/heaters");
+            /** App Start writes session.command=start — honor that (fan/heater/buzzer). */
+            if (command == "start") {
+              Serial.println("[session] command=start — authorize outputs");
               beginDryingOutputs(false);
             } else if (millis() < gIgnoreStaleRunningUntilMs) {
               initLoadPinsForcedOff();
               return;
             } else {
-              Serial.println(
-                  "[session] stale RTDB running — OFF (tap Start in app)");
+              Serial.println("[session] stale running without start — outputs OFF");
               forceIdleSessionState();
-              publishSessionStoppedToCloud(mid);
               return;
             }
           }
@@ -2445,11 +2578,7 @@
           }
         }
 
-        if (dryingSessionOutputsActive()) {
-          commitLoadRelays(dhtOkReport, t);
-        } else if (shouldForceLoadsOff()) {
-          forceActuatorsOff();
-        }
+        commitLoadRelays(dhtOkReport, t);
 
         #if SEND_TO_LARAVEL
           if (!gDryingOutputsLatched) {
@@ -2642,6 +2771,9 @@
       #if RELAY_BOOT_CLICK_MS > 0
         relayBootClickTest();
       #endif
+      #if HEATER_BOOT_CLICK_MS > 0
+        heaterBootClickTest();
+      #endif
 
         dht.begin();
       }
@@ -2665,6 +2797,9 @@
         Serial.println(FIRMWARE_BUILD_TAG);
         Serial.println("# PINS: DHT22=4 MOISTURE=35 DOOR=16 FAN=23 H1=19 BUZZER=27");
         Serial.println("#       LED green=32 yellow=33 red=13  (H2/GPIO18 unwired)");
+      #if HEATER_CONTROL_IS_SSR && !HEATER_SSR_SINK_5V
+        Serial.println("# HEATER SSR: GPIO19->SSR3(+), GND->SSR4(-), HIGH=running, LOW=stopped");
+      #endif
         Serial.println("##############################################");
         Serial.printf("Reset reason: %d\n", (int)esp_reset_reason());
 
@@ -2700,7 +2835,6 @@
         initHardwarePins();
         if (gAssignedId > 0) {
           consumeCloudCommandSeq(gAssignedId);
-          publishSessionStoppedToCloud(gAssignedId);
         }
         applyLedsForSession("stopped");
         Serial.println("[boot] hardware OK");
@@ -2734,7 +2868,7 @@
         lastHeartbeatMs = millis();
       }
 
-      /** Serial: type 1 + Enter = force fan/heaters/buzzer 30s (wiring test, no app). */
+      /** Serial: 1=all ON, 0=all OFF, h=heater only 60s (wiring test, no app). */
       static void pollSerialBenchOverride() {
         while (Serial.available() > 0) {
           const char c = (char)Serial.read();
@@ -2748,6 +2882,25 @@
             gDryRunAuthorized = true;
             buzzerChirpLoudBlocking(1200);
             applyDryingOutputsHard();
+            Serial.print("[BENCH] heater cmd=");
+            Serial.print(sHeaterCommandedOn ? 1 : 0);
+            Serial.print(" gpio19=");
+            Serial.println(digitalRead(RELAY_HEATER1));
+          } else if (c == 'h' || c == 'H') {
+            Serial.println("[BENCH] heater ONLY 60s — SSR indicator must light");
+            driveHeaterLoad(true);
+            Serial.print("[BENCH] cmdOn=");
+            Serial.print(sHeaterCommandedOn ? 1 : 0);
+            Serial.print(" gpio19=");
+            Serial.println(digitalRead(RELAY_HEATER1));
+            const unsigned long end = millis() + 60000UL;
+            while ((long)(end - millis()) > 0) {
+              driveHeaterLoad(true);
+              delay(50);
+              yield();
+            }
+            driveHeaterLoad(false);
+            Serial.println("[BENCH] heater OFF");
           } else if (c == '0') {
             forceIdleSessionState();
             Serial.println("[BENCH] Serial 0 — all outputs OFF");
@@ -2796,12 +2949,6 @@
       #endif
         applySessionLedsOnly();
         commitLoadRelays(dhtOk, cachedDhtT);
-        if (!dryingSessionOutputsActive()) {
-          if (sFanRelayCoilCommandedOn ||
-              heaterLoadIsOn(RELAY_HEATER1) || heaterLoadIsOn(RELAY_HEATER2)) {
-            initLoadPinsForcedOff();
-          }
-        }
       #if ENABLE_RTDB_HARDWARE_TEST
         if (!gDryingOutputsLatched) {
           tickHardwareTestOutputs();
