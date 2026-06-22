@@ -15,7 +15,7 @@ function readApiBaseUrl(): string {
   if (fromExtra) return fromExtra.replace(/\/+$/, "");
 
   // 3) Final fallback (dev LAN). Change only if you want a default.
-  return "http://10.38.125.15:8000/api";
+  return "http://10.124.242.15:8000/api";
 }
 
 export const API_BASE_URL = readApiBaseUrl();

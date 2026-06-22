@@ -16,6 +16,8 @@ class SensorLog extends Model
         'humidity',
         'moisture',
         'fan_speed',
+        'log_type',
+        'check_label',
         'recorded_at',
     ];
 

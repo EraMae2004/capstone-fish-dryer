@@ -296,13 +296,33 @@ export default function UserHistory() {
               <Text style={styles.detailRow}>
                 Humidity: {fmtPct(selectedSession?.humidity ?? selectedSession?.avg_humidity)} %
               </Text>
-              <Text style={styles.detailRow}>
-                Moisture: {fmtPct(selectedSession?.moisture ?? selectedSession?.avg_moisture)} %
-              </Text>
               <Text style={styles.detailRow}>Fan Speed: {selectedSession?.fan_speed ?? '--'}</Text>
               <Text style={styles.detailRow}>
                 Total drying time: {fmtSessionDryTime(selectedSession)}
               </Text>
+
+              {Array.isArray(selectedSession?.moisture_checks) &&
+              selectedSession.moisture_checks.length > 0 ? (
+                <View style={styles.moistureChecksBlock}>
+                  <Text style={styles.moistureChecksTitle}>
+                    Moisture checks ({selectedSession.moisture_checks.length})
+                  </Text>
+                  {selectedSession.moisture_checks.map((check: any, index: number) => (
+                    <Text key={check.id ?? index} style={styles.moistureCheckRow}>
+                      {check.check_label
+                        ? `${check.check_label}: ${fmtPct(check.moisture)}%`
+                        : `Check ${index + 1}: ${fmtPct(check.moisture)}%`}
+                    </Text>
+                  ))}
+                  <Text style={styles.moistureSummaryRow}>
+                    Last: {fmtPct(selectedSession?.moisture)}%
+                  </Text>
+                </View>
+              ) : (
+                <Text style={styles.detailRow}>
+                  Moisture: {fmtPct(selectedSession?.moisture ?? selectedSession?.avg_moisture)} %
+                </Text>
+              )}
             </ScrollView>
             <TouchableOpacity style={styles.closeBtn} onPress={() => setSelectedSession(null)}>
               <Text style={styles.closeText}>Close</Text>
@@ -432,6 +452,34 @@ const styles = StyleSheet.create({
     ...userTypography.tableCell,
     marginBottom: 6,
     color: '#334155'
+  },
+
+  moistureChecksBlock: {
+    marginTop: 4,
+    marginBottom: 8,
+    padding: 10,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+
+  moistureChecksTitle: {
+    ...userTypography.bodyStrong,
+    color: '#1f3b57',
+    marginBottom: 8,
+  },
+
+  moistureCheckRow: {
+    ...userTypography.tableCell,
+    color: '#334155',
+    marginBottom: 4,
+  },
+
+  moistureSummaryRow: {
+    ...userTypography.caption,
+    color: '#64748b',
+    marginTop: 6,
   },
 
   closeBtn: {

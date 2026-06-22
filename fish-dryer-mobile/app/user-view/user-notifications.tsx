@@ -17,12 +17,14 @@ import {
   clearHardwareNotifications,
   isCriticalSensorAlert,
   isDryingTemperatureWarning,
+  isAnyWarningNotification,
   summarizeHardwareNotifications,
   type StoredHardwareNotification,
 } from '@/lib/hardware-notifications-store';
 import { ListPaginationBar, useListPagination } from '@/lib/list-pagination';
 import MachineDropdown from './machine-dropdown';
 import { useSelectedMachine } from '@/lib/selected-machine';
+import { bumpAllProblemNotifyThrottles } from '@/lib/problem-notify-throttle';
 
 function formatRelativeTime(iso: string): string {
   const t = new Date(iso).getTime();
@@ -40,7 +42,7 @@ function formatRelativeTime(iso: string): string {
 type UserNotificationsProps = {
   visible?: boolean;
   onBack?: () => void;
-  onNotificationsChanged?: () => void;
+  onNotificationsChanged?: (opts?: { optimisticUnread?: number }) => void | Promise<void>;
 };
 
 export default function UserNotifications({
@@ -59,20 +61,25 @@ export default function UserNotifications({
     loading: machinesLoading,
   } = useSelectedMachine();
 
-  const reload = useCallback(async () => {
-    const list = await loadHardwareNotifications();
-    setItems(list);
-    onNotificationsChanged?.();
-    // Drop ids that no longer exist (e.g., after deletion).
-    setSelected((prev) => {
-      const validIds = new Set(list.map((x) => x.id));
-      const next = new Set<string>();
-      prev.forEach((id) => {
-        if (validIds.has(id)) next.add(id);
+  const reload = useCallback(
+    async (opts?: { notifyParent?: boolean }) => {
+      const list = await loadHardwareNotifications();
+      setItems(list);
+      if (opts?.notifyParent !== false) {
+        await onNotificationsChanged?.();
+      }
+      // Drop ids that no longer exist (e.g., after deletion).
+      setSelected((prev) => {
+        const validIds = new Set(list.map((x) => x.id));
+        const next = new Set<string>();
+        prev.forEach((id) => {
+          if (validIds.has(id)) next.add(id);
+        });
+        return next;
       });
-      return next;
-    });
-  }, [onNotificationsChanged]);
+    },
+    [onNotificationsChanged]
+  );
 
   useEffect(() => {
     void reload();
@@ -107,7 +114,7 @@ export default function UserNotifications({
       return base.filter((n) => isCriticalSensorAlert(n));
     }
     if (activeTab === 'warnings') {
-      return base.filter((n) => isDryingTemperatureWarning(n));
+      return base.filter((n) => isAnyWarningNotification(n));
     }
     if (activeTab === 'info') return base.filter((n) => n.type === 'info');
     return base;
@@ -150,9 +157,10 @@ export default function UserNotifications({
       await markHardwareNotificationsReadByIds(Array.from(selected));
     } else {
       await markAllHardwareNotificationsRead();
+      bumpAllProblemNotifyThrottles();
     }
-    await reload();
-    await onNotificationsChanged?.();
+    await onNotificationsChanged?.({ optimisticUnread: 0 });
+    await reload({ notifyParent: false });
     setSelected(new Set());
   };
 
@@ -251,7 +259,7 @@ export default function UserNotifications({
               { key: 'all', label: 'All' },
               { key: 'unread', label: 'Unread' },
               { key: 'alerts', label: 'Critical Alerts' },
-              { key: 'warnings', label: 'Drying Warnings' },
+              { key: 'warnings', label: 'Warnings' },
               { key: 'info', label: 'Info' },
             ] as const
           ).map((tab) => (
@@ -271,7 +279,7 @@ export default function UserNotifications({
         <View style={styles.cardRow}>
           <SummaryCard icon="envelope" color="#2196f3" value={String(unreadCount)} label="Unread Notifications" />
           <SummaryCard icon="exclamation-circle" color="#ff4d4d" value={String(criticalCount)} label="Critical Alerts" />
-          <SummaryCard icon="exclamation-triangle" color="#f5b800" value={String(dryingWarningCount)} label="Drying Warnings" />
+          <SummaryCard icon="exclamation-triangle" color="#f5b800" value={String(dryingWarningCount)} label="Warnings" />
           <SummaryCard icon="info-circle" color="#4caf50" value={String(infoCount)} label="Info Notifications" />
         </View>
 

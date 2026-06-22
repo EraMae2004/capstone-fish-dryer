@@ -79,6 +79,9 @@
       static unsigned long gLastSessionActiveMs = 0;
       /** Wall clock when current `running` session started (for below-target buzzer). */
       static unsigned long gDryingSessionStartMs = 0;
+      /** Session started with door closed → buzz if door opens mid-run. Open at start → suppress. */
+      static bool          gDoorClosedAtSessionStart = false;
+      static bool          gDoorOpenBuzzerSuppressed = false;
       /** From RTDB session.fault_buzzer_armed — buzzer only (not fan/heaters). */
       static bool          gFaultBuzzerArmed = false;
       /** From RTDB session.session_active — true only while mobile drying is running. */
@@ -157,6 +160,16 @@
       // ================= ONE PIN PER COMPONENT (do not wire two things to one GPIO) =================
       // NEVER use ESP32 strapping pins for loads: GPIO0 GPIO2 GPIO5 GPIO12 GPIO15.
       //
+      // ================= TWO PLUGS ONLY (no laptop USB in normal use) =================
+      // Plug 1 — HEATER (AC): mains → SSR AC side → heater element (neutral direct to heater).
+      // Plug 2 — FAN PSU (AC→DC): switching supply powers fans AND all low-voltage control.
+      //   Fan PSU + → relay COM, relay NO → fan +, fan − → PSU −.
+      //   From the same PSU rail, add a 5 V buck (e.g. 12 V→5 V, ≥1 A) for:
+      //     ESP32 VIN (or 5 V pin) + GND  |  relay VCC + GND (JD-VCC jumper ON)
+      //   Share one common GND: PSU −, ESP32 GND, relay GND, SSR DC −, sensors GND.
+      //   Laptop USB is only for uploading firmware — unplug it when drying.
+      //   Do not connect USB and buck 5 V at the same time unless you know the grounds are safe.
+      //
       // EXACT WIRING (one wire per line):
       //   DHT22 VCC→3.3V  GND→GND  DATA→GPIO4
       //   Moisture VCC→3.3V  GND→GND  AO→GPIO35  (DO pin unconnected)
@@ -165,7 +178,10 @@
       //   LED yellow: GPIO33→220Ω→LED+  LED−→GND
       //   LED red: GPIO13→220Ω→LED+  LED−→GND
       //   Buzzer +: GPIO27→220Ω→+  Buzzer −→GND
-      //   Fan relay: VCC→5V  GND→GND  IN→GPIO22  JD-VCC jumper ON
+      //   Fan relay (1-ch blue module): VCC→5V (NOT 3.3V)  GND→GND  IN→GPIO22  JD-VCC jumper ON
+      //     Fan load: COM + NO (normally open). NC only if you want fan on when relay is idle.
+      //     Module LED ON = coil energized (IN LOW). Drying = IN HIGH = LED off = fan via NC wiring.
+      //     No CLICK but LED changes? Coil lacks 5V — fix VCC/JD-VCC/GND, not the ESP32 code.
       //              COM→switching PSU +  NO→fan red  fan black→PSU −
       //   SSR-60 DA heater (ONE SSR):
       //     AC OUTPUT terminals 1–2: 1→plug LIVE  2→heater wire
@@ -238,7 +254,7 @@
       #define HEATER_MIRROR_FAN 1
       #endif
       #ifndef RELAY_BOOT_CLICK_MS
-      #define RELAY_BOOT_CLICK_MS 0
+      #define RELAY_BOOT_CLICK_MS 400
       #endif
       #ifndef LED_ON_IS_HIGH
       #define LED_ON_IS_HIGH 1
@@ -330,6 +346,15 @@
       #define HAVE_DOOR_SENSOR 1
       #endif
 
+      /** After discharging GPIO16, MC38 wiring rises slower than a bare pin (microseconds). */
+      #ifndef DOOR_WIRE_BARE_RISE_US
+      #define DOOR_WIRE_BARE_RISE_US 15
+      #endif
+      /** Consecutive ultra-fast rise readings (= bare GPIO) before not_working. */
+      #ifndef DOOR_WIRE_BARE_STREAK_CLEAR
+      #define DOOR_WIRE_BARE_STREAK_CLEAR 8
+      #endif
+
       /** Touch channel (only if PIN_DOOR is a touch pad, e.g. GPIO15=T3). Unused on GPIO16. */
       #ifndef REED_TOUCH_CHANNEL
       #define REED_TOUCH_CHANNEL T3
@@ -387,11 +412,11 @@
       }
 
       /**
-       * Mimics unplugging GPIO22 (true hi-z), then plugging back in at HIGH.
-       * Wiggling the IN wire works because of float→connected, not LOW→HIGH.
+       * Mimics unplugging GPIO22 (true hi-z), then driving the target coil level.
+       * Wiggling the IN wire works because of float→connected — apply on BOTH on and off.
        */
-      static void fanRelayHardKick() {
-        const int levelOn = fanRelayLevelOn();
+      static void fanRelayHardKickTo(bool coilOn) {
+        const int level = coilOn ? fanRelayLevelOn() : fanRelayLevelOff();
       #if defined(ESP32)
         gpio_reset_pin((gpio_num_t)RELAY_FAN);
         gpio_set_pull_mode((gpio_num_t)RELAY_FAN, GPIO_FLOATING);
@@ -399,49 +424,47 @@
         delay((unsigned long)FAN_RELAY_FLOAT_MS);
         gpio_set_direction((gpio_num_t)RELAY_FAN, GPIO_MODE_OUTPUT);
         gpio_set_drive_capability((gpio_num_t)RELAY_FAN, GPIO_DRIVE_CAP_3);
-        digitalWrite(RELAY_FAN, levelOn);
+        digitalWrite(RELAY_FAN, level);
       #else
         pinMode(RELAY_FAN, INPUT);
         delay((unsigned long)FAN_RELAY_FLOAT_MS);
         pinMode(RELAY_FAN, OUTPUT);
-        digitalWrite(RELAY_FAN, levelOn);
+        digitalWrite(RELAY_FAN, level);
       #endif
         delay((unsigned long)FAN_RELAY_HOLD_MS);
-        sFanRelayCoilCommandedOn = true;
+        sFanRelayCoilCommandedOn = coilOn;
         sFanNeedWakePulse = false;
         Serial.print("[fan] reconnect-kick GPIO");
         Serial.print(RELAY_FAN);
+        Serial.print(" coilOn=");
+        Serial.print(coilOn ? 1 : 0);
         Serial.print(" level=");
-        Serial.println(levelOn);
+        Serial.println(level);
       }
 
-      /** Steady fan drive (no float) — use after hard kick. */
+      /** Steady fan drive — state changes use hard kick (ESP32 often needs float edge for relay coil). */
       static inline void driveFanLoad(bool on) {
+        const int levelOff = fanRelayLevelOff();
+        const int levelOn  = fanRelayLevelOn();
+        if (on == sFanRelayCoilCommandedOn && !sFanNeedWakePulse) {
+          return;
+        }
+        if (sFanNeedWakePulse || on != sFanRelayCoilCommandedOn) {
+          fanRelayHardKickTo(on);
+          return;
+        }
         pinMode(RELAY_FAN, OUTPUT);
       #if defined(ESP32)
         gpio_set_drive_capability((gpio_num_t)RELAY_FAN, GPIO_DRIVE_CAP_3);
       #endif
-        const int levelOff = fanRelayLevelOff();
-        const int levelOn  = fanRelayLevelOn();
-        if (on) {
-          if (sFanNeedWakePulse) {
-            fanRelayHardKick();
-            return;
-          }
-          digitalWrite(RELAY_FAN, levelOn);
-          sFanRelayCoilCommandedOn = true;
-        } else {
-          digitalWrite(RELAY_FAN, levelOff);
-          sFanRelayCoilCommandedOn = false;
-          sFanNeedWakePulse = true;
-        }
+        digitalWrite(RELAY_FAN, on ? levelOn : levelOff);
+        sFanRelayCoilCommandedOn = on;
       }
 
-      /** Session start: always float + multi-pulse (like wiggling IN wire). */
+      /** Session start: float + kick so mechanical relay pulls in after idle. */
       static inline void forceFanRelayWakeOn() {
-        sFanRelayCoilCommandedOn = false;
         sFanNeedWakePulse = true;
-        fanRelayHardKick();
+        fanRelayHardKickTo(true);
       }
 
       #if defined(ESP32) && HEATER_CONTROL_IS_SSR && HEATER_SSR_SINK_5V
@@ -554,7 +577,8 @@
         Serial.print(RELAY_FAN);
         Serial.print(" level after test=");
         Serial.println(digitalRead(RELAY_FAN));
-        Serial.println("[relay] No click? Use 5V on VCC, GND shared, JD-VCC jumper on. Try RELAY_ACTIVE_LOW 0.");
+        Serial.println("[relay] No click? VCC must be 5V, GND shared with ESP32, JD-VCC jumper ON.");
+        Serial.println("[relay] Fan on COM+NO. LED-only change = optocoupler OK, coil not powered.");
       #endif
       }
 
@@ -839,8 +863,7 @@
        */
       static bool doorWireConnected() {
       #if DOOR_SENSOR_SKIP_TOUCH_CHECK
-        pinMode(REED_PIN, INPUT_PULLUP);
-        return true;
+        return doorSensorElectricalOk();
       #endif
         const int kSamples = 8;
         uint32_t sum = 0;
@@ -870,20 +893,156 @@
         return avg < DOOR_SENSOR_TOUCH_DETACHED_THRESHOLD;
       }
 
+      static int gLastDoorCapLowSamples = -1;
+      static bool gDoorWireLatched = false;
+      static uint8_t gDoorBarePinStreak = 0;
+
       /**
-       * Reed on GPIO16: stable HIGH (door open) or stable LOW (magnet closed) = working.
-       * Only floating/noise (rapid toggling) = not_working.
+       * Magnet apart and unplugged GPIO both read steady HIGH with INPUT_PULLUP.
+       * Discharge the line, then measure how many µs until pull-up wins.
+       * MC38 wiring is slower than a bare GPIO16 pin.
        */
-      static bool doorSensorElectricalOk() {
+      static unsigned long doorWireRiseMicrosAfterHighState() {
+        pinMode(REED_PIN, OUTPUT);
+        digitalWrite(REED_PIN, LOW);
+        delay(2);
         pinMode(REED_PIN, INPUT_PULLUP);
-        int highs = 0;
-        for (int i = 0; i < 12; i++) {
-          if (digitalRead(REED_PIN) == HIGH) {
-            highs++;
+
+        const unsigned long t0 = micros();
+        unsigned long riseUs = 0;
+        while (digitalRead(REED_PIN) == LOW) {
+          riseUs = micros() - t0;
+          if (riseUs > 4000UL) {
+            break;
           }
+        }
+        pinMode(REED_PIN, INPUT_PULLUP);
+        gLastDoorCapLowSamples = (int)(riseUs / 10UL);
+        return riseUs;
+      }
+
+      static bool doorWirePresentAfterHighState() {
+        const unsigned long riseUs = doorWireRiseMicrosAfterHighState();
+        return riseUs > DOOR_WIRE_BARE_RISE_US;
+      }
+
+      /** MC38 on GPIO16: magnet near (door closed) = LOW, door open = HIGH (see wiring comment). */
+      static void readDoorSensorSample(int& highs, int& lows, int& transitions) {
+        pinMode(REED_PIN, INPUT_PULLUP);
+        delayMicroseconds(100);
+        highs = 0;
+        lows = 0;
+        transitions = 0;
+        int last = -1;
+        for (int i = 0; i < 32; i++) {
+          const int v = digitalRead(REED_PIN);
+          if (v == HIGH) {
+            highs++;
+          } else {
+            lows++;
+          }
+          if (last >= 0 && v != last) {
+            transitions++;
+          }
+          last = v;
           delayMicroseconds(400);
         }
-        return highs >= 10 || highs <= 2;
+      }
+
+      static bool doorSensorOkFromSample(int highs, int lows, int transitions) {
+      #if !HAVE_DOOR_SENSOR
+        (void)highs;
+        (void)lows;
+        (void)transitions;
+        gLastDoorCapLowSamples = -1;
+        return false;
+      #else
+        gLastDoorCapLowSamples = -1;
+        if (transitions > 10) {
+          return false;
+        }
+        return lows >= 24 || highs >= 24;
+      #endif
+      }
+
+      static bool doorIsOpenFromSample(int highs, int lows) {
+        return highs > lows;
+      }
+
+      static void resetDoorOpenBuzzerPolicy() {
+        gDoorClosedAtSessionStart = false;
+        gDoorOpenBuzzerSuppressed = false;
+      }
+
+      /** Arm door-open buzzer only when drying starts with a closed, working door sensor. */
+      static void latchDoorOpenBuzzerPolicyAtSessionStart() {
+      #if !HAVE_DOOR_SENSOR
+        resetDoorOpenBuzzerPolicy();
+        return;
+      #else
+        int highs = 0;
+        int lows = 0;
+        int transitions = 0;
+        readDoorSensorSample(highs, lows, transitions);
+        const bool doorOk = doorSensorOkFromSample(highs, lows, transitions);
+        const bool doorOpen = doorIsOpenFromSample(highs, lows);
+        if (!doorOk) {
+          resetDoorOpenBuzzerPolicy();
+          return;
+        }
+        if (doorOpen) {
+          gDoorOpenBuzzerSuppressed = true;
+          gDoorClosedAtSessionStart = false;
+          Serial.println("[buzzer] door-open alarm suppressed — started with door open");
+        } else {
+          gDoorOpenBuzzerSuppressed = false;
+          gDoorClosedAtSessionStart = true;
+          Serial.println("[buzzer] door-open alarm armed — started with door closed");
+        }
+      #endif
+      }
+
+      /** Buzz when door opens mid-run after a closed start (not when user started with door open). */
+      static bool doorOpenedDuringDryingFault(bool doorSensorOk, bool doorOpen) {
+      #if !HAVE_DOOR_SENSOR
+        (void)doorSensorOk;
+        (void)doorOpen;
+        return false;
+      #else
+        if (!sessionStatusIsRunning()) {
+          return false;
+        }
+        if (gDoorOpenBuzzerSuppressed || !gDoorClosedAtSessionStart) {
+          return false;
+        }
+        return doorSensorOk && doorOpen;
+      #endif
+      }
+
+      /**
+       * Reed health on GPIO16: stable LOW = wired; stable HIGH needs capacitance wire test;
+       * noisy pin = not_working.
+       */
+      static bool doorSensorElectricalOk() {
+      #if DOOR_SENSOR_SKIP_TOUCH_CHECK
+        int highs = 0;
+        int lows = 0;
+        int transitions = 0;
+        readDoorSensorSample(highs, lows, transitions);
+        return doorSensorOkFromSample(highs, lows, transitions);
+      #else
+        if (!doorWireConnected()) {
+          return false;
+        }
+        int highs = 0;
+        int lows = 0;
+        int transitions = 0;
+        readDoorSensorSample(highs, lows, transitions);
+        if (transitions > DOOR_SENSOR_MAX_JITTER_TRANSITIONS) {
+          return false;
+        }
+        return doorSensorOkFromSample(highs, lows, transitions);
+      #endif
       }
 
       /** RTDB/Laravel `components.door_sensor` — false when HAVE_DOOR_SENSOR is 0. */
@@ -1022,10 +1181,18 @@
         return sessionStatusIsRunning();
       }
 
+      /**
+       * Drying fault buzzer: DHT + door sensor electrical fault. Moisture is spot-check only.
+       * Door physically opening mid-run is handled separately (doorOpenedDuringDryingFault).
+       */
       static bool sensorsBadForBuzzer(bool dhtOk, bool moistureOk, bool doorOk) {
+        bool fault = !dhtOk || !doorOk;
+      #if MOISTURE_FAULT_BUZZER
+        fault = fault || !moistureOk;
+      #else
         (void)moistureOk;
-        (void)doorOk;
-        return !dhtOk;
+      #endif
+        return fault;
       }
 
       /**
@@ -1265,6 +1432,7 @@
           buzzerChirpLoudBlocking((unsigned long)BUZZER_DRYING_START_CHIRP_MS);
         #endif
         }
+        latchDoorOpenBuzzerPolicyAtSessionStart();
         forceFanRelayWakeOn();
         {
           const bool dhtOkNow = pollDhtIfDue();
@@ -1296,7 +1464,7 @@
         forceActuatorsOff();
       }
 
-      static void updateBuzzerFaultLatch(bool dhtOk, bool moistureOk, bool doorOk, float airC) {
+      static void updateBuzzerFaultLatch(bool dhtOk, bool moistureOk, bool doorOk, bool doorOpen, float airC) {
         static bool sLoggedFault = false;
         if (!dryingSessionActiveForBuzzer() || !sessionStatusIsRunning()) {
           disengageBuzzerAlarm();
@@ -1305,7 +1473,8 @@
         }
         const bool sensorFault = sensorsBadForBuzzer(dhtOk, moistureOk, doorOk);
         const bool tempFault = tempFaultForBuzzer(dhtOk, airC);
-        const bool faultNow = sensorFault || tempFault;
+        const bool doorOpenFault = doorOpenedDuringDryingFault(doorOk, doorOpen);
+        const bool faultNow = sensorFault || tempFault || doorOpenFault;
         if (faultNow) {
           if (!sLoggedFault) {
             sLoggedFault = true;
@@ -1313,11 +1482,13 @@
             Serial.print(sensorFault ? 1 : 0);
             Serial.print(" temp=");
             Serial.print(tempFault ? 1 : 0);
+            Serial.print(" doorOpen=");
+            Serial.print(doorOpenFault ? 1 : 0);
             Serial.print(" dht=");
             Serial.print(dhtOk ? 1 : 0);
             Serial.print(" moist=");
             Serial.print(moistureOk ? 1 : 0);
-            Serial.print(" door=");
+            Serial.print(" doorOk=");
             Serial.print(doorOk ? 1 : 0);
             Serial.print(" airC=");
             Serial.print(airC, 1);
@@ -1433,9 +1604,9 @@
         buzzerForceSilent();
       }
 
-      static void serviceBuzzer(bool dhtOk, bool moistureOk, bool doorOk, float airC) {
+      static void serviceBuzzer(bool dhtOk, bool moistureOk, bool doorOk, bool doorOpen, float airC) {
         const unsigned long now = millis();
-        updateBuzzerFaultLatch(dhtOk, moistureOk, doorOk, airC);
+        updateBuzzerFaultLatch(dhtOk, moistureOk, doorOk, doorOpen, airC);
 
         if (hardwareTestActive()) {
           disengageBuzzerAlarm();
@@ -1731,6 +1902,7 @@
         gSessionActiveFlag = false;
         gFaultBuzzerArmed = false;
         gDryingSessionStartMs = 0;
+        resetDoorOpenBuzzerPolicy();
         disengageBuzzerAlarm();
         initLoadPinsForcedOff();
         applyLedsForSession("paused");
@@ -1846,6 +2018,7 @@
         gNullSessionPollStreak = 0;
         gDrySessionLatched = false;
         gDryingSessionStartMs = 0;
+        resetDoorOpenBuzzerPolicy();
         disengageBuzzerAlarm();
         pauseLocalHardwareTestOnly();
         initLoadPinsForcedOff();
@@ -2381,10 +2554,16 @@
         const int moisturePct =
             moistureOkReport ? moisturePercentFromAdc(moistureRaw) : -1;
 
-        const bool doorOkReport = doorSensorStatusForPayload();
-        const bool doorOkAlert = doorSensorOkForAlerts();
-        const int doorRaw = digitalRead(REED_PIN);
-        const bool doorOpen = (doorRaw == LOW);
+        int doorHighs = 0;
+        int doorLows = 0;
+        int doorTransitions = 0;
+      #if HAVE_DOOR_SENSOR
+        readDoorSensorSample(doorHighs, doorLows, doorTransitions);
+      #endif
+        const bool doorOkReport =
+            doorSensorOkFromSample(doorHighs, doorLows, doorTransitions);
+        const bool doorOkAlert = doorOkReport;
+        const bool doorOpen = doorIsOpenFromSample(doorHighs, doorLows);
 
         // Calibration health: needs both initialized bounds and enough span to map ADC → %.
         // Span < 500 means we've only seen narrow values, so percentages will be wildly biased
@@ -2418,7 +2597,19 @@
         Serial.print(dhtOkReport ? "OK" : "FAIL");
         Serial.print(" | DOOR ");
         #if HAVE_DOOR_SENSOR
+        Serial.print("H=");
+        Serial.print(doorHighs);
+        Serial.print(" L=");
+        Serial.print(doorLows);
+        Serial.print(" T=");
+        Serial.print(doorTransitions);
+        Serial.print(" ");
         Serial.print(doorOkReport ? "OK" : "FAIL");
+        if (gLastDoorCapLowSamples >= 0) {
+          Serial.print(" riseUs~");
+          Serial.print(gLastDoorCapLowSamples * 10);
+        }
+        Serial.print(doorOpen ? " open" : " closed");
         #else
         Serial.print("off(not installed)");
         #endif
@@ -2765,7 +2956,7 @@
       static unsigned long gLastMoistureSampleMs = 0;
       static unsigned long gLastAssignmentPollMs = 0;
 
-      static void readSensorsOnce(bool& dhtOk, bool& moistureOk, bool& doorOk) {
+      static void readSensorsOnce(bool& dhtOk, bool& moistureOk, bool& doorOk, bool& doorOpen) {
         dhtOk = pollDhtIfDue();
 
         if (millis() - gLastMoistureSampleMs >= 250UL) {
@@ -2779,7 +2970,17 @@
         moistureOk = moistureSensorReportOk(
             gMoistureAvgCached, gMoistureSpreadCached, gMoistureMinCached, gMoistureMaxCached);
 
-        doorOk = doorSensorStatusForPayload();
+      #if HAVE_DOOR_SENSOR
+        int doorHighs = 0;
+        int doorLows = 0;
+        int doorTransitions = 0;
+        readDoorSensorSample(doorHighs, doorLows, doorTransitions);
+        doorOk = doorSensorOkFromSample(doorHighs, doorLows, doorTransitions);
+        doorOpen = doorOk && doorIsOpenFromSample(doorHighs, doorLows);
+      #else
+        doorOk = false;
+        doorOpen = false;
+      #endif
       }
 
       /** GPIO/actuator init — after WiFi so relay/fan cannot crash the radio stack. */
@@ -2911,8 +3112,8 @@
         Serial.print(" h2=");
         Serial.println(heaterLoadIsOn(RELAY_HEATER2) ? 1 : 0);
 
-        bool dhtOk = false, moistureOk = false, doorOk = false;
-        readSensorsOnce(dhtOk, moistureOk, doorOk);
+        bool dhtOk = false, moistureOk = false, doorOk = false, doorOpen = false;
+        readSensorsOnce(dhtOk, moistureOk, doorOk, doorOpen);
         initLoadPinsForcedOff();
         sendHeartbeat(dhtOk, moistureOk, doorOk);
         lastHeartbeatMs = millis();
@@ -2965,8 +3166,8 @@
           connectWifiBlocking(8000);
         }
 
-        bool dhtOk = false, moistureOk = false, doorOk = false;
-        readSensorsOnce(dhtOk, moistureOk, doorOk);
+        bool dhtOk = false, moistureOk = false, doorOk = false, doorOpen = false;
+        readSensorsOnce(dhtOk, moistureOk, doorOk, doorOpen);
 
         const unsigned long assignmentPollMs =
             gAssignedId > 0 ? ASSIGNMENT_POLL_ASSIGNED_MS : ASSIGNMENT_POLL_UNASSIGNED_MS;
@@ -3004,7 +3205,7 @@
           tickHardwareTestOutputs();
         }
       #endif
-        serviceBuzzer(dhtOk, moistureOk, doorSensorOkForAlerts(), cachedDhtT);
+        serviceBuzzer(dhtOk, moistureOk, doorOk, doorOpen, cachedDhtT);
         safetyCutLoadsUnlessRunning();
 
         if (millis() - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {

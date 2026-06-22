@@ -38,6 +38,23 @@ export function isDryingTemperatureWarning(
   return id.startsWith("temp-below-target:") || id.startsWith("temp-above-target:");
 }
 
+/** Unstable sensor readings (warning severity). */
+export function isSensorWarningNotification(
+  n: Pick<StoredHardwareNotification, "componentKey" | "type">
+): boolean {
+  return (
+    n.type === "warning" &&
+    CRITICAL_SENSOR_KEYS.has(n.componentKey) &&
+    n.componentKey !== "drying_temp"
+  );
+}
+
+export function isAnyWarningNotification(
+  n: Pick<StoredHardwareNotification, "id" | "componentKey" | "type">
+): boolean {
+  return isDryingTemperatureWarning(n) || isSensorWarningNotification(n);
+}
+
 export function isCriticalSensorAlert(
   n: Pick<StoredHardwareNotification, "componentKey" | "type">
 ): boolean {
@@ -70,7 +87,7 @@ export function summarizeHardwareNotifications(
   for (const n of list) {
     if (!n.read) unread++;
     if (isCriticalSensorAlert(n)) critical++;
-    else if (isDryingTemperatureWarning(n)) dryingWarnings++;
+    else if (isAnyWarningNotification(n)) dryingWarnings++;
     else if (n.type === "info") info++;
   }
   return {

@@ -981,7 +981,7 @@ class DryingController extends Controller
                         });
                 });
             })
-            ->with(['sensorLogs:id,drying_session_id,temperature,humidity,moisture,fan_speed,recorded_at'])
+            ->with($this->sensorLogsWithApiColumns())
             ->latest('ended_at')
             ->latest('id')
             ->get();
@@ -1005,7 +1005,7 @@ class DryingController extends Controller
 
     public function show(int $id)
     {
-        $session = DryingSession::with(['sensorLogs:id,drying_session_id,temperature,humidity,moisture,fan_speed,recorded_at'])
+        $session = DryingSession::with($this->sensorLogsWithApiColumns())
             ->findOrFail($id);
 
         return response()->json([
@@ -1058,6 +1058,12 @@ class DryingController extends Controller
             'temperature' => 'nullable|numeric',
             'humidity' => 'nullable|numeric',
             'moisture' => 'nullable|numeric',
+            'moisture_checks' => 'nullable|array',
+            'moisture_checks.*.check_label' => 'nullable|string|max:64',
+            'moisture_checks.*.moisture' => 'required_with:moisture_checks|numeric|min:0|max:100',
+            'moisture_checks.*.temperature' => 'nullable|numeric',
+            'moisture_checks.*.humidity' => 'nullable|numeric',
+            'moisture_checks.*.recorded_at' => 'nullable|string',
         ]);
 
         $mcId = (int) $data['microcontroller_id'];
@@ -1232,7 +1238,10 @@ class DryingController extends Controller
                 }
                 $session->update($update);
 
-                $this->appendFinalSensorLogFromRequest($session, $data);
+                $this->persistMoistureChecksOnStop($session, $data);
+                if (empty($data['moisture_checks']) || ! is_array($data['moisture_checks'])) {
+                    $this->appendFinalSensorLogFromRequest($session, $data);
+                }
 
                 $this->syncEspSessionToFirebase($mcId, 'stopped', 0, 1);
 
@@ -1332,7 +1341,7 @@ class DryingController extends Controller
         $candidatesQuery = DryingSession::query()
             ->whereIn('status', ['stopped', 'completed'])
             ->whereNotNull('ended_at')
-            ->with(['sensorLogs:id,drying_session_id,temperature,humidity,moisture,fan_speed,recorded_at']);
+            ->with($this->sensorLogsWithApiColumns());
 
         if ($currentSession) {
             $candidatesQuery->where('id', '!=', $currentSession->id);
@@ -1343,17 +1352,39 @@ class DryingController extends Controller
 
         $candidates = $candidatesQuery
             ->get()
-            ->filter(fn (DryingSession $session) => $session->sensorLogs->isNotEmpty())
-            ->map(function (DryingSession $session) {
-                $logs = $session->sensorLogs;
-                return [
-                    'session' => $session,
-                    'avg_temperature' => (float) ($logs->avg('temperature') ?? 0),
-                    'avg_humidity' => (float) ($logs->avg('humidity') ?? 0),
-                    'avg_moisture' => (float) ($logs->avg('moisture') ?? 0),
-                    'avg_fan_speed' => (float) ($logs->avg('fan_speed') ?? ($session->fan_speed ?? 0)),
-                    'duration_minutes' => (float) ($session->drying_time_minutes ?? $session->set_duration_minutes ?? 0),
-                ];
+            ->flatMap(function (DryingSession $session) {
+                $spotChecks = $this->moistureSpotCheckLogs($session);
+                $durationMinutes = (float) ($session->drying_time_minutes ?? $session->set_duration_minutes ?? 0);
+
+                if ($spotChecks->isEmpty()) {
+                    $logs = $session->sensorLogs;
+                    if ($logs->isEmpty()) {
+                        return [];
+                    }
+                    $last = $logs->last();
+
+                    return [[
+                        'session' => $session,
+                        'moisture' => (float) ($last->moisture ?? 0),
+                        'temperature' => (float) ($last->temperature ?? $session->target_temperature ?? 0),
+                        'humidity' => (float) ($last->humidity ?? 0),
+                        'fan_speed' => (float) ($last->fan_speed ?? $session->fan_speed ?? 0),
+                        'duration_minutes' => $durationMinutes,
+                        'check_label' => $last->check_label ?? null,
+                    ]];
+                }
+
+                return $spotChecks->map(function ($log) use ($session, $durationMinutes) {
+                    return [
+                        'session' => $session,
+                        'moisture' => (float) $log->moisture,
+                        'temperature' => (float) ($log->temperature ?? $session->target_temperature ?? 0),
+                        'humidity' => (float) ($log->humidity ?? 0),
+                        'fan_speed' => (float) ($log->fan_speed ?? $session->fan_speed ?? 0),
+                        'duration_minutes' => $durationMinutes,
+                        'check_label' => $log->check_label ?? null,
+                    ];
+                })->all();
             })
             ->values();
 
@@ -1366,6 +1397,7 @@ class DryingController extends Controller
 
         $fishCandidates = $candidates
             ->filter(fn (array $c) => $this->fishTypesMatch($c['session']->fish_type ?? '', $activeFishType))
+            ->filter(fn (array $c) => (float) ($c['moisture'] ?? 0) > 0)
             ->values();
 
         if ($fishCandidates->isEmpty()) {
@@ -1393,16 +1425,16 @@ class DryingController extends Controller
 
         // Normalize features so distance isn't dominated by units (°C vs % vs fan level).
         $mins = [
-            't' => (float) $pool->min('avg_temperature'),
-            'h' => (float) $pool->min('avg_humidity'),
-            'm' => (float) $pool->min('avg_moisture'),
-            'f' => (float) $pool->min('avg_fan_speed'),
+            't' => (float) $pool->min('temperature'),
+            'h' => (float) $pool->min('humidity'),
+            'm' => (float) $pool->min('moisture'),
+            'f' => (float) $pool->min('fan_speed'),
         ];
         $maxs = [
-            't' => (float) $pool->max('avg_temperature'),
-            'h' => (float) $pool->max('avg_humidity'),
-            'm' => (float) $pool->max('avg_moisture'),
-            'f' => (float) $pool->max('avg_fan_speed'),
+            't' => (float) $pool->max('temperature'),
+            'h' => (float) $pool->max('humidity'),
+            'm' => (float) $pool->max('moisture'),
+            'f' => (float) $pool->max('fan_speed'),
         ];
         $norm = function (float $x, float $min, float $max): float {
             $range = $max - $min;
@@ -1420,10 +1452,10 @@ class DryingController extends Controller
         $nearest = $pool
             ->map(function (array $candidate) use ($currentNorm, $norm, $mins, $maxs) {
                 $candNorm = [
-                    $norm((float) $candidate['avg_temperature'], $mins['t'], $maxs['t']),
-                    $norm((float) $candidate['avg_humidity'], $mins['h'], $maxs['h']),
-                    $norm((float) $candidate['avg_moisture'], $mins['m'], $maxs['m']),
-                    $norm((float) $candidate['avg_fan_speed'], $mins['f'], $maxs['f']),
+                    $norm((float) $candidate['temperature'], $mins['t'], $maxs['t']),
+                    $norm((float) $candidate['humidity'], $mins['h'], $maxs['h']),
+                    $norm((float) $candidate['moisture'], $mins['m'], $maxs['m']),
+                    $norm((float) $candidate['fan_speed'], $mins['f'], $maxs['f']),
                 ];
 
                 $candidate['distance'] = sqrt(
@@ -1436,14 +1468,20 @@ class DryingController extends Controller
                 return $candidate;
             })
             ->sortBy('distance')
-            ->take(3)
-            ->values();
+            ->first();
 
-        $recommendedTemperature = round((float) $nearest->avg('avg_temperature'), 1);
-        $recommendedHumidity = round((float) $nearest->avg('avg_humidity'), 1);
-        $recommendedMoisture = round((float) $nearest->avg('avg_moisture'), 1);
-        $recommendedFanSpeed = (int) max(1, min(3, round((float) $nearest->avg('avg_fan_speed'))));
-        $recommendedDuration = (int) max(1, round((float) $nearest->avg('duration_minutes')));
+        if (! is_array($nearest)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Not enough past drying data yet. Complete more sessions to get suggestions.',
+            ], 404);
+        }
+
+        $recommendedTemperature = round((float) $nearest['temperature'], 1);
+        $recommendedHumidity = round((float) $nearest['humidity'], 1);
+        $recommendedMoisture = round((float) $nearest['moisture'], 1);
+        $recommendedFanSpeed = (int) max(1, min(3, round((float) $nearest['fan_speed'])));
+        $recommendedDuration = (int) max(1, round((float) $nearest['duration_minutes']));
         $elapsedMinutes = (int) (
             $inputElapsedMinutes !== null && $inputElapsedMinutes !== ''
                 ? $inputElapsedMinutes
@@ -1523,6 +1561,48 @@ class DryingController extends Controller
         return max(0, (int) ($session->drying_time_minutes ?? 0));
     }
 
+    private function persistMoistureChecksOnStop(DryingSession $session, array $data): void
+    {
+        $checks = $data['moisture_checks'] ?? null;
+        if (! is_array($checks) || $checks === []) {
+            return;
+        }
+
+        foreach ($checks as $check) {
+            if (! is_array($check)) {
+                continue;
+            }
+            if (! isset($check['moisture']) || ! is_numeric($check['moisture'])) {
+                continue;
+            }
+
+            $recordedAt = now();
+            if (! empty($check['recorded_at'])) {
+                try {
+                    $recordedAt = Carbon::parse((string) $check['recorded_at']);
+                } catch (\Throwable) {
+                    $recordedAt = now();
+                }
+            }
+
+            $payload = [
+                'drying_session_id' => $session->id,
+                'temperature' => (float) ($check['temperature'] ?? $session->target_temperature ?? 0),
+                'humidity' => (float) ($check['humidity'] ?? 0),
+                'moisture' => (float) $check['moisture'],
+                'fan_speed' => (int) ($session->fan_speed ?? 1),
+                'recorded_at' => $recordedAt,
+            ];
+            $this->applySensorLogMeta($payload, 'moisture_check', $check['check_label'] ?? null);
+
+            try {
+                SensorLog::create($payload);
+            } catch (\Throwable $e) {
+                Log::warning('moisture_check_stop_save_failed', ['message' => $e->getMessage()]);
+            }
+        }
+    }
+
     private function appendFinalSensorLogFromRequest(DryingSession $session, array $data): void
     {
         $hasReading = array_key_exists('temperature', $data)
@@ -1535,7 +1615,7 @@ class DryingController extends Controller
         $last = $session->sensorLogs()->latest('recorded_at')->first();
 
         try {
-            SensorLog::create([
+            $payload = [
                 'drying_session_id' => $session->id,
                 'temperature' => (float) (
                     $data['temperature'] ?? $last?->temperature ?? $session->target_temperature ?? 0
@@ -1544,7 +1624,9 @@ class DryingController extends Controller
                 'moisture' => (float) ($data['moisture'] ?? $last?->moisture ?? 0),
                 'fan_speed' => (int) ($session->fan_speed ?? $last?->fan_speed ?? 1),
                 'recorded_at' => now(),
-            ]);
+            ];
+            $this->applySensorLogMeta($payload, 'auto', null);
+            SensorLog::create($payload);
         } catch (\Throwable $e) {
             Log::warning('sensor_log_final_failed', ['message' => $e->getMessage()]);
         }
@@ -1579,33 +1661,240 @@ class DryingController extends Controller
             return;
         }
 
-        $last = $session->sensorLogs()->latest('recorded_at')->first();
+        $autoQuery = $session->sensorLogs();
+        if (Schema::hasColumn('sensor_logs', 'log_type')) {
+            $autoQuery->where(function ($q) {
+                $q->where('log_type', 'auto')->orWhereNull('log_type');
+            });
+        }
+        $last = $autoQuery->latest('recorded_at')->first();
         if ($last?->recorded_at && Carbon::parse($last->recorded_at)->gte(now()->subSeconds(25))) {
             return;
         }
 
         $temp = isset($readings['temperature']) ? (float) $readings['temperature'] : null;
         $humidity = isset($readings['humidity']) ? (float) $readings['humidity'] : null;
-        $moisture = isset($readings['moisture_percent'])
-            ? (float) $readings['moisture_percent']
-            : (isset($readings['moisture']) ? (float) $readings['moisture'] : null);
 
-        if ($temp === null && $humidity === null && $moisture === null) {
+        if ($temp === null && $humidity === null) {
             return;
         }
 
         try {
-            SensorLog::create([
+            $payload = [
                 'drying_session_id' => $session->id,
                 'temperature' => $temp ?? (float) ($session->target_temperature ?? 0),
                 'humidity' => $humidity ?? 0,
-                'moisture' => $moisture ?? 0,
+                'moisture' => 0,
                 'fan_speed' => (int) ($session->fan_speed ?? 1),
                 'recorded_at' => now(),
-            ]);
+            ];
+            $this->applySensorLogMeta($payload, 'auto', null);
+            SensorLog::create($payload);
         } catch (\Throwable $e) {
             Log::warning('sensor_log_insert_failed', ['message' => $e->getMessage()]);
         }
+    }
+
+    /** Columns exposed on mobile for sensor log rows. */
+    private function sensorLogApiColumns(): array
+    {
+        $cols = [
+            'id',
+            'drying_session_id',
+            'temperature',
+            'humidity',
+            'moisture',
+            'fan_speed',
+            'recorded_at',
+        ];
+        if (Schema::hasColumn('sensor_logs', 'log_type')) {
+            $cols[] = 'log_type';
+        }
+        if (Schema::hasColumn('sensor_logs', 'check_label')) {
+            $cols[] = 'check_label';
+        }
+
+        return $cols;
+    }
+
+    private function sensorLogsWithApiColumns(): array
+    {
+        return ['sensorLogs:'.$this->sensorLogApiColumnsCsv()];
+    }
+
+    private function sensorLogApiColumnsCsv(): string
+    {
+        return implode(',', $this->sensorLogApiColumns());
+    }
+
+    private function applySensorLogMeta(array &$payload, string $logType, ?string $checkLabel): void
+    {
+        if (Schema::hasColumn('sensor_logs', 'log_type')) {
+            $payload['log_type'] = $logType;
+        }
+        if (Schema::hasColumn('sensor_logs', 'check_label') && $checkLabel !== null && $checkLabel !== '') {
+            $payload['check_label'] = $checkLabel;
+        }
+    }
+
+    /** Manual fish moisture spot-checks saved from the mobile overview modal. */
+    public function saveMoistureCheck(Request $request)
+    {
+        $data = $request->validate([
+            'user_id' => 'required|integer|exists:users,id',
+            'microcontroller_id' => 'required|integer|exists:microcontrollers,id',
+            'moisture' => 'required|numeric|min:0|max:100',
+            'check_label' => 'nullable|string|max:64',
+            'temperature' => 'nullable|numeric',
+            'humidity' => 'nullable|numeric',
+        ]);
+
+        $session = DryingSession::where('microcontroller_id', (int) $data['microcontroller_id'])
+            ->whereIn('status', ['running', 'paused'])
+            ->whereNull('ended_at')
+            ->latest('started_at')
+            ->first();
+
+        if (! $session) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No active drying session. Start or pause a session first.',
+            ], 422);
+        }
+
+        $payload = [
+            'drying_session_id' => $session->id,
+            'temperature' => (float) ($data['temperature'] ?? $session->target_temperature ?? 0),
+            'humidity' => (float) ($data['humidity'] ?? 0),
+            'moisture' => (float) $data['moisture'],
+            'fan_speed' => (int) ($session->fan_speed ?? 1),
+            'recorded_at' => now(),
+        ];
+        $this->applySensorLogMeta($payload, 'moisture_check', $data['check_label'] ?? null);
+
+        try {
+            $log = SensorLog::create($payload);
+        } catch (\Throwable $e) {
+            Log::warning('moisture_check_save_failed', ['message' => $e->getMessage()]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Could not save moisture check.',
+            ], 500);
+        }
+
+        return response()->json([
+            'success' => true,
+            'log' => $log,
+            'moisture_checks' => $this->moistureChecksForSession($session->fresh()),
+        ]);
+    }
+
+    public function deleteMoistureCheck(Request $request, $logId)
+    {
+        $data = $request->validate([
+            'user_id' => 'required|integer|exists:users,id',
+            'microcontroller_id' => 'required|integer|exists:microcontrollers,id',
+        ]);
+
+        $session = DryingSession::where('microcontroller_id', (int) $data['microcontroller_id'])
+            ->whereIn('status', ['running', 'paused'])
+            ->whereNull('ended_at')
+            ->latest('started_at')
+            ->first();
+
+        if (! $session) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No active drying session.',
+            ], 422);
+        }
+
+        $log = SensorLog::where('id', (int) $logId)
+            ->where('drying_session_id', $session->id)
+            ->first();
+
+        if (! $log) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Moisture check not found.',
+            ], 404);
+        }
+
+        $isMoistureCheck = Schema::hasColumn('sensor_logs', 'log_type')
+            ? $log->log_type === 'moisture_check'
+            : ! empty($log->check_label);
+
+        if (! $isMoistureCheck) {
+            return response()->json([
+                'success' => false,
+                'message' => 'This log entry cannot be removed from moisture checks.',
+            ], 422);
+        }
+
+        try {
+            $log->delete();
+        } catch (\Throwable $e) {
+            Log::warning('moisture_check_delete_failed', ['message' => $e->getMessage()]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Could not remove moisture check.',
+            ], 500);
+        }
+
+        return response()->json([
+            'success' => true,
+            'moisture_checks' => $this->moistureChecksForSession($session->fresh()),
+        ]);
+    }
+
+    private function moistureChecksForSession(DryingSession $session): array
+    {
+        $query = $session->sensorLogs()->orderBy('recorded_at');
+
+        if (Schema::hasColumn('sensor_logs', 'log_type')) {
+            $query->where('log_type', 'moisture_check');
+        } elseif (Schema::hasColumn('sensor_logs', 'check_label')) {
+            $query->whereNotNull('check_label');
+        } else {
+            return [];
+        }
+
+        return $query->get($this->sensorLogApiColumns())->values()->all();
+    }
+
+    private function moistureSpotCheckLogs(DryingSession $session)
+    {
+        $logs = $session->sensorLogs;
+
+        if (Schema::hasColumn('sensor_logs', 'log_type')) {
+            $checks = $logs->where('log_type', 'moisture_check')->values();
+            if ($checks->isNotEmpty()) {
+                return $checks;
+            }
+        }
+
+        if (Schema::hasColumn('sensor_logs', 'check_label')) {
+            $checks = $logs->filter(fn ($log) => ! empty($log->check_label))->values();
+            if ($checks->isNotEmpty()) {
+                return $checks;
+            }
+        }
+
+        return $logs->filter(fn ($log) => (float) $log->moisture > 0)->values();
+    }
+
+    private function formatMoistureChecksForHistory($moistureLogs): array
+    {
+        return $moistureLogs->map(function ($log) {
+            return [
+                'id' => $log->id,
+                'check_label' => $log->check_label ?? null,
+                'moisture' => (float) $log->moisture,
+                'recorded_at' => optional($log->recorded_at)->toDateTimeString(),
+            ];
+        })->values()->all();
     }
 
     private function transformSessionForHistory(DryingSession $session): array
@@ -1613,12 +1902,15 @@ class DryingController extends Controller
         $logs = $session->sensorLogs;
         $lastLog = $logs->last();
 
+        $moistureLogs = $this->moistureSpotCheckLogs($session);
+        $moistureLastLog = $moistureLogs->last() ?? $lastLog;
+
         /** `drying_time_minutes` column stores running seconds (pause excluded). */
         $totalDryingSeconds = max(0, (int) ($session->drying_time_minutes ?? 0));
         $totalDryingMinutes = (int) floor($totalDryingSeconds / 60);
 
         $avgHumidity = $logs->isNotEmpty() ? round((float) $logs->avg('humidity'), 2) : null;
-        $avgMoisture = $logs->isNotEmpty() ? round((float) $logs->avg('moisture'), 2) : null;
+        $avgMoisture = $moistureLogs->isNotEmpty() ? round((float) $moistureLogs->avg('moisture'), 2) : null;
         $avgTemperature = $logs->isNotEmpty() ? round((float) $logs->avg('temperature'), 2) : null;
 
         return [
@@ -1636,8 +1928,10 @@ class DryingController extends Controller
             'drying_time_seconds' => (int) $totalDryingSeconds,
             'temperature' => $lastLog?->temperature !== null ? (float) $lastLog->temperature : null,
             'humidity' => $lastLog?->humidity !== null ? (float) $lastLog->humidity : $avgHumidity,
-            'moisture' => $lastLog?->moisture !== null ? (float) $lastLog->moisture : $avgMoisture,
+            'moisture' => $moistureLastLog?->moisture !== null ? (float) $moistureLastLog->moisture : $avgMoisture,
             'fan_speed' => $lastLog?->fan_speed ?? $session->fan_speed,
+            'moisture_checks' => $this->formatMoistureChecksForHistory($moistureLogs),
+            'moisture_check_count' => $moistureLogs->count(),
             'avg_temperature' => $avgTemperature,
             'avg_humidity' => $avgHumidity,
             'avg_moisture' => $avgMoisture,
@@ -1682,7 +1976,7 @@ class DryingController extends Controller
         $session = DryingSession::where('microcontroller_id', $machine->id)
             ->whereIn('status', ['running', 'paused'])
             ->whereNull('ended_at')
-            ->with(['sensorLogs:id,drying_session_id,temperature,humidity,moisture,fan_speed,recorded_at'])
+            ->with($this->sensorLogsWithApiColumns())
             ->orderByDesc('started_at')
             ->orderByDesc('id')
             ->first();

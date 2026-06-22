@@ -33,9 +33,6 @@ export default function RecommendationParamsCard({
     );
   }
 
-  const timeRow = rows.find((r) => r.id === "time");
-  const metricRows = rows.filter((r) => r.id !== "time");
-
   return (
     <View style={styles.wrap}>
       {extensionMode ? (
@@ -48,7 +45,7 @@ export default function RecommendationParamsCard({
       )}
 
       <View style={styles.grid}>
-        {metricRows.map((row) => (
+        {rows.map((row) => (
           <View key={row.id} style={styles.metricCell}>
             <View style={styles.metricIconWrap}>
               <FontAwesome name={row.icon} size={14} color="#0d3b66" />
@@ -60,18 +57,6 @@ export default function RecommendationParamsCard({
           </View>
         ))}
       </View>
-
-      {timeRow ? (
-        <View style={styles.timeRow}>
-          <View style={styles.timeIconWrap}>
-            <FontAwesome name="clock-o" size={16} color="#fff" />
-          </View>
-          <View style={styles.timeBody}>
-            <Text style={styles.timeLabel}>{timeRow.label}</Text>
-            <Text style={styles.timeValue}>{timeRow.value}</Text>
-          </View>
-        </View>
-      ) : null}
     </View>
   );
 }
@@ -145,43 +130,6 @@ const styles = StyleSheet.create({
     ...userTypography.bodyStrong,
     color: "#0f172a",
     fontSize: 15,
-  },
-
-  timeRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#0d3b66",
-    borderRadius: 10,
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    marginTop: 4,
-  },
-
-  timeIconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: "rgba(255,255,255,0.15)",
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: 12,
-  },
-
-  timeBody: {
-    flex: 1,
-  },
-
-  timeLabel: {
-    ...userTypography.caption,
-    color: "rgba(255,255,255,0.85)",
-    marginBottom: 2,
-  },
-
-  timeValue: {
-    fontSize: 20,
-    fontWeight: "700",
-    color: "#fff",
-    letterSpacing: 0.5,
   },
 
   emptyBox: {

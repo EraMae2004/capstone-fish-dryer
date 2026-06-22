@@ -23,6 +23,8 @@ Route::get('/drying-sessions/{id}', [MobileDryingController::class, 'show']);
 Route::delete('/drying-sessions/{id}', [MobileDryingController::class, 'destroy']);
 Route::post('/drying-sessions/batch-delete', [MobileDryingController::class, 'destroyBatch']);
 Route::post('/mobile/drying-session/control', [MobileDryingController::class, 'sessionControl']);
+Route::post('/mobile/drying-session/moisture-check', [MobileDryingController::class, 'saveMoistureCheck']);
+Route::delete('/mobile/drying-session/moisture-check/{logId}', [MobileDryingController::class, 'deleteMoistureCheck']);
 Route::get('/notifications', [MobileDryingController::class, 'notificationsIndex']);
 Route::post('/notifications/mark-read', [MobileDryingController::class, 'notificationsMarkRead']);
 Route::post('/notifications/delete-batch', [MobileDryingController::class, 'notificationsDestroyBatch']);

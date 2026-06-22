@@ -2,7 +2,6 @@ import { formatMinutesAsHMS } from "@/lib/duration-format";
 
 export type RecommendationParams = {
   temperature?: unknown;
-  humidity?: unknown;
   moisture?: unknown;
   fan_speed?: unknown;
   duration_minutes?: unknown;
@@ -24,6 +23,10 @@ export function getRecommendationRows(
     return null;
   }
 
+  const mins = extensionMode
+    ? Number(rec.extension_minutes)
+    : Number(rec.duration_minutes);
+
   const rows: RecommendationDisplayRow[] = [
     {
       id: "temperature",
@@ -39,13 +42,12 @@ export function getRecommendationRows(
     },
   ];
 
-  const hum = Number(rec.humidity);
-  if (Number.isFinite(hum)) {
+  if (Number.isFinite(mins) && mins >= 1) {
     rows.push({
-      id: "humidity",
-      label: "Humidity",
-      value: `${hum.toFixed(1)}%`,
-      icon: "tint",
+      id: "time",
+      label: extensionMode ? "Extension time" : "Drying time",
+      value: formatMinutesAsHMS(mins),
+      icon: "clock-o",
     });
   }
 
@@ -56,19 +58,6 @@ export function getRecommendationRows(
       label: "Moisture",
       value: `${moist.toFixed(1)}%`,
       icon: "leaf",
-    });
-  }
-
-  const mins = extensionMode
-    ? Number(rec.extension_minutes)
-    : Number(rec.duration_minutes);
-
-  if (Number.isFinite(mins) && mins >= 1) {
-    rows.push({
-      id: "time",
-      label: extensionMode ? "Extension time" : "Drying time",
-      value: formatMinutesAsHMS(mins),
-      icon: "clock-o",
     });
   }
 

@@ -1,18 +1,40 @@
 import React from "react";
-import { ScrollView, View, Text, StyleSheet } from "react-native";
-import { formatMoisturePercent, resolveMoisturePercent } from "@/lib/duration-format";
+import { ScrollView, View, Text, StyleSheet, TouchableOpacity } from "react-native";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
+import {
+  formatDoorSensorDisplay,
+  doorSensorDisplayColor,
+} from "@/lib/door-sensor-display";
+import { type MoistureBatchDraft } from "@/lib/moisture-checks";
 import { userTypography } from "@/lib/user-typography";
+
+type OverviewStatusProps = {
+  session: any;
+  hardware_statuses: any;
+  hardwareStreamFresh?: boolean;
+  liveReadings: any;
+  hasActiveSession?: boolean;
+  remainingTimeLabel?: string;
+  sessionStatus?: string;
+  doorForceClosed?: boolean;
+  moistureDraftBatches?: MoistureBatchDraft[];
+  onMoistureDraftChange?: (next: MoistureBatchDraft[]) => void;
+  onOpenMoistureModal?: () => void;
+};
+
 export default function OverviewStatus({
   session,
   hardware_statuses,
-  /** When set, hardware rows treat RTDB+API combined “live” (from parent). */
   hardwareStreamFresh,
-  /** RTDB `machines/{id}/hardware_status.readings` — live temp / humidity / moisture when present. */
   liveReadings,
-  /** Only show Current Details values while a session is running or paused. */
   hasActiveSession,
   remainingTimeLabel,
-}: any) {
+  sessionStatus,
+  doorForceClosed,
+  moistureDraftBatches = [],
+  onMoistureDraftChange,
+  onOpenMoistureModal,
+}: OverviewStatusProps) {
   const showSessionDetails = Boolean(hasActiveSession);
   const normalizeKey = (value: string) =>
     String(value ?? "")
@@ -35,7 +57,11 @@ export default function OverviewStatus({
   const lr = liveReadings && typeof liveReadings === "object" ? liveReadings : null;
   const liveTemp = lr?.temperature ?? lr?.temp;
   const liveHum = lr?.humidity ?? lr?.hum;
-  const liveMoistLabel = formatMoisturePercent(resolveMoisturePercent(lr));
+  const sessionSt = String(sessionStatus ?? "").trim().toLowerCase();
+  const useRealDoorSensor =
+    !sessionSt || sessionSt === "stopped" || sessionSt === "paused";
+
+  const moistureRowValue = showSessionDetails ? "Tap here" : null;
 
   /** ESP32 + real sensors only (matches Firebase `components` + firmware). */
   const hardwareComponents = [
@@ -87,111 +113,127 @@ export default function OverviewStatus({
   ];
 
   return (
-    <ScrollView>
+    <>
+      <ScrollView>
+        <View style={styles.card}>
+          <Text style={styles.cardHeader}>Current Details</Text>
 
-      <View style={styles.card}>
-        <Text style={styles.cardHeader}>Current Details</Text>
+          {renderRow("Type of Fish", showSessionDetails ? session?.fish_type : null)}
+          {renderRow("No. of Fish", showSessionDetails ? session?.total_fish : null)}
 
-        {renderRow("Type of Fish", showSessionDetails ? session?.fish_type : null)}
-        {renderRow("No. of Fish", showSessionDetails ? session?.total_fish : null)}
+          {renderRow(
+            "Current Temp",
+            showSessionDetails &&
+              liveTemp != null &&
+              String(liveTemp).trim() !== ""
+              ? String(liveTemp) + "°C"
+              : showSessionDetails && latestLog?.temperature
+                ? latestLog.temperature + "°C"
+                : null
+          )}
 
-        {renderRow(
-          "Current Temp",
-          showSessionDetails &&
-            liveTemp != null &&
-            String(liveTemp).trim() !== ""
-            ? String(liveTemp) + "°C"
-            : showSessionDetails && latestLog?.temperature
-              ? latestLog.temperature + "°C"
+          {renderRow(
+            "Target Temp",
+            showSessionDetails && session?.target_temperature
+              ? session.target_temperature + "°C"
               : null
-        )}
+          )}
 
-        {renderRow(
-          "Target Temp",
-          showSessionDetails && session?.target_temperature
-            ? session.target_temperature + "°C"
-            : null
-        )}
+          {renderRow(
+            "Humidity",
+            showSessionDetails &&
+              liveHum != null &&
+              String(liveHum).trim() !== ""
+              ? String(liveHum) + "%"
+              : showSessionDetails && latestLog?.humidity
+                ? latestLog.humidity + "%"
+                : null
+          )}
 
-        {renderRow(
-          "Humidity",
-          showSessionDetails &&
-            liveHum != null &&
-            String(liveHum).trim() !== ""
-            ? String(liveHum) + "%"
-            : showSessionDetails && latestLog?.humidity
-              ? latestLog.humidity + "%"
+          {renderMoistureRow(
+            "Current Moisture",
+            moistureRowValue,
+            showSessionDetails,
+            () => onOpenMoistureModal?.()
+          )}
+
+          {renderRow(
+            "Fan Speed",
+            showSessionDetails && session?.fan_speed ? "Level " + session.fan_speed : null
+          )}
+
+          {renderRow(
+            "Remaining Time",
+            showSessionDetails && typeof remainingTimeLabel === "string"
+              ? remainingTimeLabel
               : null
-        )}
+          )}
+        </View>
 
-        {renderRow(
-          "Current Moisture",
-          showSessionDetails && liveMoistLabel
-            ? liveMoistLabel
-            : showSessionDetails && latestLog?.moisture != null
-              ? `${Math.round(Number(latestLog.moisture))}%`
-              : null
-        )}
+        <View style={styles.card}>
+          <Text style={styles.cardHeader}>Hardware Status</Text>
 
-        {renderRow(
-          "Fan Speed",
-          showSessionDetails && session?.fan_speed ? "Level " + session.fan_speed : null
-        )}
+          {hardwareComponents.map((component, index) => {
+            const aliasSet = new Set(
+              component.aliases.map((a: string) => normalizeKey(a))
+            );
 
-        {renderRow(
-          "Remaining Time",
-          showSessionDetails && typeof remainingTimeLabel === "string"
-            ? remainingTimeLabel
-            : null
-        )}
-      </View>
+            const found = hardware_statuses?.find((item: any) => {
+              const key = normalizeKey(item.component_name);
+              return aliasSet.has(key);
+            });
 
-      <View style={styles.card}>
-        <Text style={styles.cardHeader}>Hardware Status</Text>
+            const streamLive = typeof hardwareStreamFresh === "boolean" ? hardwareStreamFresh : true;
+            const rawStatus = !streamLive
+              ? "not_working"
+              : (found?.status ?? "unknown");
+            const statusValue = normalizeStatus(rawStatus);
 
-        {hardwareComponents.map((component, index) => {
-          const aliasSet = new Set(
-            component.aliases.map((a: string) => normalizeKey(a))
-          );
+            const doorLabel =
+              component.key === "door_sensor"
+                ? formatDoorSensorDisplay(lr?.door, {
+                    streamLive: streamLive,
+                    componentStatus: rawStatus,
+                    forceClosed: !useRealDoorSensor && Boolean(doorForceClosed),
+                  })
+                : null;
 
-          const found = hardware_statuses?.find((item: any) => {
-            const key = normalizeKey(item.component_name);
-            return aliasSet.has(key);
-          });
+            const displayText = doorLabel
+              ? doorLabel === "not_working"
+                ? "not_working"
+                : doorLabel
+              : statusValue === "working"
+                ? "working"
+                : statusValue === "not_working"
+                  ? "not_working"
+                  : statusValue ?? "--";
 
-          const streamLive = typeof hardwareStreamFresh === "boolean" ? hardwareStreamFresh : true;
-          const rawStatus = !streamLive
-            ? "not_working"
-            : (found?.status ?? "unknown");
-          const statusValue = normalizeStatus(rawStatus);
+            const color = doorLabel
+              ? doorSensorDisplayColor(doorLabel)
+              : statusValue === "working"
+                ? "#2ecc71"
+                : statusValue === "not_working"
+                  ? "#e74c3c"
+                  : statusValue === "warning"
+                    ? "#f59e0b"
+                    : "#95a5a6";
 
-          const color =
-            statusValue === "working"
-              ? "#2ecc71"
-              : statusValue === "not_working"
-              ? "#e74c3c"
-              : statusValue === "warning"
-              ? "#f59e0b"
-              : statusValue === "unknown"
-              ? "#95a5a6"
-              : "#95a5a6";
+            return (
+              <View key={index} style={styles.row}>
+                <Text style={styles.label}>{component.label}</Text>
 
-          return (
-            <View key={index} style={styles.row}>
-              <Text style={styles.label}>{component.label}</Text>
-
-              <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <View style={[styles.dotSmall, { backgroundColor: color }]} />
-                <Text style={[styles.bold, { color }]}>
-                  {statusValue ?? "--"}
-                </Text>
+                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                  <View style={[styles.dotSmall, { backgroundColor: color }]} />
+                  <Text style={[styles.bold, { color }]}>
+                    {displayText}
+                  </Text>
+                </View>
               </View>
-            </View>
-          );
-        })}
-      </View>
-
-    </ScrollView>
+            );
+          })}
+        </View>
+      </ScrollView>
+    </>
   );
 }
 
@@ -201,6 +243,27 @@ function renderRow(label: string, value: any) {
       <Text style={styles.label}>{label}</Text>
       <Text style={styles.bold}>{value ?? "--"}</Text>
     </View>
+  );
+}
+
+function renderMoistureRow(
+  label: string,
+  value: string | null,
+  tappable: boolean,
+  onPress: () => void
+) {
+  if (!tappable) {
+    return renderRow(label, value);
+  }
+
+  return (
+    <TouchableOpacity style={styles.row} onPress={onPress} activeOpacity={0.7}>
+      <Text style={styles.label}>{label}</Text>
+      <View style={styles.moistureValueWrap}>
+        <Text style={[styles.bold, styles.moistureTappable]}>{value ?? "--"}</Text>
+        <MaterialCommunityIcons name="chevron-right" size={18} color="#1f4e6c" />
+      </View>
+    </TouchableOpacity>
   );
 }
 
@@ -230,8 +293,22 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: "row",
     justifyContent: "space-between",
+    alignItems: "center",
     paddingVertical: 8,
     borderBottomWidth: 0.5,
     borderColor: "#eee",
+  },
+
+  moistureValueWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+    maxWidth: "62%",
+  },
+
+  moistureTappable: {
+    color: "#1f4e6c",
+    textAlign: "right",
+    flexShrink: 1,
   },
 });

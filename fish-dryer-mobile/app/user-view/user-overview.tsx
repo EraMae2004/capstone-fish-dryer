@@ -5,12 +5,15 @@ import { onValue, ref as dbRef, set as dbSet, type DataSnapshot } from "firebase
 import OverviewStatus from "./overview-status";
 import OverviewParameters from "./overview-parameters";
 import OverviewHeader from "./overview-header";
+import DoorOpenModal from "./door-open-modal";
+import MoistureCheckModal from "./moisture-check-modal";
 import MachineDropdown from "./machine-dropdown";
 import { useSelectedMachine } from "@/lib/selected-machine";
 import { API_BASE_URL } from "@/config/api";
 import { firebaseDb } from "@/config/firebase";
 import {
   appendHardwareNotification,
+  CRITICAL_SENSOR_KEYS,
 } from "@/lib/hardware-notifications-store";
 import {
   digitsToMinutes,
@@ -20,13 +23,28 @@ import {
   minutesToDigits,
 } from "@/lib/duration-format";
 import { resolveMoisturePercent } from "@/lib/duration-format";
+import { lastMoistureFromDraft, type MoistureBatchDraft } from "@/lib/moisture-checks";
+import {
+  clearMoistureDraft,
+  flattenMoistureDraftForStop,
+  loadMoistureDraft,
+  saveMoistureDraft,
+} from "@/lib/moisture-session-draft";
 import { formatRecommendationParams } from "@/lib/format-recommendation";
+import { readRealDoorIsOpen } from "@/lib/door-sensor-display";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
 import {
   isMachineOnlineForUi,
   RTDB_INITIAL_STALE_MS,
   useStableMachineOnline,
 } from "@/lib/machine-presence";
+import {
+  canonicalHardwareSensorKey,
+  coerceHardwareStatus,
+  hardwareRowsFromComponentsMap,
+  componentsMapFromRtdbPayload,
+  parseHardwareStatusFromRtdb,
+} from "@/lib/hardware-status-rtdb";
 
 /** Poll Laravel for session + machine metadata (not used for online/offline when Firebase is on). */
 const OVERVIEW_API_POLL_MS = 15_000;
@@ -64,18 +82,11 @@ function toPositiveId(value: unknown): number | null {
 
 /** Recompute RTDB staleness every second so offline appears soon after the ESP stops. */
 const PRESENCE_UI_TICK_MS = 500;
-/** Same problem may fire again only after this gap; each fire creates a new list row. */
-const PROBLEM_NOTIFY_INTERVAL_MS = 120_000;
-
-/** Survives Overview unmount (notifications screen) so open/close does not spam alerts. */
-const problemNotifyLastMsByKey: Record<string, number> = {};
-
-function clearProblemNotifyThrottleForMachine(mcId: number) {
-  const suffix = `:${mcId}`;
-  for (const k of Object.keys(problemNotifyLastMsByKey)) {
-    if (k.endsWith(suffix)) delete problemNotifyLastMsByKey[k];
-  }
-}
+import {
+  tryAcquireProblemNotifySlot,
+  clearProblemNotifyThrottleForMachine,
+  clearProblemNotifyThrottleForSensor,
+} from "@/lib/problem-notify-throttle";
 
 function normalizeHardwareKey(value: string): string {
   return String(value ?? "")
@@ -84,17 +95,16 @@ function normalizeHardwareKey(value: string): string {
     .trim();
 }
 
-/** Map raw firmware status to alert severity. `warning` → unstable reading; `not_working`/etc → undetected/critical. */
-function alertTypeForStatus(raw: string): "critical" | "warning" | null {
-  const s = String(raw ?? "").trim().toLowerCase();
-  if (s === "warning") return "warning";
-  if (["not_working", "error", "fail", "failed", "offline"].includes(s)) return "critical";
+/** Map raw firmware status to alert severity. */
+function sensorAlertTypeFromStatus(raw: string): "critical" | "warning" | null {
+  const st = coerceHardwareStatus(raw);
+  if (st === "warning") return "warning";
+  if (st === "not_working") return "critical";
   return null;
 }
 
 function isGoodSensorStatus(raw: string): boolean {
-  const s = String(raw ?? "").trim().toLowerCase();
-  return ["working", "ok", "online", "pass", "passed"].includes(s);
+  return coerceHardwareStatus(raw) === "working";
 }
 
 /** Two messages per sensor: one for unstable readings (warning), one for undetected/disconnected (critical). */
@@ -150,7 +160,7 @@ const SENSOR_ALERT_META: Record<
 type UserOverviewProps = {
   unreadNotificationCount?: number;
   onOpenNotifications?: () => void;
-  onNotificationsChanged?: () => void;
+  onNotificationsChanged?: (opts?: { optimisticUnread?: number }) => void | Promise<void>;
 };
 
 export default function UserOverview({
@@ -214,6 +224,44 @@ export default function UserOverview({
   const [duration, setDuration] = useState("");
   const [recommendation, setRecommendation] = useState<any>(null);
   const [needsExtension, setNeedsExtension] = useState(false);
+  /** User chose Continue on open-door modal — show Closed while running. */
+  const [doorBypassClosed, setDoorBypassClosed] = useState(false);
+  const [doorModalVisible, setDoorModalVisible] = useState(false);
+  const [doorModalVariant, setDoorModalVariant] = useState<"start" | "resume">("start");
+  const [moistureModalOpen, setMoistureModalOpen] = useState(false);
+  const doorModalResolveRef = useRef<((proceed: boolean) => void) | null>(null);
+  const [moistureDraftBatches, setMoistureDraftBatches] = useState<MoistureBatchDraft[]>([]);
+  const moistureDraftBatchesRef = useRef<MoistureBatchDraft[]>([]);
+
+  useEffect(() => {
+    moistureDraftBatchesRef.current = moistureDraftBatches;
+  }, [moistureDraftBatches]);
+
+  const updateMoistureDraftBatches = useCallback(
+    (next: MoistureBatchDraft[]) => {
+      setMoistureDraftBatches(next);
+      const sessionId = Number(session?.id);
+      if (Number.isFinite(sessionId) && sessionId > 0) {
+        void saveMoistureDraft(sessionId, next);
+      }
+    },
+    [session?.id]
+  );
+
+  useEffect(() => {
+    const sessionId = Number(session?.id);
+    if (!Number.isFinite(sessionId) || sessionId <= 0) {
+      setMoistureDraftBatches([]);
+      return;
+    }
+    let cancelled = false;
+    void loadMoistureDraft(sessionId).then((draft) => {
+      if (!cancelled) setMoistureDraftBatches(draft);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.id]);
 
   useEffect(() => {
     if (machinesLoading) return;
@@ -221,10 +269,12 @@ export default function UserOverview({
 
     overviewRequestSeqRef.current += 1;
     setSession(null);
+    setMoistureDraftBatches([]);
     setHardwareStatuses([]);
     setLiveReadings(null);
     setRecommendation(null);
     setNeedsExtension(false);
+    setDoorBypassClosed(false);
     setOverviewRtdbLastReceiveMs(null);
     setOverviewRtdbPayloadAtMs(null);
     overviewHardwareFromRtdbRef.current = false;
@@ -326,40 +376,12 @@ export default function UserOverview({
         }
         setOverviewRtdbLastReceiveMs(now);
 
-        const componentsMap =
-          (val as Record<string, unknown>).components &&
-          typeof (val as Record<string, unknown>).components === "object"
-            ? (val as Record<string, unknown>).components
-            : val;
+        const parsed = parseHardwareStatusFromRtdb(val as Record<string, unknown>);
+        setHardwareStatuses(parsed.components);
+        overviewHardwareFromRtdbRef.current = true;
 
-        if (!componentsMap || typeof componentsMap !== "object") return;
-
-        const skip = new Set([
-          "components",
-          "updated_at",
-          "microcontroller_id",
-          "device_id",
-          "name",
-          "mac",
-          "readings",
-        ]);
-
-        const rows = Object.entries(componentsMap as Record<string, unknown>)
-          .filter(([k]) => !skip.has(k))
-          .map(([component_name, status]) => ({
-            component_name,
-            status: String(status ?? "unknown"),
-          }));
-
-        if (rows.length) {
-          setHardwareStatuses(rows);
-          overviewHardwareFromRtdbRef.current = true;
-        }
-
-        // Optional RTDB live readings (sent by firmware): { readings: { temperature, humidity, moisture, door } }
-        const readings = (val as any)?.readings;
-        if (readings && typeof readings === "object") {
-          setLiveReadings(readings);
+        if (parsed.readings && typeof parsed.readings === "object") {
+          setLiveReadings(parsed.readings);
         }
       },
       (err: unknown) => {
@@ -424,9 +446,7 @@ export default function UserOverview({
     if (mcId == null) return;
     const throttleKey = `${key}:${mcId}`;
     const now = Date.now();
-    const last = problemNotifyLastMsByKey[throttleKey] ?? 0;
-    if (now - last < PROBLEM_NOTIFY_INTERVAL_MS) return;
-    problemNotifyLastMsByKey[throttleKey] = now;
+    if (!tryAcquireProblemNotifySlot(key, mcId)) return;
     void appendHardwareNotification({
       id: `${throttleKey}:${now}`,
       type,
@@ -542,7 +562,21 @@ export default function UserOverview({
         }
       }
       if (!firebaseDb) {
-        setHardwareStatuses(data.hardware_statuses ?? []);
+        const map = componentsMapFromRtdbPayload({
+          components: Object.fromEntries(
+            (data.hardware_statuses ?? [])
+              .map((row: { component_name?: string; status?: string }) => {
+                const name = String(row?.component_name ?? "").trim();
+                if (!name) return null;
+                return [name, row?.status ?? "not_working"] as const;
+              })
+              .filter(
+                (entry: readonly [string, string] | null): entry is readonly [string, string] =>
+                  entry != null
+              )
+          ),
+        });
+        setHardwareStatuses(hardwareRowsFromComponentsMap(map));
       }
     },
     [firebaseDb]
@@ -634,7 +668,9 @@ export default function UserOverview({
         const tempVal =
           lr?.temperature ?? lr?.temp ?? temperature ?? activeSession?.target_temperature;
         const humVal = lr?.humidity ?? lr?.hum;
-        const moistVal = lr?.moisture_percent ?? lr?.moisture;
+        const draftMoist = lastMoistureFromDraft(moistureDraftBatches);
+        const liveMoist = lr?.moisture_percent ?? lr?.moisture;
+        const moistVal = draftMoist ?? liveMoist;
 
         if (tempVal != null && String(tempVal).trim() !== "") {
           params.append("temperature", String(tempVal));
@@ -666,7 +702,7 @@ export default function UserOverview({
         setNeedsExtension(false);
       }
     },
-    [session, activeMachineId, fishType, temperature, fanSpeed, liveReadings]
+    [session, activeMachineId, fishType, temperature, fanSpeed, liveReadings, moistureDraftBatches]
   );
 
   const fetchOverview = useCallback(async (machineIdOverride?: number | null) => {
@@ -832,17 +868,25 @@ export default function UserOverview({
         }
         appendSessionMetaToBody(body);
         body.drying_time_seconds = getUsedDryingSeconds();
-        const lr = liveReadings;
-        if (lr && typeof lr === "object") {
-          if (lr.temperature != null && Number.isFinite(Number(lr.temperature))) {
-            body.temperature = Number(lr.temperature);
-          }
-          if (lr.humidity != null && Number.isFinite(Number(lr.humidity))) {
-            body.humidity = Number(lr.humidity);
-          }
-          const moist = resolveMoisturePercent(lr as Record<string, unknown>);
-          if (moist != null) {
-            body.moisture = moist;
+
+        const draftChecks = flattenMoistureDraftForStop(moistureDraftBatchesRef.current);
+        if (draftChecks.length > 0) {
+          body.moisture_checks = draftChecks;
+          const lastCheck = draftChecks[draftChecks.length - 1];
+          body.moisture = lastCheck.moisture;
+        } else {
+          const lr = liveReadings;
+          if (lr && typeof lr === "object") {
+            if (lr.temperature != null && Number.isFinite(Number(lr.temperature))) {
+              body.temperature = Number(lr.temperature);
+            }
+            if (lr.humidity != null && Number.isFinite(Number(lr.humidity))) {
+              body.humidity = Number(lr.humidity);
+            }
+            const moist = resolveMoisturePercent(lr as Record<string, unknown>);
+            if (moist != null) {
+              body.moisture = moist;
+            }
           }
         }
       }
@@ -885,7 +929,12 @@ export default function UserOverview({
       }
 
       if (action === "stop") {
+        const stoppedSessionId = Number(session?.id);
         setSession(null);
+        setMoistureDraftBatches([]);
+        if (Number.isFinite(stoppedSessionId) && stoppedSessionId > 0) {
+          void clearMoistureDraft(stoppedSessionId);
+        }
         countdownEndMsRef.current = null;
         pausedRemainingSecRef.current = null;
         setPausedRemainingSec(null);
@@ -905,6 +954,11 @@ export default function UserOverview({
         }
         if (action === "start") {
           formBoundSessionIdRef.current = Number(data.session.id) || null;
+          setMoistureDraftBatches([]);
+          const newSessionId = Number(data.session.id);
+          if (Number.isFinite(newSessionId) && newSessionId > 0) {
+            void clearMoistureDraft(newSessionId);
+          }
           const dur = sessionDurationSeconds(data.session);
           if (dur > 0) countdownEndMsRef.current = Date.now() + dur * 1000;
           pausedRemainingSecRef.current = null;
@@ -964,13 +1018,49 @@ export default function UserOverview({
     }
   };
 
-  const startMachine = () => {
+  const closeDoorModal = (proceed: boolean) => {
+    setDoorModalVisible(false);
+    const resolve = doorModalResolveRef.current;
+    doorModalResolveRef.current = null;
+    resolve?.(proceed);
+  };
+
+  const confirmOpenDoorForDrying = (variant: "start" | "resume"): Promise<boolean> =>
+    new Promise((resolve) => {
+      doorModalResolveRef.current = resolve;
+      setDoorModalVariant(variant);
+      setDoorModalVisible(true);
+    });
+
+  const startMachine = async () => {
+    if (readRealDoorIsOpen(liveReadings?.door, { streamLive: machineOnline })) {
+      const proceed = await confirmOpenDoorForDrying("start");
+      if (!proceed) return;
+      setDoorBypassClosed(true);
+    } else {
+      setDoorBypassClosed(false);
+    }
     void postSessionControl("start");
   };
-  const pauseMachine = () => {
+
+  const pauseMachine = async () => {
+    const cur = String(session?.status ?? "").trim().toLowerCase();
+    if (cur === "paused") {
+      if (readRealDoorIsOpen(liveReadings?.door, { streamLive: machineOnline })) {
+        const proceed = await confirmOpenDoorForDrying("resume");
+        if (!proceed) return;
+        setDoorBypassClosed(true);
+      } else {
+        setDoorBypassClosed(false);
+      }
+    } else if (cur === "running") {
+      setDoorBypassClosed(false);
+    }
     void postSessionControl("pause");
   };
+
   const stopMachine = () => {
+    setDoorBypassClosed(false);
     void postSessionControl("stop");
   };
   const executeApplyRecommendation = async () => {
@@ -1181,32 +1271,97 @@ export default function UserOverview({
     const mcId = toPositiveId(activeMachineId);
     if (mcId == null) return;
 
-    if (sessionStatus !== "running" && sessionStatus !== "paused") {
-      clearProblemNotifyThrottleForMachine(mcId);
-      return;
-    }
-
     const machineOnlineForAlerts = isMachineOnlineForUi({
       firebaseConfigured: Boolean(firebaseDb),
       rtdbLastReceiveMs: overviewRtdbLastReceiveMs,
       machine: activeMachineForPresence,
       stableOnline: overviewStableOnline,
     });
-    if (!machineOnlineForAlerts) return;
 
-    const criticalSensors = new Set(["dht22", "moisture_sensor", "door_sensor"]);
+    if (!machineOnlineForAlerts) {
+      clearProblemNotifyThrottleForMachine(mcId);
+      return;
+    }
+
+    const statusByKey = new Map<string, string>();
     for (const row of hardwareStatuses ?? []) {
-      const key = normalizeHardwareKey(String(row.component_name ?? ""));
-      if (!criticalSensors.has(key)) continue;
-      const st = String(row.status ?? "");
-      const alertType = alertTypeForStatus(st);
+      const key = canonicalHardwareSensorKey(String(row.component_name ?? ""));
+      if (key) statusByKey.set(key, coerceHardwareStatus(row.status));
+    }
+
+    const alertSensorKeys = new Set<string>([...CRITICAL_SENSOR_KEYS, "esp32"]);
+
+    for (const key of alertSensorKeys) {
+      const st = statusByKey.get(key) ?? "not_working";
+      let alertType = sensorAlertTypeFromStatus(st);
+
+      if (
+        key === "dht22" &&
+        !alertType &&
+        isGoodSensorStatus(st) &&
+        machineOnlineForAlerts &&
+        liveReadings &&
+        typeof liveReadings === "object"
+      ) {
+        const hasTemp = Number.isFinite(Number(liveReadings?.temperature ?? liveReadings?.temp));
+        const hasHum = Number.isFinite(Number(liveReadings?.humidity ?? liveReadings?.hum));
+        if (!hasTemp && !hasHum) {
+          alertType = "critical";
+        }
+      }
+
+      if (
+        key === "door_sensor" &&
+        !alertType &&
+        isGoodSensorStatus(st) &&
+        machineOnlineForAlerts &&
+        liveReadings &&
+        typeof liveReadings === "object"
+      ) {
+        const door = String(liveReadings?.door ?? "").trim().toLowerCase();
+        if (door !== "open" && door !== "closed") {
+          alertType = "critical";
+        }
+      }
+
+      if (
+        key === "moisture_sensor" &&
+        !alertType &&
+        isGoodSensorStatus(st) &&
+        machineOnlineForAlerts &&
+        liveReadings &&
+        typeof liveReadings === "object"
+      ) {
+        const moisture = resolveMoisturePercent(liveReadings);
+        if (moisture == null) {
+          alertType = "critical";
+        }
+      }
+
       if (alertType === "critical") {
         const meta = SENSOR_ALERT_META[key]?.critical;
         if (meta) {
-          notifyProblemOnInterval(`hw:${key}:critical`, "critical", meta.title, meta.desc, key);
+          notifyProblemOnInterval(
+            `hw:${key}:critical`,
+            "critical",
+            meta.title,
+            meta.desc,
+            key
+          );
+        }
+      } else if (alertType === "warning") {
+        const meta = SENSOR_ALERT_META[key]?.warning;
+        if (meta) {
+          notifyProblemOnInterval(
+            `hw:${key}:warning`,
+            "warning",
+            meta.title,
+            meta.desc,
+            key
+          );
         }
       } else if (isGoodSensorStatus(st)) {
-        delete problemNotifyLastMsByKey[`hw:${key}:critical:${mcId}`];
+        clearProblemNotifyThrottleForSensor(key, mcId);
       }
     }
 
@@ -1290,6 +1445,11 @@ export default function UserOverview({
             liveReadings={liveReadings}
             hasActiveSession={hasActiveSession}
             remainingTimeLabel={timerLabel}
+            sessionStatus={sessionStatus}
+            doorForceClosed={isSessionRunning && doorBypassClosed}
+            moistureDraftBatches={moistureDraftBatches}
+            onMoistureDraftChange={updateMoistureDraftBatches}
+            onOpenMoistureModal={() => setMoistureModalOpen(true)}
           />
         ) : (
           <OverviewParameters
@@ -1337,6 +1497,25 @@ export default function UserOverview({
           <Text style={styles.navText}>Control Panel</Text>
         </TouchableOpacity>
       </View>
+
+      <DoorOpenModal
+        visible={doorModalVisible}
+        variant={doorModalVariant}
+        onCancel={() => closeDoorModal(false)}
+        onContinue={() => closeDoorModal(true)}
+      />
+
+      <MoistureCheckModal
+        visible={moistureModalOpen}
+        onClose={() => setMoistureModalOpen(false)}
+        batches={moistureDraftBatches}
+        onBatchesChange={updateMoistureDraftBatches}
+        liveReadings={
+          liveReadings && typeof liveReadings === "object"
+            ? (liveReadings as Record<string, unknown>)
+            : null
+        }
+      />
 
     </View>
   );

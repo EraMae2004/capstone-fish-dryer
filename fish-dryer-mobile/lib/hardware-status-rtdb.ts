@@ -148,6 +148,11 @@ function canonicalKeyFromRawName(raw: string): FirebaseSensorComponentKey | null
   return null;
 }
 
+/** Map API / RTDB component_name to canonical sensor key (dht22, moisture_sensor, …). */
+export function canonicalHardwareSensorKey(raw: string): FirebaseSensorComponentKey | null {
+  return canonicalKeyFromRawName(raw);
+}
+
 /** Flatten RTDB `components` object, legacy flat payload, or list of rows into a status map. */
 export function componentsMapFromRtdbPayload(val: Record<string, unknown>): Record<string, string> {
   const raw =

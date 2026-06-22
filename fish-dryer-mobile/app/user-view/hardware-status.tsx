@@ -39,6 +39,12 @@ import {
   publishHardwareTestCommand,
 } from "@/lib/hardware-test-command";
 import { userTypography } from "@/lib/user-typography";
+import {
+  formatDoorSensorDisplay,
+  doorSensorDisplayColorHardware,
+  doorSensorDisplayTitle,
+  isDoorSensorUiLabel,
+} from "@/lib/door-sensor-display";
 import MachineDropdown from "./machine-dropdown";
 import { getSelectedMachineId, setSelectedMachineId } from "@/lib/selected-machine";
 
@@ -254,6 +260,9 @@ export default function HardwareStatus() {
   const [diagModalTitle, setDiagModalTitle] = useState("Diagnostic Results");
   const [diagModalResults, setDiagModalResults] = useState<SensorDiagnostic[]>([]);
   const [diagModalAgeSec, setDiagModalAgeSec] = useState<number | null>(null);
+  const [diagTestInProgress, setDiagTestInProgress] = useState(false);
+  const [diagIsTestAll, setDiagIsTestAll] = useState(false);
+  const [moistureTestAllResult, setMoistureTestAllResult] = useState<boolean | null>(null);
 
   const [modalVisible, setModalVisible] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
@@ -640,11 +649,31 @@ export default function HardwareStatus() {
   };
 
   const statusLabel = (name: string) => {
+    if (isDoorSensorUiLabel(name)) {
+      return doorSensorDisplayTitle(
+        formatDoorSensorDisplay(liveReadings?.door, {
+          streamLive: hardwareStreamFresh,
+          componentStatus: getComponentStatus(name),
+        })
+      );
+    }
     const s = normalizeStatusWord(getComponentStatus(name));
     if (["working", "ok", "online", "pass", "passed"].includes(s)) return "Working";
     if (["not_working", "error", "offline", "fail", "failed"].includes(s)) return "Not Working";
     if (s === "warning") return "Warning";
     return "Unknown";
+  };
+
+  const statusColorForComponent = (name: string, status: string) => {
+    if (isDoorSensorUiLabel(name)) {
+      return doorSensorDisplayColorHardware(
+        formatDoorSensorDisplay(liveReadings?.door, {
+          streamLive: hardwareStreamFresh,
+          componentStatus: getComponentStatus(name),
+        })
+      );
+    }
+    return getStatusColor(status);
   };
 
   /**
@@ -795,24 +824,29 @@ export default function HardwareStatus() {
         key,
         label: "Door Sensor (MC38)",
         ok: false,
-        headline: "Not connected",
-        details:
-          "Reed switch is not detected on GPIO15. Check that the switch is wired between GPIO15 and GND.",
+        headline: "Not Working",
+        details: "Sensor is not responding on GPIO16. Check wiring and the door magnet.",
       };
     }
-    const doorState = String(r.door ?? "").toLowerCase();
-    const isOpen = doorState === "open";
-    const isClosed = doorState === "closed";
+    const doorState = formatDoorSensorDisplay(r.door, {
+      streamLive: true,
+      componentStatus: "working",
+    });
+    if (doorState === "not_working") {
+      return {
+        key,
+        label: "Door Sensor (MC38)",
+        ok: false,
+        headline: "Not Working",
+        details: "No valid door reading from the board.",
+      };
+    }
     return {
       key,
       label: "Door Sensor (MC38)",
       ok: true,
-      headline: isOpen ? "Connected · Door OPEN" : isClosed ? "Connected · Door CLOSED" : "Connected",
-      details: isOpen
-        ? "Magnet is away from the reed (door open)."
-        : isClosed
-          ? "Magnet is at the reed (door closed)."
-          : "Connected, but state is unknown — wait one heartbeat and try again.",
+      headline: doorState,
+      details: "",
     };
   };
 
@@ -859,6 +893,9 @@ export default function HardwareStatus() {
     stopTestPolling();
     setTestingAll(false);
     setTestingComponent(null);
+    setDiagTestInProgress(false);
+    setDiagIsTestAll(false);
+    setMoistureTestAllResult(null);
     const mid = selectedMachineIdRef.current;
     if (mid != null && firebaseDb) {
       void clearHardwareTestCommand(firebaseDb, mid).catch(() => {});
@@ -885,6 +922,11 @@ export default function HardwareStatus() {
     const runId = Date.now();
     activeTestRunRef.current = runId;
     testDismissedRef.current = false;
+    setDiagIsTestAll(keys.length > 1);
+    setDiagTestInProgress(true);
+    if (keys.length > 1) {
+      setMoistureTestAllResult(null);
+    }
     onStart();
     const endAt = Date.now() + durationMs;
 
@@ -934,8 +976,15 @@ export default function HardwareStatus() {
       }
       if (!testDismissedRef.current) {
         await refreshModal(true);
+        if (keys.includes("moisture_sensor") && keys.length > 1) {
+          const snapshot = await fetchLatestSnapshot(machineId);
+          if (snapshot) {
+            setMoistureTestAllResult(buildDiagnostic("moisture_sensor", snapshot).ok);
+          }
+        }
       }
       activeTestRunRef.current = null;
+      setDiagTestInProgress(false);
       onEnd();
     };
 
@@ -1407,13 +1456,15 @@ export default function HardwareStatus() {
               HARDWARE_ICON_BY_LABEL[name] ?? "cube-outline";
             const iconColor = !selectedMachine
               ? "#9ca3af"
-              : status === "working"
-                ? "#22c55e"
-                : status === "not_working"
-                  ? "#ef4444"
-                  : status === "warning"
-                    ? "#f59e0b"
-                    : "#9ca3af";
+              : isDoorSensorUiLabel(name)
+                ? statusColorForComponent(name, status)
+                : status === "working"
+                  ? "#22c55e"
+                  : status === "not_working"
+                    ? "#ef4444"
+                    : status === "warning"
+                      ? "#f59e0b"
+                      : "#9ca3af";
 
             return (
               <View key={name} style={styles.componentRow}>
@@ -1430,9 +1481,26 @@ export default function HardwareStatus() {
                     <Text style={styles.componentName} numberOfLines={3}>
                       {name}
                     </Text>
-                    <Text style={styles.subText}>
-                      {!selectedMachine ? "Select a machine" : statusLabel(name)}
-                    </Text>
+                    {testingAll && name === "Moisture Sensor" ? (
+                      <View style={styles.moistureTestSubRow}>
+                        <ActivityIndicator size="small" color="#1f4e6c" />
+                        <Text style={styles.subText}>
+                          Touch the probe to test if it's working.
+                        </Text>
+                      </View>
+                    ) : (
+                      <Text style={styles.subText}>
+                        {!selectedMachine
+                          ? "Select a machine"
+                          : !testingAll &&
+                              moistureTestAllResult != null &&
+                              name === "Moisture Sensor"
+                            ? moistureTestAllResult
+                              ? "Working"
+                              : "Not working"
+                            : statusLabel(name)}
+                      </Text>
+                    )}
                   </View>
                 </View>
 
@@ -1440,7 +1508,7 @@ export default function HardwareStatus() {
                   <View
                     style={[
                       styles.badge,
-                      { backgroundColor: getStatusColor(status) },
+                      { backgroundColor: statusColorForComponent(name, status) },
                     ]}
                   >
                     <Text style={styles.badgeText}>
@@ -1483,6 +1551,8 @@ export default function HardwareStatus() {
         results={diagModalResults}
         ageSec={diagModalAgeSec}
         machineName={selectedMachine?.name ?? null}
+        testInProgress={diagTestInProgress}
+        isTestAll={diagIsTestAll}
         onClose={closeDiagnosticModal}
       />
     </SafeAreaView>
@@ -1502,6 +1572,8 @@ function DiagnosticResultsModal({
   results,
   ageSec,
   machineName,
+  testInProgress,
+  isTestAll,
   onClose,
 }: {
   visible: boolean;
@@ -1509,13 +1581,18 @@ function DiagnosticResultsModal({
   results: SensorDiagnostic[];
   ageSec: number | null;
   machineName: string | null;
+  testInProgress: boolean;
+  isTestAll: boolean;
   onClose: () => void;
 }) {
   const summary = (() => {
     if (results.length === 0) return null;
-    const passes = results.filter((r) => r.ok).length;
-    const fails = results.length - passes;
-    return { passes, fails, total: results.length };
+    const countable = results.filter(
+      (r) => !(isTestAll && testInProgress && r.key === "moisture_sensor")
+    );
+    const passes = countable.filter((r) => r.ok).length;
+    const fails = countable.length - passes;
+    return { passes, fails, total: countable.length };
   })();
 
   const iconForKey = (k: SensorDiagnostic["key"]):
@@ -1593,9 +1670,52 @@ function DiagnosticResultsModal({
             bounces
           >
             {results.map((r) => {
+              const moisturePending =
+                isTestAll && testInProgress && r.key === "moisture_sensor";
+
+              if (moisturePending) {
+                return (
+                  <View
+                    key={r.key}
+                    style={[diagStyles.resultCard, { borderLeftColor: "#64748b" }]}
+                  >
+                    <View style={diagStyles.resultHeader}>
+                      <View
+                        style={[diagStyles.resultIcon, { backgroundColor: "#f1f5f9" }]}
+                      >
+                        <MaterialCommunityIcons
+                          name={iconForKey(r.key)}
+                          size={20}
+                          color="#64748b"
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={diagStyles.resultLabel}>{r.label}</Text>
+                        <Text style={[diagStyles.resultHeadline, { color: "#475569" }]}>
+                          Testing…
+                        </Text>
+                      </View>
+                      <ActivityIndicator size="small" color="#1f4e6c" />
+                    </View>
+                    <View style={diagStyles.detailsBlock}>
+                      <Text style={diagStyles.probeTestSubtext}>
+                        Touch the probe to test if it's working.
+                      </Text>
+                    </View>
+                  </View>
+                );
+              }
+
+              const isMoistureTestAllDone =
+                isTestAll && !testInProgress && r.key === "moisture_sensor";
               const accent = r.ok ? "#22c55e" : "#ef4444";
               const tint = r.ok ? "#f0fdf4" : "#fef2f2";
               const headlineColor = r.ok ? "#15803d" : "#b91c1c";
+              const displayHeadline = isMoistureTestAllDone
+                ? r.ok
+                  ? "Working"
+                  : "Not working"
+                : r.headline;
 
               return (
                 <View key={r.key} style={[diagStyles.resultCard, { borderLeftColor: accent }]}>
@@ -1610,7 +1730,7 @@ function DiagnosticResultsModal({
                     <View style={{ flex: 1 }}>
                       <Text style={diagStyles.resultLabel}>{r.label}</Text>
                       <Text style={[diagStyles.resultHeadline, { color: headlineColor }]}>
-                        {r.headline}
+                        {displayHeadline}
                       </Text>
                     </View>
                     <View style={[diagStyles.resultBadge, { backgroundColor: accent }]}>
@@ -1791,6 +1911,14 @@ const styles = StyleSheet.create({
   subText: {
     ...userTypography.caption,
     color: "#6b7280",
+  },
+
+  moistureTestSubRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 2,
+    flexShrink: 1,
   },
 
   right: {
@@ -1984,6 +2112,13 @@ const diagStyles = StyleSheet.create({
     ...userTypography.caption,
     color: "#334155",
     lineHeight: 18,
+  },
+
+  probeTestSubtext: {
+    ...userTypography.body,
+    color: "#475569",
+    lineHeight: 20,
+    textAlign: "center",
   },
 
   footer: {

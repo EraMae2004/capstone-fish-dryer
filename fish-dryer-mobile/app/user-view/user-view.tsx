@@ -45,12 +45,18 @@ export default function UserView() {
 
   const slideAnim = useState(new Animated.Value(-width))[0];
 
-  const refreshUnreadNotificationCount = useCallback(async () => {
-    const machineId = await getSelectedMachineId();
-    const count = await countUnreadHardwareNotifications(machineId);
-    setUnreadNotificationCount(count);
-    return count;
-  }, []);
+  const refreshUnreadNotificationCount = useCallback(
+    async (opts?: { optimisticUnread?: number }): Promise<void> => {
+      if (opts?.optimisticUnread !== undefined) {
+        setUnreadNotificationCount(opts.optimisticUnread);
+        return;
+      }
+      const machineId = await getSelectedMachineId();
+      const count = await countUnreadHardwareNotifications(machineId);
+      setUnreadNotificationCount(count);
+    },
+    []
+  );
 
   const reloadUserFromStorage = useCallback(async () => {
     const storedUser = await AsyncStorage.getItem('user');
@@ -115,14 +121,6 @@ export default function UserView() {
 
   const renderContent = () => {
     switch (activeScreen) {
-      case 'overview':
-        return (
-          <UserOverview
-            unreadNotificationCount={unreadNotificationCount}
-            onOpenNotifications={() => setActiveScreen('notifications')}
-            onNotificationsChanged={refreshUnreadNotificationCount}
-          />
-        );
       case 'history':
         return <UserHistory />;
       case 'notifications':
@@ -136,6 +134,7 @@ export default function UserView() {
         return <HardwareStatus />;
       case 'profile':
         return <UserProfile onProfileSaved={setUser} />;
+      case 'overview':
       default:
         return null;
     }
@@ -184,7 +183,24 @@ export default function UserView() {
 
       {/* ================= CONTENT ================= */}
       <ShellSidebarOpenContext.Provider value={sidebarVisible}>
-        <View style={styles.content}>{renderContent()}</View>
+        <View style={styles.content}>
+          <View
+            style={[
+              styles.screenLayer,
+              activeScreen !== 'overview' && styles.screenHidden,
+            ]}
+            pointerEvents={activeScreen === 'overview' ? 'auto' : 'none'}
+          >
+            <UserOverview
+              unreadNotificationCount={unreadNotificationCount}
+              onOpenNotifications={() => setActiveScreen('notifications')}
+              onNotificationsChanged={refreshUnreadNotificationCount}
+            />
+          </View>
+          {activeScreen !== 'overview' ? (
+            <View style={styles.foregroundScreen}>{renderContent()}</View>
+          ) : null}
+        </View>
       </ShellSidebarOpenContext.Provider>
 
       {/* ================= OVERLAY ================= */}
@@ -304,6 +320,23 @@ const styles = StyleSheet.create({
     flex: 1,
     padding: 25,
     zIndex: 1,
+  },
+
+  screenLayer: {
+    flex: 1,
+  },
+
+  screenHidden: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    opacity: 0,
+  },
+
+  foregroundScreen: {
+    flex: 1,
   },
 
   sidebar: {
