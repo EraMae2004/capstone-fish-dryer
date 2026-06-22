@@ -203,6 +203,7 @@ class DryingController extends Controller
 
         return match ($value) {
             'working', 'ok', 'on', 'online', 'connected', 'active', 'true', '1', 'yes', 'up', 'good', 'present', 'detected' => 'working',
+            'standby', 'idle' => 'standby',
             'warning', 'warn', 'degraded' => 'warning',
             'not_working', 'off', 'false', '0', 'no', 'error', 'fail', 'failed', 'disconnected', 'bad', 'offline', 'down', 'absent', 'missing' => 'not_working',
             // Never guess "working" for unknown strings — that makes the UI look random/wrong.

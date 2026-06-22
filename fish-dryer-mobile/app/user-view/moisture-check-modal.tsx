@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { resolveMoisturePercent, formatMoisturePercent } from "@/lib/duration-format";
+import { isMoistureProbeWorking } from "@/lib/hardware-status-rtdb";
 import {
   newMoistureBatchLabel,
   nextFishLabel,
@@ -26,6 +27,8 @@ type Props = {
   batches: MoistureBatchDraft[];
   onBatchesChange: (next: MoistureBatchDraft[]) => void;
   liveReadings: Record<string, unknown> | null;
+  moistureSensorStatus?: string;
+  onNotifyNoReading?: () => void;
 };
 
 function newLocalId(): string {
@@ -59,10 +62,15 @@ export default function MoistureCheckModal({
   batches,
   onBatchesChange,
   liveReadings,
+  moistureSensorStatus,
+  onNotifyNoReading,
 }: Props) {
   const [expandedBatchId, setExpandedBatchId] = useState<string | null>(null);
-  const liveMoisture = resolveMoisturePercent(liveReadings);
-  const liveMoistureLabel = formatMoisturePercent(liveMoisture) ?? "--";
+  const probeWorking = isMoistureProbeWorking(liveReadings, moistureSensorStatus);
+  const liveMoisture = probeWorking ? resolveMoisturePercent(liveReadings) : null;
+  const liveMoistureLabel = probeWorking
+    ? formatMoisturePercent(liveMoisture) ?? "--"
+    : "Sensor is not working";
 
   useEffect(() => {
     if (!visible) {
@@ -101,11 +109,31 @@ export default function MoistureCheckModal({
     );
   };
 
-  const checkNew = (batch: MoistureBatchDraft) => {
-    if (liveMoisture == null) {
-      Alert.alert("No reading", "Place the probe on the fish and wait for a value.");
-      return;
+  const notifySensorNotWorking = () => {
+    Alert.alert(
+      "Sensor is not working",
+      "The moisture probe is on standby. Place it firmly on the fish until the sensor shows Working, then try again."
+    );
+    onNotifyNoReading?.();
+  };
+
+  const canRecordReading = (): boolean => {
+    if (!probeWorking) {
+      notifySensorNotWorking();
+      return false;
     }
+    if (liveMoisture == null) {
+      Alert.alert(
+        "No reading yet",
+        "The sensor is working but no moisture value was read. Hold the probe on the fish and try again."
+      );
+      return false;
+    }
+    return true;
+  };
+
+  const checkNew = (batch: MoistureBatchDraft) => {
+    if (!canRecordReading() || liveMoisture == null) return;
     const fishLabel = nextFishLabel(batch);
     const reading = captureReading(liveMoisture, fishLabel);
     onBatchesChange(
@@ -118,10 +146,7 @@ export default function MoistureCheckModal({
   };
 
   const checkAgain = (batch: MoistureBatchDraft) => {
-    if (liveMoisture == null) {
-      Alert.alert("No reading", "Place the probe on the fish and wait for a value.");
-      return;
-    }
+    if (!canRecordReading() || liveMoisture == null) return;
     const last = batch.readings[batch.readings.length - 1];
     const fishLabel = last ? last.fishLabel : "Fish 1";
     const reading = captureReading(liveMoisture, fishLabel);
@@ -165,7 +190,11 @@ export default function MoistureCheckModal({
 
           <View style={styles.probeRow}>
             <Text style={styles.probeLabel}>Probe</Text>
-            <Text style={styles.probeValue}>{liveMoistureLabel}</Text>
+            <Text
+              style={[styles.probeValue, !probeWorking && styles.probeValueFault]}
+            >
+              {liveMoistureLabel}
+            </Text>
           </View>
 
           <TouchableOpacity style={styles.addBtn} onPress={addBatch} activeOpacity={0.85}>
@@ -355,6 +384,10 @@ const styles = StyleSheet.create({
     ...userTypography.bodyStrong,
     color: "#1f4e6c",
     fontSize: 16,
+  },
+  probeValueFault: {
+    color: "#c0392b",
+    fontSize: 14,
   },
   addBtn: {
     flexDirection: "row",

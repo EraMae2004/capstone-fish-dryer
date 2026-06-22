@@ -38,9 +38,9 @@
       /** Drying target °C from RTDB session (used when session is `running`). */
       static float gSessionTargetC = 60.0f;
 
-      // ===== BUZZER — drying session RUNNING only (never idle / paused / stopped / test) =====
-      //  Faults: sensors bad, temp above target, still below target after 20 min drying.
-      //  Pattern: 10 s ON, 10 s silent, repeat until resolved.
+      // ===== BUZZER (running session only) =====
+      //  Door opened after closed start | DHT22 fault | temp high | temp low 10+ min
+      //  Moisture probe never drives buzzer (spot-check in app only).
       /** Max remote test length (ms). */
       #ifndef HARDWARE_TEST_MAX_MS
       #define HARDWARE_TEST_MAX_MS 12000UL
@@ -52,12 +52,11 @@
       #ifndef ALERT_BUZZ_SILENT_MS
       #define ALERT_BUZZ_SILENT_MS 10000UL
       #endif
-      /** Below target after this much drying time → temp fault buzzer. */
+      /** Below target after this much drying time → temp fault buzzer (10 min). */
       #ifndef TEMP_BELOW_TARGET_AFTER_DRYING_MS
-      /** Chamber below target → loud fault buzzer after this (default 45 s). */
-      #define TEMP_BELOW_TARGET_AFTER_DRYING_MS (45UL * 1000UL)
+      #define TEMP_BELOW_TARGET_AFTER_DRYING_MS (10UL * 60UL * 1000UL)
       #endif
-      /** One relay fan: level 1 = 33% duty, 2 = 67%, 3 = 100% (3 s cycle). */
+      /** One relay fan: steady ON while drying (levels 1–3 stored for app/recommendations). */
       #ifndef FAN_SPEED_CYCLE_MS
       #define FAN_SPEED_CYCLE_MS 3000UL
       #endif
@@ -84,6 +83,8 @@
       static bool          gDoorOpenBuzzerSuppressed = false;
       /** From RTDB session.fault_buzzer_armed — buzzer only (not fan/heaters). */
       static bool          gFaultBuzzerArmed = false;
+      /** Paused + spot moisture check: buzz only when YL-69 probe is not working. */
+      static bool          gMoistureCheckArmed = false;
       /** From RTDB session.session_active — true only while mobile drying is running. */
       static bool          gSessionActiveFlag = false;
       static uint8_t       gNullSessionPollStreak = 0;
@@ -114,7 +115,7 @@
       // Must match fish-dryer-mobile/app.json -> expo.extra.apiBaseUrl (same IP, ends with /api).
       const char* API_URL = "http://10.38.125.15:8000/api/hardware/esp32/status";
 
-      static const char* FIRMWARE_BUILD_TAG = "fan-gpio22-v61";
+      static const char* FIRMWARE_BUILD_TAG = "fan-gpio22-v63";
 
       // Laravel heartbeat: keeps `last_seen` + hardware rows in MySQL and mirrors RTDB when enabled.
       // Set to 0 only while debugging (e.g. API returns 500). If the app shows "offline" but RTDB
@@ -644,6 +645,10 @@
       }
 
       String statusWord(bool ok) { return ok ? "working" : "not_working"; }
+      /** YL-69: idle until probe touches fish — standby, not a fault. */
+      String moistureStatusWord(bool probeConnected) {
+        return probeConnected ? "working" : "standby";
+      }
       String statusUnknown() { return "unknown"; }
 
       // ===== Moisture calibration (ADC → %) =====
@@ -1182,17 +1187,13 @@
       }
 
       /**
-       * Drying fault buzzer: DHT + door sensor electrical fault. Moisture is spot-check only.
-       * Door physically opening mid-run is handled separately (doorOpenedDuringDryingFault).
+       * Drying fault buzzer: DHT electrical fault only.
+       * Door opening mid-run and temperature faults are handled separately.
        */
       static bool sensorsBadForBuzzer(bool dhtOk, bool moistureOk, bool doorOk) {
-        bool fault = !dhtOk || !doorOk;
-      #if MOISTURE_FAULT_BUZZER
-        fault = fault || !moistureOk;
-      #else
         (void)moistureOk;
-      #endif
-        return fault;
+        (void)doorOk;
+        return !dhtOk;
       }
 
       /**
@@ -1229,7 +1230,7 @@
         serviceFanSpeedRelay(millis());
       }
 
-      /** Single relay fan: keep ON while drying (mechanical relays cannot PWM fast). */
+      /** Single relay fan: ON for entire drying session (no duty cycling — relay cannot PWM). */
       static void serviceFanSpeedRelay(unsigned long nowMs) {
         (void)nowMs;
         const bool active = dryingSessionOutputsActive();
@@ -1421,6 +1422,7 @@
         gSessionStatus = "running";
         gSessionActiveFlag = true;
         gFaultBuzzerArmed = true;
+        gMoistureCheckArmed = false;
         gDryingOutputsLatched = true;
         if (gSessionTargetC <= 1.0f) {
           gSessionTargetC = 60.0f;
@@ -1466,6 +1468,7 @@
 
       static void updateBuzzerFaultLatch(bool dhtOk, bool moistureOk, bool doorOk, bool doorOpen, float airC) {
         static bool sLoggedFault = false;
+        (void)moistureOk;
         if (!dryingSessionActiveForBuzzer() || !sessionStatusIsRunning()) {
           disengageBuzzerAlarm();
           sLoggedFault = false;
@@ -2013,6 +2016,7 @@
         gDryingOutputsLatched = false;
         gSessionStatus = "stopped";
         gFaultBuzzerArmed = false;
+        gMoistureCheckArmed = false;
         gSessionActiveFlag = false;
         gSessionTargetC = 0.0f;
         gNullSessionPollStreak = 0;
@@ -2116,6 +2120,12 @@
             gLastCommandSeq = seq;
           }
           gIgnoreStaleRunningUntilMs = 0;
+          if (sessionStatusIsRunning() && gDryRunAuthorized) {
+            Serial.print("[command] start (params only) fan=");
+            Serial.println(gFanSpeedLevel);
+            applyDryingSessionLoads(pollDhtIfDue(), cachedDhtT);
+            return;
+          }
           const bool chirp = !sessionStatusIsRunning();
           if (!sessionStatusIsRunning()) {
             gDryingSessionStartMs = millis();
@@ -2215,11 +2225,14 @@
         }
 
         if (command == "pause" || status == "paused") {
+          gMoistureCheckArmed =
+              parseJsonBoolAfterKey(body, "moisture_check_armed", true);
           enterPausedSession();
           return;
         }
 
         if (status == "running" || command == "start") {
+          gMoistureCheckArmed = false;
           if (!gDryRunAuthorized) {
             /** App Start writes session.command=start — honor that (fan/heater/buzzer). */
             if (command == "start") {
@@ -2647,7 +2660,7 @@
 
         payload += "\"esp32\":\""; payload += statusWord(esp32UiOnline); payload += "\",";
         payload += "\"dht22\":\""; payload += statusWord(dhtOkReport); payload += "\",";
-        payload += "\"moisture_sensor\":\""; payload += statusWord(moistureOkReport); payload += "\",";
+        payload += "\"moisture_sensor\":\""; payload += moistureStatusWord(moistureOkReport); payload += "\",";
         payload += "\"door_sensor\":\""; payload += statusWord(doorOkReport); payload += "\"";
 
         payload += "}";
@@ -2727,7 +2740,7 @@
         root += ",\"components\":{";
         root += "\"esp32\":\""; root += statusWord(esp32UiOnline); root += "\",";
         root += "\"door_sensor\":\""; root += statusWord(doorOkReport); root += "\",";
-        root += "\"moisture_sensor\":\""; root += statusWord(moistureOkReport); root += "\",";
+        root += "\"moisture_sensor\":\""; root += moistureStatusWord(moistureOkReport); root += "\",";
         root += "\"dht22\":\""; root += statusWord(dhtOkReport); root += "\"";
         root += "}";
 

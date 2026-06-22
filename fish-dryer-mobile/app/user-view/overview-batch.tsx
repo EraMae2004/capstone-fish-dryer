@@ -55,7 +55,6 @@ export default function OverviewBatch({ session }: any) {
   const [duration, setDuration] = useState("00:00:00");
 
   const [temperature, setTemperature] = useState("");
-  const [fanSpeed, setFanSpeed] = useState("");
   const [durationInput, setDurationInput] = useState("");
 
 
@@ -384,8 +383,6 @@ export default function OverviewBatch({ session }: any) {
       <OverviewParameters
           temperature={temperature}
           setTemperature={setTemperature}
-          fanSpeed={fanSpeed}
-          setFanSpeed={setFanSpeed}
           duration={durationInput}
           setDuration={setDurationInput}
           startMachine={startMachine}

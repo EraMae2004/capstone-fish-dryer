@@ -11,8 +11,6 @@ export default function OverviewParameters({
   setTotalFish,
   temperature,
   setTemperature,
-  fanSpeed,
-  setFanSpeed,
   /** Stored as digits-only string ("013000" for 01:30:00); displayed as HH:MM:SS. */
   duration,
   setDuration,
@@ -32,7 +30,6 @@ export default function OverviewParameters({
 
   const [unit, setUnit] = React.useState("pcs");
   const [showUnit, setShowUnit] = React.useState(false);
-  const [showFan, setShowFan] = React.useState(false);
 
   const locked = Boolean(parametersLocked);
   /** Match overview header: only treat explicit `false` as offline. */
@@ -41,7 +38,6 @@ export default function OverviewParameters({
   const hasApplicableRecommendation =
     recommendation != null &&
     recommendation.temperature != null &&
-    recommendation.fan_speed != null &&
     (extensionMode
       ? Number(recommendation.extension_minutes) >= 1
       : Number(recommendation.duration_minutes) >= 1);
@@ -142,7 +138,6 @@ export default function OverviewParameters({
             style={styles.dropdownTrigger}
             onPress={() => {
               setShowUnit(!showUnit);
-              setShowFan(false);
             }}
             disabled={locked}
           >
@@ -188,52 +183,6 @@ export default function OverviewParameters({
             editable={!locked}
           />
           <Text style={styles.suffix}>°C</Text>
-        </View>
-
-        {/* FAN SPEED */}
-        <View style={[styles.formField, styles.fieldContainer]}>
-          <TouchableOpacity
-            style={inputButtonStyle}
-            onPress={() => {
-              setShowFan(!showFan);
-              setShowUnit(false);
-            }}
-            disabled={locked}
-          >
-            <Text>Fan Speed Level {fanSpeed || "1"}</Text>
-          </TouchableOpacity>
-
-          {/* RIGHT ARROW */}
-          <TouchableOpacity
-            style={styles.dropdownTrigger}
-            onPress={() => {
-              setShowFan(!showFan);
-              setShowUnit(false);
-            }}
-            disabled={locked}
-          >
-            <Text style={styles.dropdownText}>▼</Text>
-          </TouchableOpacity>
-
-          {/* DROPDOWN */}
-          {showFan && !locked && (
-            <View style={styles.dropdown}>
-              {["1","2","3"].map(level => (
-                <TouchableOpacity
-                  key={level}
-                  style={styles.dropdownItem}
-                  onPress={() => {
-                    setFanSpeed(level);
-                    setShowFan(false);
-                  }}
-                >
-                  <Text style={styles.dropdownItemText}>
-                    Level {level}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
         </View>
 
         {/* DURATION */}

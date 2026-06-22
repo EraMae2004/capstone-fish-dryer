@@ -296,7 +296,6 @@ export default function UserHistory() {
               <Text style={styles.detailRow}>
                 Humidity: {fmtPct(selectedSession?.humidity ?? selectedSession?.avg_humidity)} %
               </Text>
-              <Text style={styles.detailRow}>Fan Speed: {selectedSession?.fan_speed ?? '--'}</Text>
               <Text style={styles.detailRow}>
                 Total drying time: {fmtSessionDryTime(selectedSession)}
               </Text>

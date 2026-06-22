@@ -117,6 +117,9 @@ export function coerceHardwareStatus(status: unknown): string {
     case "warn":
     case "degraded":
       return "warning";
+    case "standby":
+    case "idle":
+      return "standby";
     case "not_working":
     case "off":
     case "false":
@@ -232,6 +235,28 @@ export function lookupComponentStatus(
 
 export function displayLabelsForSensorUi(): string[] {
   return SENSOR_HARDWARE_UI.map((r) => r.label);
+}
+
+/** Moisture YL-69: no probe contact = standby (not a hardware fault). */
+export function moistureSensorDisplayLabel(status: unknown): string {
+  const s = coerceHardwareStatus(status);
+  return s === "working" ? "Working" : "Standby";
+}
+
+export function moistureSensorDisplayColor(status: unknown): string {
+  return coerceHardwareStatus(status) === "working" ? "#22c55e" : "#95a5a6";
+}
+
+/** True when YL-69 probe is in contact (working), not idle standby. */
+export function isMoistureProbeWorking(
+  liveReadings: Record<string, unknown> | null | undefined,
+  componentStatus?: unknown
+): boolean {
+  if (liveReadings && typeof liveReadings === "object") {
+    if (liveReadings.moisture_connected === false) return false;
+    if (liveReadings.moisture_connected === true) return true;
+  }
+  return coerceHardwareStatus(componentStatus) === "working";
 }
 
 export function aliasesForDisplayLabel(label: string): string[] {

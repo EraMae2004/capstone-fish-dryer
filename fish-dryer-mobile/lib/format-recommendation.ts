@@ -19,7 +19,7 @@ export function getRecommendationRows(
   rec: RecommendationParams | null | undefined,
   extensionMode: boolean
 ): RecommendationDisplayRow[] | null {
-  if (rec == null || rec.temperature == null || rec.fan_speed == null) {
+  if (rec == null || rec.temperature == null) {
     return null;
   }
 
@@ -33,12 +33,6 @@ export function getRecommendationRows(
       label: "Temperature",
       value: `${rec.temperature}°C`,
       icon: "thermometer-half",
-    },
-    {
-      id: "fan_speed",
-      label: "Fan speed",
-      value: `Level ${rec.fan_speed}`,
-      icon: "sliders",
     },
   ];
 

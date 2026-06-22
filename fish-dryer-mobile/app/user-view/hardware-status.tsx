@@ -31,6 +31,7 @@ import {
   normalizeHardwareMacKey,
   recordMachineRtdbDelivery,
 } from "@/lib/machine-presence";
+import { moistureSensorDisplayColor, moistureSensorDisplayLabel } from "@/lib/hardware-status-rtdb";
 import {
   clearHardwareTestCommand,
   HARDWARE_TEST_ALL_MS,
@@ -643,6 +644,7 @@ export default function HardwareStatus() {
   const getStatusColor = (status: string) => {
     const s = normalizeStatusWord(status);
     if (["working", "ok", "online", "pass", "passed"].includes(s)) return "#22c55e";
+    if (s === "standby" || s === "idle") return "#95a5a6";
     if (["not_working", "error", "offline", "fail", "failed"].includes(s)) return "#ef4444";
     if (s === "warning") return "#f59e0b";
     return "#9ca3af";
@@ -658,13 +660,20 @@ export default function HardwareStatus() {
       );
     }
     const s = normalizeStatusWord(getComponentStatus(name));
+    if (name === "Moisture Sensor") {
+      return moistureSensorDisplayLabel(getComponentStatus(name));
+    }
     if (["working", "ok", "online", "pass", "passed"].includes(s)) return "Working";
+    if (s === "standby" || s === "idle") return "Standby";
     if (["not_working", "error", "offline", "fail", "failed"].includes(s)) return "Not Working";
     if (s === "warning") return "Warning";
     return "Unknown";
   };
 
   const statusColorForComponent = (name: string, status: string) => {
+    if (name === "Moisture Sensor") {
+      return moistureSensorDisplayColor(getComponentStatus(name));
+    }
     if (isDoorSensorUiLabel(name)) {
       return doorSensorDisplayColorHardware(
         formatDoorSensorDisplay(liveReadings?.door, {

@@ -5,6 +5,10 @@ import {
   formatDoorSensorDisplay,
   doorSensorDisplayColor,
 } from "@/lib/door-sensor-display";
+import {
+  moistureSensorDisplayColor,
+  moistureSensorDisplayLabel,
+} from "@/lib/hardware-status-rtdb";
 import { type MoistureBatchDraft } from "@/lib/moisture-checks";
 import { userTypography } from "@/lib/user-typography";
 
@@ -45,6 +49,7 @@ export default function OverviewStatus({
   const normalizeStatus = (value: string) => {
     const raw = String(value ?? "").toLowerCase();
     if (["working", "ok", "online", "pass", "passed"].includes(raw)) return "working";
+    if (raw === "standby" || raw === "idle") return "standby";
     if (["not_working", "error", "offline", "fail", "failed"].includes(raw)) return "not_working";
     if (raw === "warning") return "warning";
     if (raw === "unknown") return "unknown";
@@ -158,11 +163,6 @@ export default function OverviewStatus({
           )}
 
           {renderRow(
-            "Fan Speed",
-            showSessionDetails && session?.fan_speed ? "Level " + session.fan_speed : null
-          )}
-
-          {renderRow(
             "Remaining Time",
             showSessionDetails && typeof remainingTimeLabel === "string"
               ? remainingTimeLabel
@@ -198,25 +198,38 @@ export default function OverviewStatus({
                   })
                 : null;
 
+            const moistureLabel =
+              component.key === "moisture_sensor" && !doorLabel
+                ? moistureSensorDisplayLabel(rawStatus)
+                : null;
+
             const displayText = doorLabel
               ? doorLabel === "not_working"
                 ? "not_working"
                 : doorLabel
-              : statusValue === "working"
-                ? "working"
-                : statusValue === "not_working"
-                  ? "not_working"
-                  : statusValue ?? "--";
+              : moistureLabel
+                ? moistureLabel.toLowerCase()
+                : statusValue === "working"
+                  ? "working"
+                  : statusValue === "standby"
+                    ? "standby"
+                    : statusValue === "not_working"
+                      ? "not_working"
+                      : statusValue ?? "--";
 
             const color = doorLabel
               ? doorSensorDisplayColor(doorLabel)
-              : statusValue === "working"
-                ? "#2ecc71"
-                : statusValue === "not_working"
-                  ? "#e74c3c"
-                  : statusValue === "warning"
-                    ? "#f59e0b"
-                    : "#95a5a6";
+              : moistureLabel
+                ? moistureSensorDisplayColor(rawStatus)
+                : statusValue === "working"
+                  ? "#2ecc71"
+                  : statusValue === "standby"
+                    ? "#95a5a6"
+                    : statusValue === "not_working"
+                      ? "#e74c3c"
+                      : statusValue === "warning"
+                        ? "#f59e0b"
+                        : "#95a5a6";
 
             return (
               <View key={index} style={styles.row}>
