@@ -1,8 +1,11 @@
 import { ref as dbRef, set as dbSet } from "firebase/database";
 import type { Database } from "firebase/database";
 
-export const HARDWARE_TEST_ALL_MS = 10_000;
+export const HARDWARE_TEST_ALL_MS = 15_000;
 export const HARDWARE_TEST_ONE_MS = 8_000;
+export const HARDWARE_TEST_LCD_MS = 3_000;
+/** Keypad has no real countdown — keep RTDB command alive until user finishes or closes. */
+export const HARDWARE_TEST_KEYPAD_MS = 10 * 60_000;
 
 export type HardwareTestMode = "all" | "component";
 
@@ -11,6 +14,8 @@ export type HardwareTestComponentKey =
   | "dht22"
   | "moisture_sensor"
   | "door_sensor"
+  | "lcd"
+  | "keypad"
   | "led_1"
   | "led_2"
   | "led_3"
@@ -33,12 +38,24 @@ export function hardwareTestKeyForLabel(label: string): HardwareTestComponentKey
     "DHT22 (Temp & Humidity)": "dht22",
     "Moisture Sensor": "moisture_sensor",
     "Door Sensor (MC38)": "door_sensor",
+    "LCD 16x2": "lcd",
+    "Keypad 4x4": "keypad",
     "LED 1": "led_1",
     "LED 2": "led_2",
     "LED 3": "led_3",
     Buzzer: "buzzer",
   };
   return map[label] ?? null;
+}
+
+export function defaultDurationForTestComponent(
+  component: HardwareTestComponentKey | string | undefined
+): number {
+  const c = String(component ?? "").toLowerCase();
+  if (c === "lcd" || c === "lcd_16x2") return HARDWARE_TEST_LCD_MS;
+  if (c === "keypad" || c === "keypad_4x4") return HARDWARE_TEST_KEYPAD_MS;
+  // Other component tests still run LCD + keypad UI on the board.
+  return HARDWARE_TEST_KEYPAD_MS;
 }
 
 export async function publishHardwareTestCommand(
@@ -57,7 +74,9 @@ export async function publishHardwareTestCommand(
     component: opts.mode === "component" ? String(opts.component ?? "") : "",
     duration_ms:
       opts.durationMs ??
-      (opts.mode === "all" ? HARDWARE_TEST_ALL_MS : HARDWARE_TEST_ONE_MS),
+      (opts.mode === "all"
+        ? HARDWARE_TEST_KEYPAD_MS
+        : defaultDurationForTestComponent(opts.component)),
     request_id: `test-${machineId}-${Date.now()}`,
     issued_at: new Date().toISOString(),
     fan_speed:

@@ -545,6 +545,9 @@ export default function UserOverview({
         fan_speed?: number;
         target_temperature?: number;
         moisture_check_armed?: boolean;
+        fish_type?: string;
+        total_fish?: number;
+        set_duration_minutes?: number;
       }
     ) => {
       if (!firebaseDb || microcontrollerId <= 0) return;
@@ -558,6 +561,21 @@ export default function UserOverview({
       const tt =
         Number.isFinite(ttRaw) && ttRaw > 1 ? ttRaw : 60;
       const seq = Date.now();
+      const fish =
+        (opts?.fish_type ?? fishType ?? "").trim() || undefined;
+      const totalFishRaw =
+        opts?.total_fish ??
+        Number.parseInt(String(totalFish ?? "").trim(), 10);
+      const totalFishVal = Number.isFinite(totalFishRaw)
+        ? totalFishRaw
+        : undefined;
+      const durRaw =
+        opts?.set_duration_minutes ??
+        digitsToMinutes(String(duration ?? "").trim());
+      const durVal =
+        durRaw != null && Number.isFinite(durRaw) && durRaw > 0
+          ? durRaw
+          : undefined;
       try {
         const payload: Record<string, unknown> = {
           status,
@@ -567,6 +585,10 @@ export default function UserOverview({
           target_temperature: running || paused ? tt : 0,
           updated_at: new Date().toISOString(),
         };
+        if (fish) payload.fish_type = fish;
+        if (totalFishVal != null) payload.total_fish = totalFishVal;
+        if (durVal != null) payload.set_duration_minutes = durVal;
+
         const commandPayload: Record<string, unknown> = {
           action: status === "running" ? "start" : status === "paused" ? "pause" : "stop",
           fan_speed: fs,
@@ -574,6 +596,10 @@ export default function UserOverview({
           seq,
           updated_at: new Date().toISOString(),
         };
+        if (fish) commandPayload.fish_type = fish;
+        if (totalFishVal != null) commandPayload.total_fish = totalFishVal;
+        if (durVal != null) commandPayload.set_duration_minutes = durVal;
+
         if (status === "stopped") {
           payload.command = "stop";
           payload.session_active = false;
@@ -594,7 +620,7 @@ export default function UserOverview({
         console.log("session RTDB write:", e);
       }
     },
-    [temperature]
+    [temperature, fishType, totalFish, duration]
   );
 
   /** Live target-temp tweaks while running. */
@@ -850,6 +876,81 @@ export default function UserOverview({
       }
     }
   }, [activeMachineId, loading, applyOverviewPayload, overviewApiUrl, fetchRecommendation]);
+
+  useEffect(() => {
+    if (!firebaseDb || !activeMachineId) return;
+
+    const boundMachineId = activeMachineId;
+    const r = dbRef(firebaseDb, `machines/${boundMachineId}/session`);
+    let lastSeenStatus = "";
+
+    const unsub = onValue(
+      r,
+      (snap: DataSnapshot) => {
+        const val = snap.val();
+        if (!val || typeof val !== "object") return;
+
+        const payload = val as Record<string, unknown>;
+        const status = String(payload.status ?? "").trim().toLowerCase();
+        if (status !== "running" && status !== "paused" && status !== "stopped") {
+          return;
+        }
+
+        setUiSessionStatusOverride(status as "running" | "paused" | "stopped");
+
+        setSession((prev: any) => {
+          if (!prev && status === "stopped") return prev;
+          return {
+            ...(prev ?? {}),
+            status,
+            fish_type:
+              String(payload.fish_type ?? "").trim() || prev?.fish_type,
+            total_fish:
+              Number.isFinite(Number(payload.total_fish)) && Number(payload.total_fish) >= 0
+                ? Number(payload.total_fish)
+                : prev?.total_fish,
+            target_temperature:
+              Number.isFinite(Number(payload.target_temperature)) &&
+              Number(payload.target_temperature) > 0
+                ? Number(payload.target_temperature)
+                : prev?.target_temperature,
+            set_duration_minutes:
+              Number.isFinite(Number(payload.set_duration_minutes)) &&
+              Number(payload.set_duration_minutes) > 0
+                ? Number(payload.set_duration_minutes)
+                : prev?.set_duration_minutes,
+          };
+        });
+
+        if (status === "paused") {
+          freezeCountdownAtPause(session);
+        } else if (status === "running") {
+          const rem =
+            pausedRemainingSecRef.current ??
+            pausedRemainingAtPauseRef.current ??
+            pausedRemainingSec;
+          if (rem != null && rem > 0 && countdownEndMsRef.current === null) {
+            countdownEndMsRef.current = Date.now() + rem * 1000;
+          }
+        } else {
+          countdownEndMsRef.current = null;
+          pausedRemainingSecRef.current = null;
+          pausedRemainingAtPauseRef.current = null;
+          setPausedRemainingSec(null);
+        }
+
+        if (status !== lastSeenStatus) {
+          lastSeenStatus = status;
+          void fetchOverview(boundMachineId);
+        }
+      },
+      (err: unknown) => {
+        console.log("Overview session RTDB:", err);
+      }
+    );
+
+    return () => unsub();
+  }, [activeMachineId, fetchOverview, firebaseDb, pausedRemainingSec, session]);
 
   const postSessionControl = async (
     action: "start" | "pause" | "stop",

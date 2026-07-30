@@ -34,8 +34,7 @@ import {
 import { moistureSensorDisplayColor, moistureSensorDisplayLabel } from "@/lib/hardware-status-rtdb";
 import {
   clearHardwareTestCommand,
-  HARDWARE_TEST_ALL_MS,
-  HARDWARE_TEST_ONE_MS,
+  HARDWARE_TEST_KEYPAD_MS,
   hardwareTestKeyForLabel,
   publishHardwareTestCommand,
 } from "@/lib/hardware-test-command";
@@ -149,6 +148,8 @@ const DEFAULT_COMPONENTS = [
   "DHT22 (Temp & Humidity)",
   "Moisture Sensor",
   "Door Sensor (MC38)",
+  "LCD 16x2",
+  "Keypad 4x4",
 ];
 
 /** MaterialCommunityIcons glyph names (Expo) — per hardware row. */
@@ -166,20 +167,29 @@ const HARDWARE_ICON_BY_LABEL: Record<
   "Heater 2": "radiator",
   "Moisture Sensor": "scale-balance",
   "DHT22 (Temp & Humidity)": "thermometer",
+  "LCD 16x2": "monitor",
+  "Keypad 4x4": "dialpad",
   "LED 1": "lightbulb-on-outline",
   "LED 2": "lightbulb-on-outline",
   "LED 3": "lightbulb-on-outline",
 };
 
-/** Sensor diagnostic payload built from latest RTDB heartbeat. Used by Test buttons. */
+/** Sensor / HMI diagnostic payload built from latest RTDB heartbeat. Used by Test buttons. */
 type SensorDiagnostic = {
-  key: "esp32" | "dht22" | "moisture_sensor" | "door_sensor";
+  key: "esp32" | "dht22" | "moisture_sensor" | "door_sensor" | "lcd" | "keypad";
   label: string;
   ok: boolean;
   /** Short headline shown in alert/title row. */
   headline: string;
   /** Multi-line body shown under headline. */
   details: string;
+};
+
+type KeypadTestProgress = {
+  keysPressed: number;
+  keysTotal: number;
+  keys: string;
+  ok: boolean;
 };
 
 /** RTDB readings shape published by the firmware. Optional fields may be absent if a sensor failed. */
@@ -264,6 +274,57 @@ export default function HardwareStatus() {
   const [diagTestInProgress, setDiagTestInProgress] = useState(false);
   const [diagIsTestAll, setDiagIsTestAll] = useState(false);
   const [moistureTestAllResult, setMoistureTestAllResult] = useState<boolean | null>(null);
+  const [keypadTestProgress, setKeypadTestProgress] = useState<KeypadTestProgress | null>(null);
+  const keypadTestProgressRef = useRef<KeypadTestProgress | null>(null);
+  const [diagIncludesKeypad, setDiagIncludesKeypad] = useState(false);
+  const [diagIncludesLcd, setDiagIncludesLcd] = useState(false);
+
+  useEffect(() => {
+    keypadTestProgressRef.current = keypadTestProgress;
+  }, [keypadTestProgress]);
+
+  /** Live keypad press progress from firmware `test_ack` + heartbeat readings. */
+  useEffect(() => {
+    if (!firebaseDb || !diagModalOpen || !diagIncludesKeypad) return;
+    const mid = selectedMachineIdRef.current;
+    if (mid == null) return;
+
+    const applyProgress = (rec: Record<string, unknown>) => {
+      const pressed = Number(rec.keys_pressed ?? rec.keysPressed ?? rec.keypad_keys_pressed ?? 0);
+      const total = Number(rec.keys_total ?? rec.keysTotal ?? rec.keypad_keys_total ?? 16);
+      if (!Number.isFinite(pressed)) return;
+      setKeypadTestProgress({
+        keysPressed: Math.max(0, Math.min(pressed, total || 16)),
+        keysTotal: total > 0 ? total : 16,
+        keys: String(rec.keys ?? ""),
+        ok: rec.ok === true || pressed >= (total || 16),
+      });
+    };
+
+    const unsubAck = onValue(dbRef(firebaseDb, `machines/${mid}/test_ack`), (snap) => {
+      const val = snap.val();
+      if (!val || typeof val !== "object") return;
+      const rec = val as Record<string, unknown>;
+      const component = String(rec.component ?? "").toLowerCase();
+      if (component && component !== "keypad" && component !== "all") {
+        if (rec.keys_pressed == null && rec.keysPressed == null) return;
+      }
+      applyProgress(rec);
+    });
+
+    const unsubHw = onValue(dbRef(firebaseDb, `machines/${mid}/hardware_status/readings`), (snap) => {
+      const val = snap.val();
+      if (!val || typeof val !== "object") return;
+      const rec = val as Record<string, unknown>;
+      if (rec.keypad_keys_pressed == null && rec.ui_self_test !== true) return;
+      applyProgress(rec);
+    });
+
+    return () => {
+      unsubAck();
+      unsubHw();
+    };
+  }, [firebaseDb, diagModalOpen, diagIncludesKeypad]);
 
   const [modalVisible, setModalVisible] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
@@ -450,6 +511,8 @@ export default function HardwareStatus() {
       "soil_moisture",
     ],
     "DHT22 (Temp & Humidity)": ["dht22", "temp_humidity_sensor", "dht"],
+    "LCD 16x2": ["lcd", "lcd_16x2", "lcd16x2", "display", "i2c_lcd"],
+    "Keypad 4x4": ["keypad", "key_pad", "matrix_keypad", "keypad_4x4"],
     "LED 1": ["led_1", "led_drying", "led1"],
     "LED 2": ["led_2", "led_pause", "led2"],
     "LED 3": ["led_3", "led_stop", "led3"],
@@ -659,10 +722,12 @@ export default function HardwareStatus() {
         })
       );
     }
-    const s = normalizeStatusWord(getComponentStatus(name));
+    // Offline MCU → every row is not_working; moisture must not read as Standby.
     if (name === "Moisture Sensor") {
+      if (!hardwareStreamFresh) return "Not Working";
       return moistureSensorDisplayLabel(getComponentStatus(name));
     }
+    const s = normalizeStatusWord(getComponentStatus(name));
     if (["working", "ok", "online", "pass", "passed"].includes(s)) return "Working";
     if (s === "standby" || s === "idle") return "Standby";
     if (["not_working", "error", "offline", "fail", "failed"].includes(s)) return "Not Working";
@@ -672,6 +737,7 @@ export default function HardwareStatus() {
 
   const statusColorForComponent = (name: string, status: string) => {
     if (name === "Moisture Sensor") {
+      if (!hardwareStreamFresh) return "#ef4444";
       return moistureSensorDisplayColor(getComponentStatus(name));
     }
     if (isDoorSensorUiLabel(name)) {
@@ -828,34 +894,58 @@ export default function HardwareStatus() {
     }
 
     // door_sensor
-    if (!connected) {
+    if (key === "door_sensor") {
+      if (!connected) {
+        return {
+          key,
+          label: "Door Sensor (MC38)",
+          ok: false,
+          headline: "Not Working",
+          details: "Sensor is not responding on GPIO16. Check wiring and the door magnet.",
+        };
+      }
+      const doorState = formatDoorSensorDisplay(r.door, {
+        streamLive: true,
+        componentStatus: "working",
+      });
+      if (doorState === "not_working") {
+        return {
+          key,
+          label: "Door Sensor (MC38)",
+          ok: false,
+          headline: "Not Working",
+          details: "No valid door reading from the board.",
+        };
+      }
       return {
         key,
         label: "Door Sensor (MC38)",
-        ok: false,
-        headline: "Not Working",
-        details: "Sensor is not responding on GPIO16. Check wiring and the door magnet.",
+        ok: true,
+        headline: doorState,
+        details: "",
       };
     }
-    const doorState = formatDoorSensorDisplay(r.door, {
-      streamLive: true,
-      componentStatus: "working",
-    });
-    if (doorState === "not_working") {
+
+    if (key === "lcd") {
       return {
         key,
-        label: "Door Sensor (MC38)",
-        ok: false,
-        headline: "Not Working",
-        details: "No valid door reading from the board.",
+        label: "LCD 16x2",
+        ok: connected,
+        headline: connected ? "Check the display" : "Not responding",
+        details: connected
+          ? 'The board should show "LCD IS WORKING!" with a 5-second countdown.'
+          : "LCD did not report as working. Check I2C wiring (SDA/SCL) and power.",
       };
     }
+
+    // keypad
     return {
-      key,
-      label: "Door Sensor (MC38)",
-      ok: true,
-      headline: doorState,
-      details: "",
+      key: "keypad",
+      label: "Keypad 4x4",
+      ok: connected,
+      headline: "PLEASE CLICK ALL THE BUTTONS",
+      details:
+        "Press every key on the physical keypad randomly. The modal updates as each key is detected.",
     };
   };
 
@@ -865,6 +955,8 @@ export default function HardwareStatus() {
     if (name === "DHT22 (Temp & Humidity)") return "dht22";
     if (name === "Moisture Sensor") return "moisture_sensor";
     if (name === "Door Sensor (MC38)") return "door_sensor";
+    if (name === "LCD 16x2") return "lcd";
+    if (name === "Keypad 4x4") return "keypad";
     return null;
   };
 
@@ -905,6 +997,9 @@ export default function HardwareStatus() {
     setDiagTestInProgress(false);
     setDiagIsTestAll(false);
     setMoistureTestAllResult(null);
+    setKeypadTestProgress(null);
+    setDiagIncludesKeypad(false);
+    setDiagIncludesLcd(false);
     const mid = selectedMachineIdRef.current;
     if (mid != null && firebaseDb) {
       void clearHardwareTestCommand(firebaseDb, mid).catch(() => {});
@@ -918,7 +1013,7 @@ export default function HardwareStatus() {
     durationMs: number,
     onStart: () => void,
     onEnd: () => void,
-    opts?: { deferModalUntilEnd?: boolean }
+    opts?: { waitForKeypad?: boolean }
   ) => {
     if (!firebaseDb) {
       Alert.alert(
@@ -937,6 +1032,7 @@ export default function HardwareStatus() {
       setMoistureTestAllResult(null);
     }
     onStart();
+    const waitForKeypad = opts?.waitForKeypad === true;
     const endAt = Date.now() + durationMs;
 
     const applyDiagnosticData = (
@@ -966,7 +1062,11 @@ export default function HardwareStatus() {
                   ? "DHT22"
                   : k === "moisture_sensor"
                     ? "Moisture Sensor"
-                    : "Door Sensor",
+                    : k === "lcd"
+                      ? "LCD 16x2"
+                      : k === "keypad"
+                        ? "Keypad 4x4"
+                        : "Door Sensor",
             ok: false,
             headline: "Waiting for data…",
             details: "Listening for a fresh hardware heartbeat from the board.",
@@ -1003,10 +1103,17 @@ export default function HardwareStatus() {
       stopTestPolling();
       testPollRef.current = setInterval(() => {
         void refreshModal(false);
+        if (waitForKeypad) {
+          // Stay open until all keypad buttons are detected (or user hits Done).
+          if (keypadTestProgressRef.current?.ok) {
+            void finishTest();
+          }
+          return;
+        }
         if (Date.now() >= endAt) {
           void finishTest();
         }
-      }, 1000);
+      }, 500);
     } catch (e) {
       console.log(e);
       await finishTest();
@@ -1023,7 +1130,7 @@ export default function HardwareStatus() {
     try {
       await publishHardwareTestCommand(firebaseDb!, machineId, {
         mode: "all",
-        durationMs: HARDWARE_TEST_ALL_MS,
+        durationMs: HARDWARE_TEST_KEYPAD_MS,
       });
     } catch (e) {
       console.log(e);
@@ -1031,19 +1138,26 @@ export default function HardwareStatus() {
       return;
     }
 
+    setDiagIncludesLcd(false);
+    setDiagIncludesKeypad(true);
+    setKeypadTestProgress({ keysPressed: 0, keysTotal: 16, keys: "", ok: false });
+
     const keys: SensorDiagnostic["key"][] = [
       "esp32",
       "dht22",
       "moisture_sensor",
       "door_sensor",
+      "lcd",
+      "keypad",
     ];
     await runLiveSensorTest(
       machineId,
       keys,
-      "Test All (10s)",
-      HARDWARE_TEST_ALL_MS,
+      "Test All — press every keypad button",
+      HARDWARE_TEST_KEYPAD_MS,
       () => setTestingAll(true),
-      () => setTestingAll(false)
+      () => setTestingAll(false),
+      { waitForKeypad: true }
     );
   };
 
@@ -1064,11 +1178,18 @@ export default function HardwareStatus() {
     }
 
     const machineId = selectedMachine!.id;
+    const waitForKeypad = key === "keypad";
+    const durationMs =
+      key === "keypad"
+        ? HARDWARE_TEST_KEYPAD_MS
+        : key === "lcd"
+          ? 3000
+          : 8000;
     try {
       await publishHardwareTestCommand(firebaseDb!, machineId, {
         mode: "component",
         component: componentKey,
-        durationMs: HARDWARE_TEST_ONE_MS,
+        durationMs,
       });
     } catch (e) {
       console.log(e);
@@ -1076,13 +1197,36 @@ export default function HardwareStatus() {
       return;
     }
 
+    // Individual test modal: ONLY that component — never mix LCD + keypad banners.
+    if (key === "lcd") {
+      setDiagIncludesLcd(true);
+      setDiagIncludesKeypad(false);
+      setKeypadTestProgress(null);
+    } else if (key === "keypad") {
+      setDiagIncludesLcd(false);
+      setDiagIncludesKeypad(true);
+      setKeypadTestProgress({ keysPressed: 0, keysTotal: 16, keys: "", ok: false });
+    } else {
+      setDiagIncludesLcd(false);
+      setDiagIncludesKeypad(false);
+      setKeypadTestProgress(null);
+    }
+
+    const title =
+      key === "lcd"
+        ? "Testing LCD"
+        : key === "keypad"
+          ? "Testing Keypad — press every button"
+          : `Testing ${name}`;
+
     await runLiveSensorTest(
       machineId,
       [key],
-      `Testing ${name}`,
-      HARDWARE_TEST_ONE_MS,
+      title,
+      durationMs,
       () => setTestingComponent(name),
-      () => setTestingComponent(null)
+      () => setTestingComponent(null),
+      { waitForKeypad }
     );
   };
 
@@ -1562,6 +1706,9 @@ export default function HardwareStatus() {
         machineName={selectedMachine?.name ?? null}
         testInProgress={diagTestInProgress}
         isTestAll={diagIsTestAll}
+        includesLcd={diagIncludesLcd}
+        includesKeypad={diagIncludesKeypad}
+        keypadProgress={keypadTestProgress}
         onClose={closeDiagnosticModal}
       />
     </SafeAreaView>
@@ -1583,6 +1730,9 @@ function DiagnosticResultsModal({
   machineName,
   testInProgress,
   isTestAll,
+  includesLcd,
+  includesKeypad,
+  keypadProgress,
   onClose,
 }: {
   visible: boolean;
@@ -1592,6 +1742,9 @@ function DiagnosticResultsModal({
   machineName: string | null;
   testInProgress: boolean;
   isTestAll: boolean;
+  includesLcd: boolean;
+  includesKeypad: boolean;
+  keypadProgress: KeypadTestProgress | null;
   onClose: () => void;
 }) {
   const summary = (() => {
@@ -1599,7 +1752,10 @@ function DiagnosticResultsModal({
     const countable = results.filter(
       (r) => !(isTestAll && testInProgress && r.key === "moisture_sensor")
     );
-    const passes = countable.filter((r) => r.ok).length;
+    const passes = countable.filter((r) => {
+      if (r.key === "keypad" && keypadProgress) return keypadProgress.ok;
+      return r.ok;
+    }).length;
     const fails = countable.length - passes;
     return { passes, fails, total: countable.length };
   })();
@@ -1611,6 +1767,8 @@ function DiagnosticResultsModal({
       case "dht22": return "thermometer";
       case "moisture_sensor": return "water-percent";
       case "door_sensor": return "door";
+      case "lcd": return "monitor";
+      case "keypad": return "dialpad";
     }
   };
 
@@ -1642,6 +1800,35 @@ function DiagnosticResultsModal({
               <Icon name="close" size={16} color="#475569" />
             </TouchableOpacity>
           </View>
+
+          {includesKeypad ? (
+            <View style={diagStyles.keypadBanner}>
+              <MaterialCommunityIcons name="dialpad" size={22} color="#1f4e6c" />
+              <View style={{ flex: 1 }}>
+                <Text style={diagStyles.keypadBannerTitle}>
+                  PLEASE CLICK ALL THE BUTTONS
+                </Text>
+                <Text style={diagStyles.keypadBannerSub}>
+                  Press every key on the machine
+                  {keypadProgress
+                    ? ` · ${keypadProgress.keysPressed}/${keypadProgress.keysTotal}`
+                    : ""}
+                </Text>
+              </View>
+              {testInProgress && includesKeypad ? (
+                <ActivityIndicator size="small" color="#1f4e6c" />
+              ) : null}
+            </View>
+          ) : null}
+
+          {includesLcd && !includesKeypad && testInProgress ? (
+            <View style={diagStyles.lcdBanner}>
+              <MaterialCommunityIcons name="monitor" size={20} color="#0f766e" />
+              <Text style={diagStyles.lcdBannerText}>
+                Check the machine LCD — it should show "LCD IS WORKING!"
+              </Text>
+            </View>
+          ) : null}
 
           {/* Summary chips (only when running Test All) */}
           {summary && summary.total > 1 ? (
@@ -1709,6 +1896,96 @@ function DiagnosticResultsModal({
                     <View style={diagStyles.detailsBlock}>
                       <Text style={diagStyles.probeTestSubtext}>
                         Touch the probe to test if it's working.
+                      </Text>
+                    </View>
+                  </View>
+                );
+              }
+
+              if (r.key === "keypad") {
+                const pressed = keypadProgress?.keysPressed ?? 0;
+                const total = keypadProgress?.keysTotal ?? 16;
+                const keypadOk = keypadProgress?.ok ?? pressed >= total;
+                const accent = keypadOk ? "#22c55e" : testInProgress ? "#0ea5e9" : "#ef4444";
+                const tint = keypadOk ? "#f0fdf4" : testInProgress ? "#f0f9ff" : "#fef2f2";
+                const headlineColor = keypadOk
+                  ? "#15803d"
+                  : testInProgress
+                    ? "#0369a1"
+                    : "#b91c1c";
+                return (
+                  <View key={r.key} style={[diagStyles.resultCard, { borderLeftColor: accent }]}>
+                    <View style={diagStyles.resultHeader}>
+                      <View style={[diagStyles.resultIcon, { backgroundColor: tint }]}>
+                        <MaterialCommunityIcons
+                          name={iconForKey(r.key)}
+                          size={20}
+                          color={accent}
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={diagStyles.resultLabel}>{r.label}</Text>
+                        <Text style={[diagStyles.resultHeadline, { color: headlineColor }]}>
+                          PLEASE CLICK ALL THE BUTTONS
+                        </Text>
+                      </View>
+                      <View style={[diagStyles.resultBadge, { backgroundColor: accent }]}>
+                        <Text style={diagStyles.resultBadgeText}>
+                          {testInProgress && !keypadOk
+                            ? `${pressed}/${total}`
+                            : keypadOk
+                              ? "PASS"
+                              : "FAIL"}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={diagStyles.detailsBlock}>
+                      <Text style={diagStyles.detailLine}>
+                        {testInProgress
+                          ? `Detected ${pressed} of ${total} keys. Keep pressing randomly until all buttons register.`
+                          : keypadOk
+                            ? `All ${total} keys responded.`
+                            : `Only ${pressed} of ${total} keys were detected. Check the keypad wiring.`}
+                      </Text>
+                    </View>
+                  </View>
+                );
+              }
+
+              if (r.key === "lcd") {
+                const accent = r.ok ? "#22c55e" : "#ef4444";
+                const tint = r.ok ? "#f0fdf4" : "#fef2f2";
+                const headlineColor = r.ok ? "#15803d" : "#b91c1c";
+                return (
+                  <View key={r.key} style={[diagStyles.resultCard, { borderLeftColor: accent }]}>
+                    <View style={diagStyles.resultHeader}>
+                      <View style={[diagStyles.resultIcon, { backgroundColor: tint }]}>
+                        <MaterialCommunityIcons
+                          name={iconForKey(r.key)}
+                          size={20}
+                          color={accent}
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={diagStyles.resultLabel}>{r.label}</Text>
+                        <Text style={[diagStyles.resultHeadline, { color: headlineColor }]}>
+                          {testInProgress
+                            ? "Showing countdown on LCD…"
+                            : r.ok
+                              ? "LCD IS WORKING!"
+                              : "Not Working"}
+                        </Text>
+                      </View>
+                      <View style={[diagStyles.resultBadge, { backgroundColor: accent }]}>
+                        <Text style={diagStyles.resultBadgeText}>
+                          {r.ok ? "PASS" : "FAIL"}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={diagStyles.detailsBlock}>
+                      <Text style={diagStyles.detailLine}>
+                        {r.details ||
+                          'Look at the machine display for "LCD IS WORKING!" and a 5-second countdown.'}
                       </Text>
                     </View>
                   </View>
@@ -2046,6 +2323,48 @@ const diagStyles = StyleSheet.create({
     flexWrap: "wrap",
     gap: 8,
     marginBottom: 12,
+  },
+
+  keypadBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#e8f1f7",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 10,
+  },
+
+  keypadBannerTitle: {
+    ...userTypography.caption,
+    fontWeight: "800",
+    color: "#1f4e6c",
+    letterSpacing: 0.2,
+  },
+
+  keypadBannerSub: {
+    ...userTypography.caption,
+    color: "#475569",
+    marginTop: 2,
+  },
+
+  lcdBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#ecfdf5",
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    marginBottom: 10,
+  },
+
+  lcdBannerText: {
+    ...userTypography.caption,
+    color: "#0f766e",
+    flex: 1,
+    fontWeight: "600",
   },
 
   chip: {

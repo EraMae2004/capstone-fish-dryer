@@ -240,11 +240,16 @@ export function displayLabelsForSensorUi(): string[] {
 /** Moisture YL-69: no probe contact = standby (not a hardware fault). */
 export function moistureSensorDisplayLabel(status: unknown): string {
   const s = coerceHardwareStatus(status);
-  return s === "working" ? "Working" : "Standby";
+  if (s === "working") return "Working";
+  if (s === "standby" || s === "idle") return "Standby";
+  return "Not Working";
 }
 
 export function moistureSensorDisplayColor(status: unknown): string {
-  return coerceHardwareStatus(status) === "working" ? "#22c55e" : "#95a5a6";
+  const s = coerceHardwareStatus(status);
+  if (s === "working") return "#22c55e";
+  if (s === "standby" || s === "idle") return "#95a5a6";
+  return "#ef4444";
 }
 
 /** True when YL-69 probe is in contact (working), not idle standby. */

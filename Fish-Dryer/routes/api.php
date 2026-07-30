@@ -43,6 +43,7 @@ Route::get('/machines/detect', [MobileDryingController::class, 'detectMicrocontr
 // ESP32 heartbeat endpoint for hardware status (mobile API controller only)
 Route::post('/hardware/esp32/status', [MobileDryingController::class, 'esp32Heartbeat']);
 Route::get('/hardware/esp32/status', [MobileDryingController::class, 'esp32Heartbeat']);
+Route::post('/hardware/esp32/session', [MobileDryingController::class, 'esp32LocalSession']);
 
 Route::get('/hardware', [WebDryingController::class, 'hardware'])->name('user.hardware');
 Route::get('/detect-esp', [WebDryingController::class, 'detectEsp'])->name('user.detect.esp');

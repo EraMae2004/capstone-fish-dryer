@@ -12,6 +12,7 @@ use App\Models\DryingSession;
 use App\Models\MachineHardwareStatus;
 use App\Models\Notification;
 use App\Models\SensorLog;
+use App\Models\User;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -47,7 +48,10 @@ class DryingController extends Controller
         int $microcontrollerId,
         string $status,
         ?float $targetTemperature = null,
-        ?int $fanSpeed = null
+        ?int $fanSpeed = null,
+        ?string $fishType = null,
+        ?int $totalFish = null,
+        ?int $setDurationMinutes = null
     ): void {
         try {
             $firebase = app(FirebaseRealtimeService::class);
@@ -83,19 +87,34 @@ class DryingController extends Controller
                 'action' => $command,
                 'fan_speed' => $fs,
                 'target_temperature' => $tt,
+                'fish_type' => $fishType,
+                'total_fish' => $totalFish,
+                'set_duration_minutes' => $setDurationMinutes,
                 'seq' => (int) round(microtime(true) * 1000),
                 'updated_at' => now()->toIso8601String(),
             ]);
 
-            $firebase->setMachineSession($microcontrollerId, [
+            $sessionPayload = [
                 'command' => $command,
                 'status' => $st,
                 'target_temperature' => $tt,
                 'fan_speed' => $fs,
                 'fault_buzzer_armed' => $running,
+                'moisture_check_armed' => $paused,
                 'session_active' => $running,
                 'updated_at' => now()->toIso8601String(),
-            ]);
+            ];
+            if ($fishType !== null && $fishType !== '') {
+                $sessionPayload['fish_type'] = $fishType;
+            }
+            if ($totalFish !== null) {
+                $sessionPayload['total_fish'] = $totalFish;
+            }
+            if ($setDurationMinutes !== null && $setDurationMinutes > 0) {
+                $sessionPayload['set_duration_minutes'] = $setDurationMinutes;
+            }
+
+            $firebase->setMachineSession($microcontrollerId, $sessionPayload);
 
             $machine = Microcontroller::find($microcontrollerId);
             $macHex = $machine ? $this->normalizeHardwareMac($machine->mac ?? $machine->device_id ?? null) : null;
@@ -163,6 +182,8 @@ class DryingController extends Controller
             'dht22',
             'moisture_sensor',
             'door_sensor',
+            'lcd',
+            'keypad',
         ];
     }
 
@@ -174,7 +195,7 @@ class DryingController extends Controller
      */
     private function firebaseSensorHardwareComponentKeys(): array
     {
-        return ['esp32', 'door_sensor', 'moisture_sensor', 'dht22'];
+        return ['esp32', 'door_sensor', 'moisture_sensor', 'dht22', 'lcd', 'keypad'];
     }
 
     private function coerceComponentStatus(mixed $status): string
@@ -233,6 +254,8 @@ class DryingController extends Controller
             'dht22',
             'moisture_sensor',
             'door_sensor',
+            'lcd',
+            'keypad',
         ];
 
         return match ($key) {
@@ -263,6 +286,9 @@ class DryingController extends Controller
 
             // Moisture sensor (YL-69) is a single component.
             'moisture_sensor', 'moisture', 'yl69', 'yl_69', 'soil_moisture' => 'moisture_sensor',
+
+            'lcd', 'lcd_16x2', 'lcd16x2', 'display', 'i2c_lcd', 'liquidcrystal' => 'lcd',
+            'keypad', 'key_pad', 'matrix_keypad', 'keypad_4x4', 'membrane_keypad' => 'keypad',
 
             // Accept legacy names but never persist them as canonical enum values.
             'temp_humidity_sensor' => 'dht22',
@@ -1123,7 +1149,10 @@ class DryingController extends Controller
                     $mcId,
                     'running',
                     (float) $data['target_temperature'],
-                    (int) $data['fan_speed']
+                    (int) $data['fan_speed'],
+                    (string) $data['fish_type'],
+                    (int) $data['total_fish'],
+                    (int) $data['set_duration_minutes']
                 );
 
                 return response()->json([
@@ -1260,6 +1289,247 @@ class DryingController extends Controller
         }
 
         return response()->json(['success' => false, 'message' => 'Unknown action'], 400);
+    }
+
+    /**
+     * ESP32 local HMI (LCD/keypad) — independent from mobile/RTDB control.
+     * Machine runs locally; this endpoint ONLY saves history on action=stop.
+     * start/pause are accepted as no-ops (firmware does those offline).
+     */
+    public function esp32LocalSession(Request $request)
+    {
+        $data = $request->validate([
+            'user_id' => 'nullable|integer|exists:users,id',
+            'microcontroller_id' => 'nullable|integer|exists:microcontrollers,id',
+            'mac' => 'nullable|string|max:64',
+            'device_id' => 'nullable|string|max:255',
+            'action' => 'required|string|in:start,pause,stop',
+            'fish_type' => 'nullable|string|max:255',
+            'total_fish' => 'nullable|integer|min:0',
+            'target_temperature' => 'nullable|numeric',
+            'fan_speed' => 'nullable|integer|min:1|max:3',
+            'set_duration_minutes' => 'nullable|integer|min:1',
+            'drying_time_seconds' => 'nullable|integer|min:0',
+            'temperature' => 'nullable|numeric',
+            'humidity' => 'nullable|numeric',
+            'moisture' => 'nullable|numeric',
+        ]);
+
+        $action = strtolower((string) $data['action']);
+
+        $machine = null;
+        if (! empty($data['microcontroller_id'])) {
+            $machine = Microcontroller::find((int) $data['microcontroller_id']);
+        }
+        if (! $machine && ! empty($data['mac'])) {
+            $hex = $this->normalizeHardwareMac($data['mac']);
+            if ($hex) {
+                $machine = Microcontroller::query()
+                    ->whereRaw("REPLACE(REPLACE(LOWER(COALESCE(mac,'')), ':', ''), '-', '') = ?", [$hex])
+                    ->first();
+            }
+        }
+        if (! $machine && ! empty($data['device_id'])) {
+            $machine = Microcontroller::query()
+                ->where(function ($q) use ($data) {
+                    $q->where('device_id', $data['device_id'])
+                        ->orWhere('display_name', $data['device_id']);
+                })
+                ->first();
+        }
+        if (! $machine) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Microcontroller not found. Assign the board in the app first.',
+            ], 404);
+        }
+
+        $userId = (int) ($data['user_id'] ?? 0);
+        if ($userId <= 0) {
+            $userId = (int) (User::query()->orderBy('id')->value('id') ?? 0);
+        }
+        if ($userId <= 0) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No user account exists to attach local HMI sessions.',
+            ], 422);
+        }
+
+        $mcId = (int) $machine->id;
+        $fan = (int) ($data['fan_speed'] ?? 1);
+        if ($fan < 1 || $fan > 3) {
+            $fan = 1;
+        }
+        $elapsed = max(0, (int) ($data['drying_time_seconds'] ?? 0));
+
+        try {
+            if ($action === 'start') {
+                foreach (['fish_type', 'total_fish', 'target_temperature', 'set_duration_minutes'] as $field) {
+                    if (! array_key_exists($field, $data) || $data[$field] === null || $data[$field] === '') {
+                        return response()->json([
+                            'success' => false,
+                            'message' => ucfirst(str_replace('_', ' ', $field)).' is required to start.',
+                        ], 422);
+                    }
+                }
+
+                $active = DryingSession::where('microcontroller_id', $mcId)
+                    ->whereIn('status', ['running', 'paused'])
+                    ->whereNull('ended_at')
+                    ->latest('started_at')
+                    ->first();
+
+                if ($active) {
+                    $active->update([
+                        'status' => 'running',
+                        'fish_type' => (string) $data['fish_type'],
+                        'total_fish' => (int) $data['total_fish'],
+                        'target_temperature' => (float) $data['target_temperature'],
+                        'fan_speed' => $fan,
+                        'set_duration_minutes' => (int) $data['set_duration_minutes'],
+                        'drying_time_minutes' => $elapsed,
+                    ]);
+                    $session = $active->fresh();
+                } else {
+                    $session = DryingSession::create([
+                        'session_code' => 'loc-'.Str::uuid()->toString(),
+                        'microcontroller_id' => $mcId,
+                        'user_id' => $userId,
+                        'fish_type' => (string) $data['fish_type'],
+                        'total_fish' => (int) $data['total_fish'],
+                        'target_temperature' => (float) $data['target_temperature'],
+                        'fan_speed' => $fan,
+                        'set_duration_minutes' => (int) $data['set_duration_minutes'],
+                        'drying_time_minutes' => $elapsed,
+                        'status' => 'running',
+                        'started_at' => now(),
+                        'ended_at' => null,
+                    ]);
+                }
+
+                $this->syncEspSessionToFirebase(
+                    $mcId,
+                    'running',
+                    (float) $data['target_temperature'],
+                    $fan,
+                    (string) $data['fish_type'],
+                    (int) $data['total_fish'],
+                    (int) $data['set_duration_minutes']
+                );
+
+                return response()->json([
+                    'success' => true,
+                    'session' => $session,
+                    'message' => 'Local HMI session started — visible in Overview.',
+                ]);
+            }
+
+            if ($action === 'pause') {
+                $session = DryingSession::where('microcontroller_id', $mcId)
+                    ->whereIn('status', ['running', 'paused'])
+                    ->whereNull('ended_at')
+                    ->latest('started_at')
+                    ->first();
+
+                if (! $session) {
+                    return response()->json([
+                        'success' => true,
+                        'ignored' => true,
+                        'message' => 'No active session to pause.',
+                    ]);
+                }
+
+                $update = [
+                    'status' => 'paused',
+                    'drying_time_minutes' => $elapsed > 0 ? $elapsed : (int) $session->drying_time_minutes,
+                ];
+                foreach (['fish_type', 'total_fish', 'target_temperature', 'fan_speed', 'set_duration_minutes'] as $field) {
+                    if (array_key_exists($field, $data) && $data[$field] !== null && $data[$field] !== '') {
+                        $update[$field] = $data[$field];
+                    }
+                }
+                $session->update($update);
+
+                $this->syncEspSessionToFirebase(
+                    $mcId,
+                    'paused',
+                    (float) ($session->fresh()->target_temperature ?? 60),
+                    (int) ($session->fresh()->fan_speed ?? 1),
+                    (string) ($session->fresh()->fish_type ?? ''),
+                    (int) ($session->fresh()->total_fish ?? 0),
+                    (int) ($session->fresh()->set_duration_minutes ?? 1)
+                );
+
+                return response()->json([
+                    'success' => true,
+                    'session' => $session->fresh(),
+                    'message' => 'Local HMI session paused.',
+                ]);
+            }
+
+            // stop — complete active session or create history row
+            foreach (['fish_type', 'total_fish', 'target_temperature', 'set_duration_minutes'] as $field) {
+                if (! array_key_exists($field, $data) || $data[$field] === null || $data[$field] === '') {
+                    return response()->json([
+                        'success' => false,
+                        'message' => ucfirst(str_replace('_', ' ', $field)).' is required to save local history.',
+                    ], 422);
+                }
+            }
+
+            $startedAt = $elapsed > 0 ? now()->subSeconds($elapsed) : now();
+
+            $session = DryingSession::where('microcontroller_id', $mcId)
+                ->whereIn('status', ['running', 'paused'])
+                ->whereNull('ended_at')
+                ->latest('started_at')
+                ->first();
+
+            if ($session) {
+                $session->update([
+                    'fish_type' => (string) $data['fish_type'],
+                    'total_fish' => (int) $data['total_fish'],
+                    'target_temperature' => (float) $data['target_temperature'],
+                    'fan_speed' => $fan,
+                    'set_duration_minutes' => (int) $data['set_duration_minutes'],
+                    'drying_time_minutes' => $elapsed,
+                    'status' => 'stopped',
+                    'ended_at' => now(),
+                ]);
+            } else {
+                $session = DryingSession::create([
+                    'session_code' => 'loc-'.Str::uuid()->toString(),
+                    'microcontroller_id' => $mcId,
+                    'user_id' => $userId,
+                    'fish_type' => (string) $data['fish_type'],
+                    'total_fish' => (int) $data['total_fish'],
+                    'target_temperature' => (float) $data['target_temperature'],
+                    'fan_speed' => $fan,
+                    'set_duration_minutes' => (int) $data['set_duration_minutes'],
+                    'drying_time_minutes' => $elapsed,
+                    'status' => 'stopped',
+                    'started_at' => $startedAt,
+                    'ended_at' => now(),
+                ]);
+            }
+
+            if (array_key_exists('temperature', $data) || array_key_exists('humidity', $data) || array_key_exists('moisture', $data)) {
+                $this->appendFinalSensorLogFromRequest($session, $data);
+            }
+
+            $this->syncEspSessionToFirebase($mcId, 'stopped', 0, $fan);
+
+            return response()->json([
+                'success' => true,
+                'session' => $session->fresh()->load('sensorLogs'),
+                'message' => 'Local HMI session saved to history.',
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 500);
+        }
     }
 
     /**

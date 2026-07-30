@@ -9,6 +9,11 @@
       #include "esp_task_wdt.h"
       #include "driver/gpio.h"
       #endif
+      /** 1 = 16x2 LCD + 4x4 keypad local control. 0 = compile without those libraries. */
+      #ifndef ENABLE_LOCAL_HMI
+      #define ENABLE_LOCAL_HMI 1
+      #endif
+      #include "local_hmi.h"
 
       // ============================================================================
       //                       IDENTITY & ASSIGNMENT (NO HARDCODE)
@@ -38,12 +43,28 @@
       /** Drying target °C from RTDB session (used when session is `running`). */
       static float gSessionTargetC = 60.0f;
 
+      /** Local LCD/keypad owns the session (machine can run without the phone). */
+      static bool gLocalHmiOwned = false;
+      static String gLocalFishType = "";
+      static int gLocalTotalFish = 0;
+      static int gLocalDurationMin = 0;
+      static int gLocalDurationSec = 0;
+      static unsigned long gLocalRunAccumMs = 0;
+      static unsigned long gLocalRunSegmentStartMs = 0;
+
+      static void publishLocalSessionToRtdb(const char* statusWordIn);
+      static unsigned long localHmiElapsedSeconds();
+      static void queueHmiNetworkSync(const char* rtdbStatus, const char* apiAction);
+      static void flushHmiNetworkSync();
+      static void serviceLocalHmiKeys();
+      static bool postLocalSessionAction(const char* action);
+
       // ===== BUZZER (running session only) =====
       //  Door opened after closed start | DHT22 fault | temp high | temp low 10+ min
       //  Moisture probe never drives buzzer (spot-check in app only).
-      /** Max remote test length (ms). */
+      /** Max remote test length (ms). Keypad waits are extended in tick while user finishes. */
       #ifndef HARDWARE_TEST_MAX_MS
-      #define HARDWARE_TEST_MAX_MS 12000UL
+      #define HARDWARE_TEST_MAX_MS 600000UL
       #endif
       /** Fault pattern: 10 s ON, 10 s OFF, repeat (20 s cycle). */
       #ifndef ALERT_BUZZ_ON_MS
@@ -100,12 +121,13 @@
       static int           gTestFanLevel = 3;
       static const unsigned long ASSIGNMENT_POLL_UNASSIGNED_MS = 1000UL;
       static const unsigned long ASSIGNMENT_POLL_ASSIGNED_MS = 10000UL;
-      static const unsigned long SESSION_POLL_MS = 500UL;
-      static const unsigned long TEST_COMMAND_POLL_MS = 750UL;
-      static const unsigned long RTDB_GET_TIMEOUT_MS = 2500UL;
-      static const unsigned long RTDB_GET_CONNECT_TIMEOUT_MS = 1500UL;
-      static const unsigned long RTDB_PUT_TIMEOUT_MS = 3500UL;
-      static const unsigned long RTDB_PUT_CONNECT_TIMEOUT_MS = 1500UL;
+      // Keep session polls sparse — each HTTPS GET freezes the keypad for hundreds of ms.
+      static const unsigned long SESSION_POLL_MS = 2000UL;
+      static const unsigned long TEST_COMMAND_POLL_MS = 1000UL;
+      static const unsigned long RTDB_GET_TIMEOUT_MS = 1200UL;
+      static const unsigned long RTDB_GET_CONNECT_TIMEOUT_MS = 800UL;
+      static const unsigned long RTDB_PUT_TIMEOUT_MS = 1500UL;
+      static const unsigned long RTDB_PUT_CONNECT_TIMEOUT_MS = 800UL;
 
       // ================= WIFI / API — CHANGE PC IP HERE (must match phone app) =================
       const char* WIFI_SSID = "XuMinghao";
@@ -113,9 +135,11 @@
 
       // PC IPv4 from `ipconfig` + run: php artisan serve --host=0.0.0.0 --port=8000
       // Must match fish-dryer-mobile/app.json -> expo.extra.apiBaseUrl (same IP, ends with /api).
-      const char* API_URL = "http://10.38.125.15:8000/api/hardware/esp32/status";
+      const char* API_URL = "http://10.124.242.15:8000/api/hardware/esp32/status";
+      /** Local LCD/keypad start/pause/stop → Laravel history (same host as API_URL). */
+      const char* API_SESSION_URL = "http://10.124.242.15:8000/api/hardware/esp32/session";
 
-      static const char* FIRMWARE_BUILD_TAG = "fan-gpio22-v63";
+      static       const char* FIRMWARE_BUILD_TAG = "fan-gpio22-v67-hmi-snappy";
 
       // Laravel heartbeat: keeps `last_seen` + hardware rows in MySQL and mirrors RTDB when enabled.
       // Set to 0 only while debugging (e.g. API returns 500). If the app shows "offline" but RTDB
@@ -124,9 +148,9 @@
       #ifndef SEND_TO_LARAVEL
       #define SEND_TO_LARAVEL 0
       #endif
-      /** 0 = ignore RTDB test_command (Overview drying only). */
+      /** 1 = poll RTDB test_command (Hardware Status Test / Test All → LCD + keypad + loads). */
       #ifndef ENABLE_RTDB_HARDWARE_TEST
-      #define ENABLE_RTDB_HARDWARE_TEST 0
+      #define ENABLE_RTDB_HARDWARE_TEST 1
       #endif
 
       // ================= FIREBASE (set these before flashing) =================
@@ -195,7 +219,12 @@
       #define PIN_DOOR        16    // NOT GPIO15 (strapping — crashes when reed open)
       #define PIN_FAN         22
       #define PIN_HEATER1     19    // SSR DC+ (single heater)
+      // GPIO18 is keypad col when ENABLE_LOCAL_HMI — drive H2 on same SSR pin as H1.
+      #if ENABLE_LOCAL_HMI
+      #define PIN_HEATER2     PIN_HEATER1
+      #else
       #define PIN_HEATER2     18    // leave UNWIRED unless you add a 2nd SSR
+      #endif
       #define PIN_BUZZER      27
       #define PIN_LED_GREEN   32
       #define PIN_LED_YELLOW  33
@@ -284,7 +313,7 @@
       #endif
       /** Loud chirp when drying starts. 0 = off. */
       #ifndef BUZZER_DRYING_START_CHIRP_MS
-      #define BUZZER_DRYING_START_CHIRP_MS 1200
+      #define BUZZER_DRYING_START_CHIRP_MS 120
       #endif
       #ifndef SESSION_ACTIVE_HOLD_MS
       #define SESSION_ACTIVE_HOLD_MS 15000UL
@@ -1107,6 +1136,9 @@
         if (!gDryingOutputsLatched) {
           loadsHardwareAllOff();
         }
+      #if ENABLE_LOCAL_HMI
+        LocalHmi::endUiSelfTest();
+      #endif
       }
 
       static bool sessionStatusIsRunning() {
@@ -1699,6 +1731,7 @@
       }
 
       static String rtdbGetText(const String& pathNoJsonSuffix) {
+        serviceLocalHmiKeys();
         if (WiFi.status() != WL_CONNECTED) return String();
         WiFiClientSecure client;
         client.setInsecure();
@@ -1722,6 +1755,7 @@
           Serial.println(pathNoJsonSuffix);
         }
         http.end();
+        serviceLocalHmiKeys();
         return body;
       }
 
@@ -1899,6 +1933,10 @@
       }
 
       static void enterPausedSession() {
+        if (sessionStatusIsRunning() && gLocalRunSegmentStartMs > 0) {
+          gLocalRunAccumMs += (millis() - gLocalRunSegmentStartMs);
+          gLocalRunSegmentStartMs = 0;
+        }
         gDryRunAuthorized = false;
         gDryingOutputsLatched = false;
         gSessionStatus = "paused";
@@ -1919,6 +1957,21 @@
         }
         const int fs = parseJsonIntAfterKey(body, "fan_speed", gFanSpeedLevel);
         gFanSpeedLevel = fs < 1 ? 1 : (fs > 3 ? 3 : fs);
+
+        String fish = parseJsonStringAfterKey(body, "fish_type", "");
+        fish.trim();
+        if (fish.length() > 0) {
+          gLocalFishType = fish;
+        }
+        const int qty = parseJsonIntAfterKey(body, "total_fish", -1);
+        if (qty >= 0) {
+          gLocalTotalFish = qty;
+        }
+        const int dm = parseJsonIntAfterKey(body, "set_duration_minutes", 0);
+        if (dm > 0) {
+          gLocalDurationMin = dm;
+          gLocalDurationSec = dm * 60;
+        }
       }
 
       static String parseSessionStatusFromBody(const String& body) {
@@ -2022,6 +2075,9 @@
         gNullSessionPollStreak = 0;
         gDrySessionLatched = false;
         gDryingSessionStartMs = 0;
+        gLocalHmiOwned = false;
+        gLocalRunAccumMs = 0;
+        gLocalRunSegmentStartMs = 0;
         resetDoorOpenBuzzerPolicy();
         disengageBuzzerAlarm();
         pauseLocalHardwareTestOnly();
@@ -2102,7 +2158,11 @@
             gLastCommandSeq = seq;
           }
           Serial.println("[command] stop");
+          // App already persisted via Laravel — just idle locally + LCD.
           forceIdleSessionState();
+        #if ENABLE_LOCAL_HMI
+          LocalHmi::adoptCloudStopped();
+        #endif
           return;
         }
 
@@ -2112,6 +2172,9 @@
           }
           Serial.println("[command] pause");
           enterPausedSession();
+        #if ENABLE_LOCAL_HMI
+          LocalHmi::adoptCloudPaused();
+        #endif
           return;
         }
 
@@ -2120,10 +2183,26 @@
             gLastCommandSeq = seq;
           }
           gIgnoreStaleRunningUntilMs = 0;
+          // Pull fish/qty/duration from command if present (app start).
+          applySessionParamsFromBody(body);
+          if (sessionStatusIsPaused()) {
+            gLocalRunSegmentStartMs = millis();
+          } else if (!sessionStatusIsRunning()) {
+            gLocalRunAccumMs = 0;
+            gLocalRunSegmentStartMs = millis();
+            if (gLocalDurationSec < 1 && gLocalDurationMin > 0) {
+              gLocalDurationSec = gLocalDurationMin * 60;
+            }
+          }
           if (sessionStatusIsRunning() && gDryRunAuthorized) {
             Serial.print("[command] start (params only) fan=");
             Serial.println(gFanSpeedLevel);
             applyDryingSessionLoads(pollDhtIfDue(), cachedDhtT);
+          #if ENABLE_LOCAL_HMI
+            LocalHmi::adoptCloudSession(gLocalFishType, gLocalTotalFish, gSessionTargetC,
+                                        gLocalDurationSec > 0 ? gLocalDurationSec
+                                                              : gLocalDurationMin * 60);
+          #endif
             return;
           }
           const bool chirp = !sessionStatusIsRunning();
@@ -2133,6 +2212,11 @@
           Serial.print("[command] start mid=");
           Serial.println(mid);
           beginDryingOutputs(chirp);
+        #if ENABLE_LOCAL_HMI
+          LocalHmi::adoptCloudSession(gLocalFishType, gLocalTotalFish, gSessionTargetC,
+                                      gLocalDurationSec > 0 ? gLocalDurationSec
+                                                            : gLocalDurationMin * 60);
+        #endif
         }
       }
 
@@ -2170,14 +2254,21 @@
             Serial.print("[session] GET failed ");
             Serial.println(sessionPath);
           }
+          // No internet / RTDB flake — keep drying or paused locally.
           if (gDryRunAuthorized && sessionStatusIsRunning()) {
             applyDryingSessionLoads(pollDhtIfDue(), cachedDhtT);
+          } else if (sessionStatusIsPaused() || gLocalHmiOwned) {
+            // stay as-is
           } else {
             initLoadPinsForcedOff();
           }
           return;
         }
         if (body == "null") {
+          if (sessionStatusIsRunning() || sessionStatusIsPaused() || gLocalHmiOwned) {
+            // Keep local/offline session alive if RTDB session node is empty.
+            return;
+          }
           Serial.println("[session] RTDB null — stopped");
           forceIdleSessionState();
           return;
@@ -2220,6 +2311,20 @@
 
         if (command == "stop" || status == "stopped" || status == "idle" ||
             status == "complete" || status == "completed") {
+          // Keep local HMI drying alive if RTDB is still stale "stopped" (offline / race).
+          // Real app Stop is applied in applyCloudCommandFromRtdb (fresh seq → forceIdle).
+          if (gLocalHmiOwned && (sessionStatusIsRunning() || sessionStatusIsPaused())) {
+            // Heal RTDB at most every 10s — never on every poll (HTTPS freezes keypad).
+            static unsigned long lastHealMs = 0;
+            if (millis() - lastHealMs >= 10000UL) {
+              lastHealMs = millis();
+              queueHmiNetworkSync(sessionStatusIsPaused() ? "paused" : "running", nullptr);
+            }
+            if (sessionStatusIsRunning() && gDryRunAuthorized) {
+              applyDryingSessionLoads(pollDhtIfDue(), cachedDhtT);
+            }
+            return;
+          }
           forceIdleSessionState();
           return;
         }
@@ -2227,20 +2332,37 @@
         if (command == "pause" || status == "paused") {
           gMoistureCheckArmed =
               parseJsonBoolAfterKey(body, "moisture_check_armed", true);
+          const bool wasPaused = sessionStatusIsPaused();
           enterPausedSession();
+        #if ENABLE_LOCAL_HMI
+          if (!wasPaused) {
+            LocalHmi::adoptCloudPaused();
+          }
+        #endif
           return;
         }
 
         if (status == "running" || command == "start") {
           gMoistureCheckArmed = false;
+          applySessionParamsFromBody(body);
           if (!gDryRunAuthorized) {
             /** App Start writes session.command=start — honor that (fan/heater/buzzer). */
             if (command == "start") {
               Serial.println("[session] command=start — authorize outputs");
+              if (gLocalDurationSec < 1 && gLocalDurationMin > 0) {
+                gLocalDurationSec = gLocalDurationMin * 60;
+              }
+              if (gLocalRunSegmentStartMs == 0) {
+                gLocalRunAccumMs = 0;
+                gLocalRunSegmentStartMs = millis();
+              }
               beginDryingOutputs(false);
+              // Do not steal ownership from an active keypad session.
             } else if (millis() < gIgnoreStaleRunningUntilMs) {
               initLoadPinsForcedOff();
               return;
+            } else if (gLocalHmiOwned) {
+              // Local keypad session already authorized — ignore stale cloud "running".
             } else {
               Serial.println("[session] stale running without start — outputs OFF");
               forceIdleSessionState();
@@ -2251,7 +2373,15 @@
             gSessionStatus = "running";
             gSessionActiveFlag = true;
             gDryingSessionStartMs = millis();
+            if (gLocalRunSegmentStartMs == 0) {
+              gLocalRunSegmentStartMs = millis();
+            }
           }
+        #if ENABLE_LOCAL_HMI
+          LocalHmi::adoptCloudSession(gLocalFishType, gLocalTotalFish, gSessionTargetC,
+                                      gLocalDurationSec > 0 ? gLocalDurationSec
+                                                            : gLocalDurationMin * 60);
+        #endif
           applyDryingSessionLoads(pollDhtIfDue(), cachedDhtT);
           return;
         }
@@ -2296,15 +2426,81 @@
           loadsHardwareAllOff();
         }
         applyLedsForSession(gSessionStatus);
+      #if ENABLE_LOCAL_HMI
+        LocalHmi::endUiSelfTest();
+      #endif
         clearCloudTestCommand();
+      }
+
+      static void publishKeypadTestProgress(bool force) {
+      #if ENABLE_LOCAL_HMI
+        // Do NOT HTTPS PUT here during keypad collection — it freezes getKey() for seconds.
+        // Progress is published via heartbeat readings (keypad_keys_pressed).
+        (void)force;
+        LocalHmi::pollKeypadFast();
+      #else
+        (void)force;
+      #endif
+      }
+
+      static void beginUiSelfTestForCommand(const String& mode, const String& component,
+                                            int durationMs) {
+      #if ENABLE_LOCAL_HMI
+        String c = component;
+        c.toLowerCase();
+        (void)durationMs;
+
+        Serial.print("[test] UI self-test start mode=");
+        Serial.print(mode);
+        Serial.print(" component=");
+        Serial.println(c);
+
+        // Keypad-only: wait until user presses all buttons (LCD stays on keypad prompt only).
+        if (mode == "component" &&
+            (c == "keypad" || c == "keypad_4x4" || c == "key_pad")) {
+          LocalHmi::startKeypadSelfTest(0);
+          return;
+        }
+
+        // LCD-only: "LCD IS WORKING!" — no keypad phase.
+        if (mode == "component" &&
+            (c == "lcd" || c == "lcd_16x2" || c == "display")) {
+          LocalHmi::startLcdSelfTest(2500UL);
+          return;
+        }
+
+        // Test All only: LCD flash then keypad. Individual sensor tests = no HMI takeover.
+        if (mode == "all") {
+          LocalHmi::startCombinedUiSelfTest(0);
+        }
+      #else
+        (void)mode;
+        (void)component;
+        (void)durationMs;
+      #endif
       }
 
       static void tickHardwareTestOutputs() {
         const unsigned long now = millis();
         if (sessionBlocksHardwareTest()) {
           pauseLocalHardwareTestOnly();
+      #if ENABLE_LOCAL_HMI
+          LocalHmi::endUiSelfTest();
+      #endif
           return;
         }
+
+      #if ENABLE_LOCAL_HMI
+        // Keep remote test alive while user is still finishing the keypad.
+        if (LocalHmi::keypadSelfTestWaiting() || LocalHmi::uiSelfTestActive()) {
+          if (gTestMode.length() > 0) {
+            gTestModeUntilMs = millis() + 60000UL;  // extend — no artificial cut-off
+          }
+          LocalHmi::pollKeypadFast();
+          // Do NOT repaint LCD every tick — I2C steals time from key scanning.
+        }
+      #endif
+
         if (!hardwareTestActive()) {
           if (gTestMode.length() > 0) endHardwareTest();
           return;
@@ -2312,6 +2508,15 @@
 
         if (gTestMode == "all") {
           applyLedsForSession(gSessionStatus);
+          // Don't blast fan/heater/buzzer while user is pressing keypad — keep UI responsive.
+        #if ENABLE_LOCAL_HMI
+          if (LocalHmi::keypadSelfTestWaiting() ||
+              (LocalHmi::uiSelfTestActive() && LocalHmi::keypadSelfTestCount() > 0)) {
+            loadsHardwareAllOff();
+            buzzerForceSilent();
+            return;
+          }
+        #endif
           driveFanLoad(true);
           driveHeaterLoad(true);
           buzzerTestDrive();
@@ -2339,8 +2544,17 @@
             applyLedsForSession(gSessionStatus);
             return;
           }
+          if (c == "lcd" || c == "lcd_16x2" || c == "display" ||
+              c == "keypad" || c == "keypad_4x4" || c == "key_pad" ||
+              c == "esp32" || c == "dht22" || c == "moisture_sensor" || c == "door_sensor") {
+            // Sensors / LCD / keypad UI tests — no load actuation (keeps keypad scanning free).
+            loadsHardwareAllOff();
+            buzzerForceSilent();
+            applyLedsForSession(gSessionStatus);
+            return;
+          }
           const bool testsLed =
-            (c == "esp32" || c == "led_1" || c == "led_2" || c == "led_3" ||
+            (c == "led_1" || c == "led_2" || c == "led_3" ||
              c == "led_drying" || c == "led_pause" || c == "led_stop");
 
           if (testsLed) {
@@ -2348,11 +2562,11 @@
             driveLed(LED_GREEN,  false);
             driveLed(LED_YELLOW, false);
             driveLed(LED_RED,    false);
-            if (c == "esp32" || c == "led_1" || c == "led_drying") {
+            if (c == "led_1" || c == "led_drying") {
               driveLed(LED_GREEN, blink);
-            } else if (c == "dht22" || c == "led_2" || c == "led_pause") {
+            } else if (c == "led_2" || c == "led_pause") {
               driveLed(LED_YELLOW, blink);
-            } else if (c == "door_sensor" || c == "moisture_sensor" || c == "led_3" || c == "led_stop") {
+            } else if (c == "led_3" || c == "led_stop") {
               driveLed(LED_RED, blink);
             } else {
               driveLed(LED_GREEN, blink);
@@ -2428,8 +2642,7 @@
         Serial.print(component);
         Serial.print(" ms=");
         Serial.println(durationMs);
-        String c = component;
-        c.toLowerCase();
+        beginUiSelfTestForCommand(mode, component, durationMs);
         if (gAssignedId > 0 && reqId.length() > 0) {
           String ack = "{\"request_id\":\"";
           ack += reqId;
@@ -2441,6 +2654,7 @@
       }
 
       static bool rtdbPutJson(const String& pathNoJsonSuffix, const String& jsonBody) {
+        serviceLocalHmiKeys();
         if (WiFi.status() != WL_CONNECTED) return false;
         HTTPClient http;
         http.setTimeout(RTDB_PUT_TIMEOUT_MS);
@@ -2462,6 +2676,7 @@
         int code = http.PUT(jsonBody);
         String resp = http.getString();
         http.end();
+        serviceLocalHmiKeys();
 
         Serial.print("RTDB PUT ");
         Serial.print(code);
@@ -2661,7 +2876,9 @@
         payload += "\"esp32\":\""; payload += statusWord(esp32UiOnline); payload += "\",";
         payload += "\"dht22\":\""; payload += statusWord(dhtOkReport); payload += "\",";
         payload += "\"moisture_sensor\":\""; payload += moistureStatusWord(moistureOkReport); payload += "\",";
-        payload += "\"door_sensor\":\""; payload += statusWord(doorOkReport); payload += "\"";
+        payload += "\"door_sensor\":\""; payload += statusWord(doorOkReport); payload += "\",";
+        payload += "\"lcd\":\""; payload += statusWord(LocalHmi::lcdWorking()); payload += "\",";
+        payload += "\"keypad\":\""; payload += statusWord(LocalHmi::keypadWorking()); payload += "\"";
 
         payload += "}";
         payload += ",\"readings\":{";
@@ -2741,7 +2958,9 @@
         root += "\"esp32\":\""; root += statusWord(esp32UiOnline); root += "\",";
         root += "\"door_sensor\":\""; root += statusWord(doorOkReport); root += "\",";
         root += "\"moisture_sensor\":\""; root += moistureStatusWord(moistureOkReport); root += "\",";
-        root += "\"dht22\":\""; root += statusWord(dhtOkReport); root += "\"";
+        root += "\"dht22\":\""; root += statusWord(dhtOkReport); root += "\",";
+        root += "\"lcd\":\""; root += statusWord(LocalHmi::lcdWorking()); root += "\",";
+        root += "\"keypad\":\""; root += statusWord(LocalHmi::keypadWorking()); root += "\"";
         root += "}";
 
         // Only publish readings for sensors that passed health checks — floating ADC / unplugged
@@ -2797,6 +3016,17 @@
             root += (doorOpen ? "open" : "closed");
             root += "\"";
           }
+        #if ENABLE_LOCAL_HMI
+          if (LocalHmi::uiSelfTestActive()) {
+            readingsComma();
+            root += "\"keypad_keys_pressed\":";
+            root += String((unsigned)LocalHmi::keypadSelfTestCount());
+            readingsComma();
+            root += "\"keypad_keys_total\":16";
+            readingsComma();
+            root += "\"ui_self_test\":true";
+          }
+        #endif
           readingsComma();
           root += "\"outputs\":{";
         }
@@ -3060,12 +3290,32 @@
         Serial.print("# BUILD: ");
         Serial.println(FIRMWARE_BUILD_TAG);
         Serial.println("# PINS: DHT22=4 MOISTURE=35 DOOR=16 FAN=22 H1=19 BUZZER=27");
-        Serial.println("#       LED green=32 yellow=33 red=13  (H2/GPIO18 unwired)");
+        Serial.println("#       LED green=32 yellow=33 red=13  (H2 aliased to H1 when HMI on)");
+      #if ENABLE_LOCAL_HMI
+        Serial.println("# HMI FIRST — local LCD/keypad before WiFi");
+        Serial.println("# HMI KEYPAD L->R labels 8..1: GPIO 12,18,5,26,25,17,15,14");
+        Serial.println("# HMI mode/Stop col on GPIO12 ONLY (was GPIO2)");
+      #endif
       #if HEATER_CONTROL_IS_SSR && !HEATER_SSR_SINK_5V
         Serial.println("# HEATER SSR: GPIO19->SSR3(+), GND->SSR4(-), HIGH=running, LOW=stopped");
       #endif
         Serial.println("##############################################");
         Serial.printf("Reset reason: %d\n", (int)esp_reset_reason());
+
+        // HMI before WiFi — no network blocking while user learns keypad.
+        Serial.println("[boot] hardware init...");
+        gDryRunAuthorized = false;
+        forceIdleSessionState();
+        initHardwarePins();
+        applyLedsForSession("stopped");
+      #if ENABLE_LOCAL_HMI
+        LocalHmi::begin();
+        // 1s keypad-only before WiFi — then loop keeps network quiet during local use
+        for (int i = 0; i < 100; i++) {
+          LocalHmi::poll();
+          delay(10);
+        }
+      #endif
 
         connectWifiBlocking();
         syncClockOnce();
@@ -3093,17 +3343,12 @@
         Serial.print("Discovery    : discovery/"); Serial.println(gDeviceMacSafe);
         Serial.println("------------------");
 
-        Serial.println("[boot] hardware init...");
-        gDryRunAuthorized = false;
-        forceIdleSessionState();
-        initHardwarePins();
         if (gAssignedId > 0) {
           consumeCloudCommandSeq(gAssignedId);
         }
-        applyLedsForSession("stopped");
         Serial.println("[boot] hardware OK");
 
-        delay(2000);
+        delay(200);
 
         Serial.println("=== HEARTBEAT START ===");
         Serial.print("Polarity: RELAY_ACTIVE_LOW=");
@@ -3130,6 +3375,333 @@
         initLoadPinsForcedOff();
         sendHeartbeat(dhtOk, moistureOk, doorOk);
         lastHeartbeatMs = millis();
+      }
+
+      // ---------------------------------------------------------------------------
+      // Local HMI (LCD + keypad) — independent start/pause/stop + history via Laravel
+      // ---------------------------------------------------------------------------
+      static unsigned long localHmiElapsedSeconds() {
+        unsigned long ms = gLocalRunAccumMs;
+        if (sessionStatusIsRunning() && gLocalRunSegmentStartMs > 0) {
+          ms += (millis() - gLocalRunSegmentStartMs);
+        }
+        return ms / 1000UL;
+      }
+
+      /** Drain keypad several times — never block the UI behind HTTPS. */
+      static void serviceLocalHmiKeys() {
+      #if ENABLE_LOCAL_HMI
+        for (int i = 0; i < 5; i++) {
+          LocalHmi::poll();
+        }
+      #endif
+      }
+
+      // Deferred cloud sync so Enter/Pause/Stop update LCD instantly.
+      static String gDeferredRtdbStatus;
+      static String gDeferredApiAction;
+
+      static void queueHmiNetworkSync(const char* rtdbStatus, const char* apiAction) {
+        if (rtdbStatus && rtdbStatus[0]) {
+          gDeferredRtdbStatus = rtdbStatus;
+        }
+        if (apiAction && apiAction[0]) {
+          gDeferredApiAction = apiAction;
+        }
+      }
+
+      static void flushHmiNetworkSync() {
+      #if ENABLE_LOCAL_HMI
+        // Never push cloud while user is typing / on STOP|PAUSE prompt.
+        if (LocalHmi::wantsNetworkQuiet()) return;
+      #endif
+        if (gDeferredRtdbStatus.length()) {
+          const String st = gDeferredRtdbStatus;
+          gDeferredRtdbStatus = "";
+          publishLocalSessionToRtdb(st.c_str());
+          serviceLocalHmiKeys();
+        }
+        if (gDeferredApiAction.length()) {
+          const String act = gDeferredApiAction;
+          gDeferredApiAction = "";
+          (void)postLocalSessionAction(act.c_str());
+          serviceLocalHmiKeys();
+        }
+      }
+
+      static void publishLocalSessionToRtdb(const char* statusWordIn) {
+        const int mid = sessionMachineId();
+        if (mid <= 0) return;
+        if (WiFi.status() != WL_CONNECTED) return;
+
+        String st = statusWordIn ? String(statusWordIn) : String("stopped");
+        st.toLowerCase();
+        st.trim();
+        const bool running = (st == "running");
+        const bool paused = (st == "paused");
+        const char* cmd = running ? "start" : (paused ? "pause" : "stop");
+
+        String fish = gLocalFishType;
+        fish.replace("\\", "\\\\");
+        fish.replace("\"", "\\\"");
+
+        const unsigned long seq = millis();
+
+        String sessionJson = "{";
+        sessionJson += "\"status\":\"";
+        sessionJson += st;
+        sessionJson += "\",\"command\":\"";
+        sessionJson += cmd;
+        sessionJson += "\",\"session_active\":";
+        sessionJson += running ? "true" : "false";
+        sessionJson += ",\"fault_buzzer_armed\":";
+        sessionJson += running ? "true" : "false";
+        sessionJson += ",\"moisture_check_armed\":";
+        sessionJson += paused ? "true" : "false";
+        sessionJson += ",\"fan_speed\":";
+        sessionJson += gFanSpeedLevel < 1 ? 1 : gFanSpeedLevel;
+        sessionJson += ",\"target_temperature\":";
+        sessionJson += String(gSessionTargetC > 1.0f ? gSessionTargetC : 60.0f, 1);
+        sessionJson += ",\"fish_type\":\"";
+        sessionJson += fish;
+        sessionJson += "\",\"total_fish\":";
+        sessionJson += gLocalTotalFish;
+        sessionJson += ",\"set_duration_minutes\":";
+        sessionJson += gLocalDurationMin < 1 ? 1 : gLocalDurationMin;
+        sessionJson += ",\"source\":\"local_hmi\"";
+        sessionJson += ",\"updated_at\":\"";
+        sessionJson += String(seq);
+        sessionJson += "\"}";
+
+        String cmdJson = "{";
+        cmdJson += "\"action\":\"";
+        cmdJson += cmd;
+        cmdJson += "\",\"fan_speed\":";
+        cmdJson += gFanSpeedLevel < 1 ? 1 : gFanSpeedLevel;
+        cmdJson += ",\"target_temperature\":";
+        cmdJson += String(gSessionTargetC > 1.0f ? gSessionTargetC : 60.0f, 1);
+        cmdJson += ",\"fish_type\":\"";
+        cmdJson += fish;
+        cmdJson += "\",\"total_fish\":";
+        cmdJson += gLocalTotalFish;
+        cmdJson += ",\"set_duration_minutes\":";
+        cmdJson += gLocalDurationMin < 1 ? 1 : gLocalDurationMin;
+        cmdJson += ",\"seq\":";
+        cmdJson += seq;
+        cmdJson += ",\"updated_at\":\"";
+        cmdJson += String(seq);
+        cmdJson += "\"}";
+
+        (void)rtdbPutJson(String("machines/") + String(mid) + "/command", cmdJson);
+        (void)rtdbPutJson(String("machines/") + String(mid) + "/session", sessionJson);
+        // Don't re-apply our own command on next poll.
+        if (seq > gLastCommandSeq) {
+          gLastCommandSeq = seq;
+        }
+        Serial.printf("[hmi] RTDB session %s published mid=%d\n", st.c_str(), mid);
+      }
+
+      static String buildLocalSessionPayload(const char* action) {
+        const int mid = sessionMachineId();
+        String fish = gLocalFishType;
+        fish.replace("\\", "\\\\");
+        fish.replace("\"", "\\\"");
+
+        String payload = "{";
+        payload += "\"action\":\"";
+        payload += action;
+        payload += "\"";
+        if (mid > 0) {
+          payload += ",\"microcontroller_id\":";
+          payload += mid;
+        }
+        payload += ",\"mac\":\"";
+        payload += gDeviceMac;
+        payload += "\"";
+        payload += ",\"device_id\":\"";
+        payload += gDeviceName;
+        payload += "\"";
+        payload += ",\"fish_type\":\"";
+        payload += fish;
+        payload += "\"";
+        payload += ",\"total_fish\":";
+        payload += gLocalTotalFish;
+        payload += ",\"target_temperature\":";
+        payload += String(gSessionTargetC > 1.0f ? gSessionTargetC : 60.0f, 1);
+        payload += ",\"fan_speed\":";
+        payload += gFanSpeedLevel < 1 ? 1 : gFanSpeedLevel;
+        payload += ",\"set_duration_minutes\":";
+        payload += gLocalDurationMin < 1 ? 1 : gLocalDurationMin;
+        payload += ",\"drying_time_seconds\":";
+        payload += (int)localHmiElapsedSeconds();
+        if (!isnan(cachedDhtT)) {
+          payload += ",\"temperature\":";
+          payload += String(cachedDhtT, 1);
+        }
+        payload += "}";
+        return payload;
+      }
+
+      static String buildLocalHistoryPayload() {
+        return buildLocalSessionPayload("stop");
+      }
+
+      static bool postHistoryPayload(const String& payload) {
+        if (WiFi.status() != WL_CONNECTED) return false;
+        HTTPClient http;
+        WiFiClient client;
+        http.setTimeout(5000);
+        http.setConnectTimeout(3000);
+        if (!http.begin(client, API_SESSION_URL)) {
+          Serial.println("[hmi] history http.begin failed");
+          return false;
+        }
+        http.addHeader("Content-Type", "application/json");
+        Serial.print("[hmi] SAVE SESSION ");
+        Serial.println(payload);
+        const int code = http.POST(payload);
+        const String resp = http.getString();
+        http.end();
+        Serial.print("[hmi] session HTTP ");
+        Serial.print(code);
+        Serial.print(" ");
+        Serial.println(resp);
+        return code >= 200 && code < 300;
+      }
+
+      static void queueLocalHistoryPayload(const String& payload) {
+        gPrefs.begin("fdhmi", false);
+        gPrefs.putString("hist", payload);
+        gPrefs.end();
+        Serial.println("[hmi] history queued in NVS (no internet)");
+      }
+
+      static void flushQueuedLocalHistory() {
+        gPrefs.begin("fdhmi", false);
+        const String pending = gPrefs.getString("hist", "");
+        gPrefs.end();
+        if (!pending.length()) return;
+        if (WiFi.status() != WL_CONNECTED) return;
+        if (!postHistoryPayload(pending)) return;
+        gPrefs.begin("fdhmi", false);
+        gPrefs.remove("hist");
+        gPrefs.end();
+        Serial.println("[hmi] queued history uploaded");
+      }
+
+      static bool postLocalSessionAction(const char* action) {
+        const String payload = buildLocalSessionPayload(action);
+        if (postHistoryPayload(payload)) return true;
+        // Only queue stop/finish for later history sync — start/pause are live.
+        if (strcmp(action, "stop") == 0) {
+          queueLocalHistoryPayload(payload);
+        }
+        return false;
+      }
+
+      static bool postLocalHistoryOnStopOnly() {
+        return postLocalSessionAction("stop");
+      }
+
+      void hmiOnStartDrying(const String& fishType, int totalFish, float targetC,
+                            int durationSec, int fanSpeed) {
+        gLocalFishType = fishType;
+        gLocalTotalFish = totalFish;
+        gLocalDurationSec = durationSec < 1 ? 1 : durationSec;
+        gLocalDurationMin = (gLocalDurationSec + 59) / 60;  // history field (ceil minutes)
+        gSessionTargetC = targetC;
+        gFanSpeedLevel = fanSpeed < 1 ? 1 : (fanSpeed > 3 ? 3 : fanSpeed);
+        gLocalHmiOwned = true;
+        gLocalRunAccumMs = 0;
+        gLocalRunSegmentStartMs = millis();
+        gIgnoreStaleRunningUntilMs = 0;
+        // LCD/relays first — cloud sync is deferred so Enter feels instant.
+        beginDryingOutputs(true);
+        queueHmiNetworkSync("running", "start");
+        Serial.printf("[hmi] LOCAL start duration=%ds (sync deferred)\n", gLocalDurationSec);
+      }
+
+      void hmiOnPauseDrying() {
+        if (sessionStatusIsRunning() && gLocalRunSegmentStartMs > 0) {
+          gLocalRunAccumMs += (millis() - gLocalRunSegmentStartMs);
+          gLocalRunSegmentStartMs = 0;
+        }
+        enterPausedSession();
+        queueHmiNetworkSync("paused", "pause");
+        Serial.println("[hmi] LOCAL pause (sync deferred)");
+      }
+
+      void hmiOnResumeDrying() {
+        gLocalRunSegmentStartMs = millis();
+        beginDryingOutputs(true);
+        gLocalHmiOwned = true;
+        queueHmiNetworkSync("running", "start");
+        Serial.println("[hmi] LOCAL resume (sync deferred)");
+      }
+
+      void hmiOnStopDrying() {
+        if (sessionStatusIsRunning() && gLocalRunSegmentStartMs > 0) {
+          gLocalRunAccumMs += (millis() - gLocalRunSegmentStartMs);
+          gLocalRunSegmentStartMs = 0;
+        }
+        const bool hadLocal = gLocalHmiOwned || sessionStatusIsRunning() || sessionStatusIsPaused() ||
+                              gLocalFishType.length() > 0;
+        const unsigned long elapsedSec = localHmiElapsedSeconds();
+        const String fish = gLocalFishType;
+        const int total = gLocalTotalFish;
+        const int dur = gLocalDurationMin;
+        const int durSec = gLocalDurationSec;
+        const float target = gSessionTargetC;
+        const int fan = gFanSpeedLevel;
+        // Idle + LCD first. Queue NVS history immediately (fast), HTTPS later.
+        forceIdleSessionState();
+        queueHmiNetworkSync("stopped", nullptr);
+        if (hadLocal) {
+          gLocalFishType = fish;
+          gLocalTotalFish = total;
+          gLocalDurationMin = dur;
+          gLocalDurationSec = durSec;
+          gSessionTargetC = target;
+          gFanSpeedLevel = fan;
+          gLocalRunAccumMs = elapsedSec * 1000UL;
+          // NVS now (instant). flushQueuedLocalHistory() uploads when network is free.
+          queueLocalHistoryPayload(buildLocalHistoryPayload());
+          gLocalRunAccumMs = 0;
+          gLocalFishType = "";
+          gLocalTotalFish = 0;
+        }
+        Serial.println("[hmi] stop — UI instant; history queued");
+      }
+
+      void hmiOnDurationComplete() {
+        Serial.println("[hmi] duration complete — stop + save");
+        hmiOnStopDrying();
+      }
+
+      bool hmiSessionIsRunning() { return sessionStatusIsRunning(); }
+      bool hmiSessionIsPaused() { return sessionStatusIsPaused(); }
+      float hmiLiveTemperatureC() { return cachedDhtT; }
+
+      bool hmiDoorIsOpen() {
+        bool dhtOk = false, moistureOk = false, doorOk = false, doorOpen = false;
+        readSensorsOnce(dhtOk, moistureOk, doorOk, doorOpen);
+        return doorOk && doorOpen;
+      }
+
+      bool hmiLocalDurationExpired() {
+        if (!sessionStatusIsRunning()) return false;
+        if (gLocalDurationSec < 1) return false;
+        return localHmiElapsedSeconds() >= (unsigned long)gLocalDurationSec;
+      }
+
+      long hmiRemainingDurationSec() {
+        if (gLocalDurationSec < 1) {
+          // Fall back to set duration digits on LCD if cloud didn't send minutes yet.
+          return 0;
+        }
+        long rem = (long)gLocalDurationSec - (long)localHmiElapsedSeconds();
+        if (rem < 0) rem = 0;
+        return rem;
       }
 
       /** Serial: 1=all ON, 0=all OFF, h=heater only 60s (wiring test, no app). */
@@ -3175,9 +3747,76 @@
       void loop() {
         pollSerialBenchOverride();
 
-        if (WiFi.status() != WL_CONNECTED) {
-          connectWifiBlocking(8000);
+      #if ENABLE_LOCAL_HMI
+        // Always service keypad first — HTTPS must never starve Enter/Pause/Stop.
+        serviceLocalHmiKeys();
+
+        // ============================================================
+        // KEYPAD SELF-TEST: stay in a tight keypad-only loop.
+        // Normal HMI keypad works via Keypad.getKey(); WiFi/HTTPS was
+        // starving that path during tests. Do NOT touch relays/network
+        // here except a rare cancel/progress check.
+        // ============================================================
+        if (LocalHmi::keypadSelfTestWaiting()) {
+          Serial.println("[test] KEYPAD MODE — mash all buttons (network paused)");
+          uint8_t lastCount = 255;
+          while (LocalHmi::serviceKeypadSelfTestSlice()) {
+            const uint8_t count = LocalHmi::keypadSelfTestCount();
+            if (count != lastCount) {
+              lastCount = count;
+              Serial.printf("[test] keypad keys %u/16\n", (unsigned)count);
+            }
+            if (count >= 16) {
+              Serial.println("[test] keypad COMPLETE");
+              // One progress write after complete — never during mashing.
+              if (gAssignedId > 0 && gLastTestRequestId.length() > 0) {
+                String ack = "{\"request_id\":\"";
+                ack += gLastTestRequestId;
+                ack += "\",\"status\":\"running\",\"component\":\"keypad\",\"keys_pressed\":16,\"keys_total\":16,\"ok\":true}";
+                (void)rtdbPutJson(String("machines/") + String(gAssignedId) + "/test_ack", ack);
+              }
+              break;
+            }
+            // Keep the command alive locally, but do not touch HTTPS while the user is
+            // pressing keys; those blocking calls were causing missed counts.
+            if (gTestMode.length() > 0) {
+              gTestModeUntilMs = millis() + 60000UL;
+            }
+            delay(1);
+          }
+          Serial.println("[test] left KEYPAD MODE");
+          // Fall through to normal loop once for cleanup/heartbeat.
         }
+
+        const bool quiet =
+            LocalHmi::wantsNetworkQuiet() &&
+            !hardwareTestActive() &&
+            !LocalHmi::uiSelfTestActive();
+        if (!quiet) {
+          flushQueuedLocalHistory();
+          flushHmiNetworkSync();
+        }
+
+        if (quiet) {
+          bool dhtOk = false, moistureOk = false, doorOk = false, doorOpen = false;
+          readSensorsOnce(dhtOk, moistureOk, doorOk, doorOpen);
+          applySessionLedsOnly();
+          commitLoadRelays(dhtOk, cachedDhtT);
+          serviceBuzzer(dhtOk, moistureOk, doorOk, doorOpen, cachedDhtT);
+          safetyCutLoadsUnlessRunning();
+          serviceLocalHmiKeys();
+          delay(2);
+          return;
+        }
+      #endif
+
+        if (WiFi.status() != WL_CONNECTED) {
+          connectWifiBlocking(3000);
+          serviceLocalHmiKeys();
+        }
+      #if ENABLE_LOCAL_HMI
+        serviceLocalHmiKeys();
+      #endif
 
         bool dhtOk = false, moistureOk = false, doorOk = false, doorOpen = false;
         readSensorsOnce(dhtOk, moistureOk, doorOk, doorOpen);
@@ -3198,16 +3837,26 @@
                   "[assignment] ID=0 — Save board in app OR ensure machines/{id} has this MAC");
             }
           }
+          serviceLocalHmiKeys();
         }
+      #if ENABLE_LOCAL_HMI
+        serviceLocalHmiKeys();
+      #endif
         if (millis() - gLastSessionPollMs >= SESSION_POLL_MS) {
           gLastSessionPollMs = millis();
           refreshSessionFromCloud();
+          serviceLocalHmiKeys();
         }
+      #if ENABLE_LOCAL_HMI
+        serviceLocalHmiKeys();
+        flushHmiNetworkSync();
+      #endif
       #if ENABLE_RTDB_HARDWARE_TEST
         if (!gDryingOutputsLatched && !sessionStatusIsRunning() && !sessionStatusIsPaused()) {
           if (millis() - gLastTestCmdPollMs >= TEST_COMMAND_POLL_MS) {
             gLastTestCmdPollMs = millis();
             refreshTestCommandFromCloud();
+            serviceLocalHmiKeys();
           }
         }
       #endif
@@ -3230,6 +3879,10 @@
       #endif
           commitLoadRelays(dhtOk, cachedDhtT);
           lastHeartbeatMs = millis();
+          serviceLocalHmiKeys();
         }
-        delay(5);
+      #if ENABLE_LOCAL_HMI
+        serviceLocalHmiKeys();
+      #endif
+        delay(2);
       }

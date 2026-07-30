@@ -26,6 +26,8 @@ return new class extends Migration
                 'fan_2',
                 'fan_3',
                 'dht22',
+                'lcd',
+                'keypad',
             ]);
             $table->enum('status', ['working','warning','not_working'])->default('working');
             $table->timestamp('last_checked_at')->nullable();
