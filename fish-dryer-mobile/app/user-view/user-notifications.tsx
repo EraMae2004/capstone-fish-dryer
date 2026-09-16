@@ -8,7 +8,6 @@ import {
   Alert
 } from 'react-native';
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
-import { Stack } from 'expo-router';
 import {
   loadHardwareNotifications,
   markAllHardwareNotificationsRead,
@@ -211,8 +210,6 @@ export default function UserNotifications({
 
   return (
     <>
-      <Stack.Screen options={{ headerShown: false }} />
-
       <ScrollView
         style={styles.container}
         contentContainerStyle={styles.scrollContent}
@@ -236,6 +233,7 @@ export default function UserNotifications({
         </View>
 
         <MachineDropdown
+          active={visible}
           machines={userMachines}
           selectedId={selectedMachineId}
           loading={machinesLoading}

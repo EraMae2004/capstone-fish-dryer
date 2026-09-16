@@ -17,12 +17,12 @@ import { API_BASE_URL } from "@/config/api";
 import HardwareStatusModal from "./hardware-status-modal";
 import { onValue, ref as dbRef, get as dbGet, type DataSnapshot } from "firebase/database";
 import { firebaseDb } from "@/config/firebase";
+import { isFirebaseHeartbeatLive, subscribeLiveHardwareStatus } from "@/lib/live-hardware-rtdb";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
 import { resolveMoisturePercent } from "@/lib/duration-format";
 import { ensureEspAssignment } from "@/lib/ensure-esp-assignment";
 import {
   computeStableOnlineByMachineId,
-  hardwareStatusBelongsToMachine,
   ingestRtdbHardwareSnapshot,
   isMachineDetectable,
   isMachineLive,
@@ -46,7 +46,11 @@ import {
   isDoorSensorUiLabel,
 } from "@/lib/door-sensor-display";
 import MachineDropdown from "./machine-dropdown";
-import { getSelectedMachineId, setSelectedMachineId } from "@/lib/selected-machine";
+import {
+  clearSelectedMachineId,
+  getSelectedMachineId,
+  setSelectedMachineId,
+} from "@/lib/selected-machine";
 
 type MachineOnlineStatus = "online" | "offline";
 
@@ -74,9 +78,8 @@ type Machine = {
 };
 
 const MACHINE_PRESENCE_POLL_MS = 15_000;
-const PRESENCE_UI_TICK_MS = 500;
+const PRESENCE_UI_TICK_MS = 2000;
 
-/** MCU offline ⇒ every component reads not_working (no stale "working" ghosts). */
 function effectiveComponentStatus(rawStatus: string, streamFresh: boolean): string {
   if (!streamFresh) return "not_working";
   return String(rawStatus ?? "not_working").trim() || "not_working";
@@ -119,7 +122,8 @@ function normalizeMachineRow(m: Machine): Required<Pick<Machine, "status">> & Ma
 
 function machineMacForRow(m: Machine | null | undefined): string | null {
   if (!m) return null;
-  return normalizeHardwareMacKey(m.mac) ?? normalizeHardwareMacKey(m.device_id);
+  const mac = normalizeHardwareMacKey(m.mac);
+  return mac && mac.length >= 12 ? mac.slice(0, 12) : null;
 }
 
 function macWithColonsFromKey(macKey: string): string {
@@ -245,7 +249,10 @@ function parseHardwareStatusFromRtdb(val: Record<string, unknown>): {
   return { components, readings, payloadMs };
 }
 
-export default function HardwareStatus() {
+export default function HardwareStatus({ active = true }: { active?: boolean }) {
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const machinesLoadedRef = useRef(false);
   const [machines, setMachines] = useState<Machine[]>([]);
   const [selectedMachine, setSelectedMachine] = useState<Machine | null>(null);
   /** Per-machine RTDB hardware — keyed by Laravel/Firebase machine id. */
@@ -369,25 +376,21 @@ export default function HardwareStatus() {
     selectedMachine != null ? machineHwById[selectedMachine.id] : undefined;
   const components = selectedHw?.components ?? [];
   const liveReadings = selectedHw?.readings ?? null;
-  const hardwareRtdbLastReceiveMs =
-    selectedMachine != null
-      ? machineRtdbReceiveMs[selectedMachine.id] ?? selectedHw?.receiveMs ?? null
-      : null;
   const hardwareRtdbPayloadAtMs =
-    selectedMachine != null
-      ? machineRtdbPayloadMs[selectedMachine.id] ?? selectedHw?.payloadMs ?? null
-      : null;
+    selectedMachine != null ? machineRtdbPayloadMs[selectedMachine.id] ?? null : null;
 
   useEffect(() => {
-    loadMachines();
-  }, []);
+    if (!active || machinesLoadedRef.current) return;
+    machinesLoadedRef.current = true;
+    void loadMachines();
+  }, [active]);
 
   /** RTDB does not push when the ESP stops; re-render periodically so "recent" expires → offline. */
   useEffect(() => {
-    if (!firebaseDb) return;
+    if (!firebaseDb || !active) return;
     const id = setInterval(() => setPresenceTick((n) => n + 1), PRESENCE_UI_TICK_MS);
     return () => clearInterval(id);
-  }, [firebaseDb]);
+  }, [firebaseDb, active]);
 
   const recomputeStableOnline = useCallback((advanceOfflineDebounce: boolean) => {
     const ids = machinesRef.current.map((m) => m.id);
@@ -419,74 +422,81 @@ export default function HardwareStatus() {
   const hardwareStableOnline =
     selectedMachine != null ? (stableOnlineById[selectedMachine.id] ?? false) : false;
 
-  // Per-machine RTDB listeners — every live heartbeat refreshes receiveMs (no parent-scan flicker).
-  useEffect(() => {
-    if (!firebaseDb || !machineIdsKey) {
-      return;
+  const applyLiveHw = useCallback((id: number, hwRec: Record<string, unknown>) => {
+    const now = Date.now();
+    const parsed = parseHardwareStatusFromRtdb(hwRec);
+    const payloadMs = parsed.payloadMs ?? parsePresenceMs(hwRec.updated_at);
+    const delivered = recordMachineRtdbDelivery(
+      machineRtdbReceiveRef.current,
+      machineRtdbPayloadRef.current,
+      id,
+      hwRec.updated_at ?? payloadMs,
+      machineRtdbSeenCallbackRef.current,
+      now
+    );
+    machineRtdbReceiveRef.current = delivered.receiveById;
+    machineRtdbPayloadRef.current = delivered.payloadById;
+    machineHwByIdRef.current = {
+      ...machineHwByIdRef.current,
+      [id]: {
+        components: parsed.components,
+        readings: parsed.readings,
+        receiveMs: delivered.accepted ? now : machineHwByIdRef.current[id]?.receiveMs ?? null,
+        payloadMs,
+      },
+    };
+    if (!activeRef.current) return;
+    if (delivered.accepted) {
+      setMachineRtdbReceiveMs({ ...delivered.receiveById });
     }
+    if (payloadMs != null) {
+      setMachineRtdbPayloadMs({ ...machineRtdbPayloadRef.current });
+    }
+    setMachineHwById({ ...machineHwByIdRef.current });
+  }, []);
+
+  const markHardwareDead = useCallback((id: number) => {
+    const nextPayload = { ...machineRtdbPayloadRef.current };
+    delete nextPayload[id];
+    machineRtdbPayloadRef.current = nextPayload;
+    setMachineRtdbPayloadMs(nextPayload);
+  }, []);
+
+  useEffect(() => {
+    if (!firebaseDb) return;
     const db = firebaseDb;
-
     const ids = machineIdsKey
-      .split(",")
-      .map((s) => Number(s.trim()))
-      .filter((id) => Number.isFinite(id));
+      ? machineIdsKey
+          .split(",")
+          .map((s) => Number(s.trim()))
+          .filter((id) => Number.isFinite(id))
+      : [];
 
-    const unsubs = ids.map((id) => {
-      const path = `machines/${id}/hardware_status`;
-      return onValue(dbRef(db, path), (snap: DataSnapshot) => {
-        const val = snap.val();
-        if (!val || typeof val !== "object") return;
-        const hwRec = val as Record<string, unknown>;
-        const row = machinesRef.current.find((r) => r.id === id);
-        if (!hardwareStatusBelongsToMachine(id, hwRec, machineMacForRow(row))) {
-          return;
-        }
-
-        const now = Date.now();
-        const parsed = parseHardwareStatusFromRtdb(hwRec);
-        const bumped = recordMachineRtdbDelivery(
-          machineRtdbReceiveRef.current,
-          machineRtdbPayloadRef.current,
-          id,
-          hwRec.updated_at,
-          machineRtdbSeenCallbackRef.current,
-          now
-        );
-        if (!bumped.accepted) return;
-
-        machineRtdbReceiveRef.current = bumped.receiveById;
-        machineRtdbPayloadRef.current = bumped.payloadById;
-        machineHwByIdRef.current = {
-          ...machineHwByIdRef.current,
-          [id]: {
-            components: parsed.components,
-            readings: parsed.readings,
-            receiveMs: bumped.receiveById[id] ?? now,
-            payloadMs: bumped.payloadById[id] ?? parsed.payloadMs ?? now,
-          },
-        };
-
-        setMachineRtdbReceiveMs({ ...machineRtdbReceiveRef.current });
-        setMachineRtdbPayloadMs({ ...machineRtdbPayloadRef.current });
-        setMachineHwById({ ...machineHwByIdRef.current });
-      });
-    });
+    const unsubs = ids.map((id) =>
+      subscribeLiveHardwareStatus(
+        db,
+        id,
+        (hw) => applyLiveHw(id, hw),
+        () => markHardwareDead(id)
+      )
+    );
 
     return () => {
-      for (const id of ids) {
-        delete machineRtdbSeenCallbackRef.current[id];
-      }
       unsubs.forEach((u) => u());
     };
-  }, [firebaseDb, machineIdsKey]);
+  }, [firebaseDb, machineIdsKey, applyLiveHw, markHardwareDead]);
 
   useEffect(() => {
+    if (!active) return;
+    setMachineHwById({ ...machineHwByIdRef.current });
+    setMachineRtdbReceiveMs({ ...machineRtdbReceiveRef.current });
+    setMachineRtdbPayloadMs({ ...machineRtdbPayloadRef.current });
     const interval = setInterval(() => {
       void refreshMachinesPresence();
     }, MACHINE_PRESENCE_POLL_MS);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [active]);
 
   const normalizeKey = (value: string) =>
     String(value ?? "")
@@ -536,45 +546,6 @@ export default function HardwareStatus() {
     return data;
   };
 
-  /**
-   * Read `machines/` from Firebase RTDB and synthesize a machine list — used as a
-   * fallback when Laravel `/machines` is unreachable so the user can still see
-   * the live hardware status. Considers a machine "online" if its hardware_status
-   * was written within RTDB_HEARTBEAT_STALE_MS.
-   */
-  const loadMachinesFromFirebase = async (): Promise<Machine[]> => {
-    if (!firebaseDb) return [];
-    try {
-      const snap = await dbGet(dbRef(firebaseDb, "machines"));
-      const val = snap.val();
-      if (!val || typeof val !== "object") return [];
-
-      const rows: Machine[] = Object.entries(val as Record<string, unknown>)
-        .map(([rawId, node]) => {
-          const id = Number(rawId);
-          if (!Number.isFinite(id)) return null;
-          const obj = (node && typeof node === "object" ? node : {}) as Record<string, unknown>;
-          const hw = (obj.hardware_status && typeof obj.hardware_status === "object"
-            ? obj.hardware_status
-            : {}) as Record<string, unknown>;
-          const ing = ingestRtdbHardwareSnapshot(hw.updated_at);
-          return {
-            id,
-            name: (obj.name as string) || `Machine ${id}`,
-            device_id: (obj.device_id as string) || undefined,
-            status: ing.acceptDelivery ? "online" : "offline",
-            last_seen: ing.payloadMs != null ? new Date(ing.payloadMs).toISOString() : null,
-          } as Machine;
-        })
-        .filter((m): m is Machine => m !== null);
-
-      return rows;
-    } catch (e) {
-      console.log("Firebase machine fallback failed:", e);
-      return [];
-    }
-  };
-
   const loadMachines = async (): Promise<Machine[]> => {
     setApiError(null);
     let list: Machine[] = [];
@@ -584,8 +555,7 @@ export default function HardwareStatus() {
       const res = await apiRequest("/machines");
       list = asJsonArray<Machine>(res.data).map(normalizeMachineRow);
     } catch (e) {
-      console.log("/machines failed, falling back to Firebase:", e);
-      list = await loadMachinesFromFirebase();
+      console.log("/machines failed:", e);
       usedFallback = true;
       if (list.length === 0) {
         setApiError(
@@ -670,22 +640,28 @@ export default function HardwareStatus() {
     }
   };
 
-  const selectedMachineOnline = isMachineOnlineForUi({
-    firebaseConfigured: Boolean(firebaseDb),
-    rtdbLastReceiveMs: hardwareRtdbLastReceiveMs,
-    machine: selectedMachine,
-    stableOnline: hardwareStableOnline,
-  });
+  const selectedMachineOnline = firebaseDb
+    ? isFirebaseHeartbeatLive(
+        hardwareRtdbPayloadAtMs,
+        Date.now(),
+        selectedMachine != null ? machineRtdbReceiveMs[selectedMachine.id] ?? null : null
+      )
+    : isMachineLive(selectedMachine);
 
   const hardwareStreamFresh = selectedMachineOnline;
 
   const machineCardAppearsLive = (m: Machine) => {
     if (!firebaseDb) return isMachineLive(m);
-    return stableOnlineById[m.id] ?? false;
+    return isFirebaseHeartbeatLive(
+      machineRtdbPayloadMs[m.id] ?? machineHwById[m.id]?.payloadMs,
+      Date.now(),
+      machineRtdbReceiveMs[m.id] ?? machineHwById[m.id]?.receiveMs ?? null
+    );
   };
 
   const getComponentStatus = (name: string) => {
-    const aliases = displayToKeys[name] ?? [normalizeKey(name)];
+    const keyName = normalizeKey(name);
+    const aliases = displayToKeys[name] ?? [keyName];
     const found = components.find((c) => {
       if (!c?.component_name) return false;
       const key = normalizeKey(String(c.component_name));
@@ -724,7 +700,6 @@ export default function HardwareStatus() {
     }
     // Offline MCU → every row is not_working; moisture must not read as Standby.
     if (name === "Moisture Sensor") {
-      if (!hardwareStreamFresh) return "Not Working";
       return moistureSensorDisplayLabel(getComponentStatus(name));
     }
     const s = normalizeStatusWord(getComponentStatus(name));
@@ -737,7 +712,6 @@ export default function HardwareStatus() {
 
   const statusColorForComponent = (name: string, status: string) => {
     if (name === "Moisture Sensor") {
-      if (!hardwareStreamFresh) return "#ef4444";
       return moistureSensorDisplayColor(getComponentStatus(name));
     }
     if (isDoorSensorUiLabel(name)) {
@@ -861,7 +835,7 @@ export default function HardwareStatus() {
           label: "Moisture Sensor",
           ok: false,
           headline: "Not connected",
-          details: "Probe is not responding on GPIO34. Check probe leads and ADC supply.",
+          details: "Probe is not responding on GPIO35. Check probe leads and ADC supply.",
         };
       }
       const pct = resolveMoisturePercent(r as Record<string, unknown>);
@@ -901,7 +875,7 @@ export default function HardwareStatus() {
           label: "Door Sensor (MC38)",
           ok: false,
           headline: "Not Working",
-          details: "Sensor is not responding on GPIO16. Check wiring and the door magnet.",
+          details: "Sensor is not responding on GPIO34. Check the 10k pull-up to 3.3V, wiring, and the door magnet.",
         };
       }
       const doorState = formatDoorSensorDisplay(r.door, {
@@ -1390,12 +1364,17 @@ export default function HardwareStatus() {
     try {
       const res = await apiRequest("/machines");
       const list = asJsonArray<Machine>(res.data).map(normalizeMachineRow);
-      const receiveMap = machineRtdbReceiveRef.current;
-      const stableMap = stableOnlineByIdRef.current;
       const withPresence = list.map((m) => {
         if (!firebaseDb) return m;
-        const live = stableMap[m.id] ?? false;
-        return machineRowWithLivePresence(m, receiveMap[m.id], undefined, live);
+        const payloadMs =
+          machineRtdbPayloadRef.current[m.id] ??
+          machineHwByIdRef.current[m.id]?.payloadMs;
+        const live = isFirebaseHeartbeatLive(
+          payloadMs,
+          Date.now(),
+          machineRtdbReceiveRef.current[m.id] ?? null
+        );
+        return machineRowWithLivePresence(m, payloadMs, payloadMs, live);
       });
       setMachines(withPresence);
       const sid = selectedMachineIdRef.current;
@@ -1507,6 +1486,42 @@ export default function HardwareStatus() {
     }
   };
 
+  const removeMachine = async (machine: Machine) => {
+    try {
+      await apiRequest(`/machines/${machine.id}`, { method: "DELETE" });
+      const remaining = machines.filter((row) => row.id !== machine.id);
+      setMachines(remaining);
+      if (selectedMachineIdRef.current === machine.id) {
+        const next = remaining[0] ?? null;
+        if (next) {
+          selectMachine(next);
+        } else {
+          userPickedMachineRef.current = true;
+          setSelectedMachine(null);
+          selectedMachineIdRef.current = null;
+          await clearSelectedMachineId();
+        }
+      }
+      await loadMachines();
+    } catch (e) {
+      Alert.alert(
+        "Could not remove machine",
+        e instanceof Error ? e.message : "Request failed."
+      );
+    }
+  };
+
+  const confirmRemoveMachine = (machine: Machine) => {
+    Alert.alert("Remove machine", "Do you want to remove this machine?", [
+      { text: "No", style: "cancel" },
+      {
+        text: "Yes",
+        style: "destructive",
+        onPress: () => void removeMachine(machine),
+      },
+    ]);
+  };
+
   if (loading) {
     return (
       <View style={styles.center}>
@@ -1545,10 +1560,7 @@ export default function HardwareStatus() {
                 liveCard && styles.online,
                 !liveCard && styles.offline,
               ]}
-              onPress={() => {
-                selectMachine(m);
-                void loadComponents(m.id);
-              }}
+              onPress={() => confirmRemoveMachine(m)}
             >
               <Text style={styles.machineTitle}>{m.name}</Text>
               <Text style={styles.machineStatusLine}>

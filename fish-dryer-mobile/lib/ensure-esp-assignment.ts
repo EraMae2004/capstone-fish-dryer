@@ -1,4 +1,4 @@
-import { ref as dbRef, remove as dbRemove, set as dbSet } from "firebase/database";
+import { ref as dbRef, remove as dbRemove, set as dbSet, update as dbUpdate } from "firebase/database";
 import type { Database } from "firebase/database";
 
 /** Same key the ESP uses: `assignments/{AABBCCDDEEFF}` (no colons, uppercase). */
@@ -39,7 +39,7 @@ export async function ensureEspAssignment(
     updated_at: now,
   });
 
-  await dbSet(dbRef(db, `machines/${id}`), {
+  await dbUpdate(dbRef(db, `machines/${id}`), {
     microcontroller_id: id,
     name: label,
     device_id: deviceId,

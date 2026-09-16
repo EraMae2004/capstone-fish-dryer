@@ -9,6 +9,7 @@ import {
 } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { userTypography } from "@/lib/user-typography";
+import { boxShadowStyle } from "@/lib/box-shadow";
 
 type Props = {
   visible: boolean;
@@ -93,11 +94,7 @@ const styles = StyleSheet.create({
     paddingTop: 28,
     paddingBottom: 20,
     alignItems: "center",
-    shadowColor: "#0f172a",
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.18,
-    shadowRadius: 24,
-    elevation: 12,
+    ...boxShadowStyle({ color: "#0f172a", offsetY: 12, blur: 24, opacity: 0.18, elevation: 12 }),
   },
 
   iconRing: {

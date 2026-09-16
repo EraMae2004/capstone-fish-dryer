@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -10,7 +10,6 @@ import {
   Alert
 } from 'react-native';
 import { FontAwesome } from '@expo/vector-icons';
-import { Stack } from 'expo-router';
 import { API_BASE_URL } from "@/config/api";
 import UserGraph, { type HistoryRange } from './user-graph';
 import { userTypography } from "@/lib/user-typography";
@@ -48,13 +47,13 @@ function fmtSessionDate(value: unknown): string {
   return String(value).replace("T", " ").slice(0, 19);
 }
 
-export default function UserHistory() {
+function UserHistory({ active = true }: { active?: boolean }) {
 
   const [sessions, setSessions] = useState<any[]>([]);
   const [selectedSession, setSelectedSession] = useState<any | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
-  const [range, setRange] = useState<HistoryRange>('weekly');
+  const [range, setRange] = useState<HistoryRange>('all');
   const {
     machines: userMachines,
     selectedId: selectedMachineId,
@@ -62,34 +61,45 @@ export default function UserHistory() {
     loading: machinesLoading,
   } = useSelectedMachine();
 
-  useEffect(() => {
-    if (machinesLoading) return;
-    void fetchHistory(range, selectedMachineId);
-  }, [range, selectedMachineId, machinesLoading]);
+  const fetchInFlightRef = useRef(false);
 
-  const fetchHistory = async (
-    rangeKey: typeof range,
-    machineId: number | null
-  ) => {
+  const fetchHistory = async (rangeKey: typeof range, silent = false) => {
+    if (fetchInFlightRef.current) return;
+    fetchInFlightRef.current = true;
     try {
-      setLoading(true);
-      const params = new URLSearchParams({ range: rangeKey });
-      if (machineId != null && machineId > 0) {
-        params.set('microcontroller_id', String(machineId));
+      if (!silent) {
+        setLoading((prev) => (sessions.length === 0 ? true : prev));
       }
+      const params = new URLSearchParams({ range: rangeKey });
       const res = await fetch(`${API_BASE_URL}/drying-sessions?${params.toString()}`);
       const data = await res.json();
 
       const rows = data?.sessions ?? data?.data ?? data ?? [];
       setSessions(Array.isArray(rows) ? rows : []);
-      setSelectedIds(new Set());
+      if (!silent) {
+        setSelectedIds(new Set());
+      }
 
     } catch (error) {
       console.log(error);
     } finally {
+      fetchInFlightRef.current = false;
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!active) return;
+    void fetchHistory(range);
+  }, [range, active]);
+
+  useEffect(() => {
+    if (!active) return;
+    const t = setInterval(() => {
+      void fetchHistory(range, true);
+    }, 60000);
+    return () => clearInterval(t);
+  }, [range, active]);
 
   /** API already filters by range; keep list in sync with graph. */
   const filteredSessions = sessions;
@@ -143,7 +153,7 @@ export default function UserHistory() {
               next.delete(id);
               return next;
             });
-            void fetchHistory(range, selectedMachineId);
+            void fetchHistory(range);
           } catch (error) {
             console.log(error);
           }
@@ -174,7 +184,7 @@ export default function UserHistory() {
                 body: JSON.stringify({ ids }),
               });
               setSelectedSession(null);
-              void fetchHistory(range, selectedMachineId);
+              void fetchHistory(range);
             } catch (error) {
               console.log(error);
             }
@@ -184,26 +194,18 @@ export default function UserHistory() {
     );
   };
 
-  if (loading) {
-    return (
-      <View style={styles.loader}>
-        <ActivityIndicator size="large" color="#4fc3f7" />
-      </View>
-    );
-  }
-
   return (
     <View style={styles.screen}>
-      <Stack.Screen options={{ headerShown: false }} />
       <Text style={styles.title}>History</Text>
 
       <MachineDropdown
+        active={active}
         machines={userMachines}
         selectedId={selectedMachineId}
         loading={machinesLoading}
         onSelect={selectMachine}
         onMachineChange={(id) => {
-          void fetchHistory(range, id);
+          void fetchHistory(range);
         }}
         style={styles.machineDropdown}
       />
@@ -215,11 +217,16 @@ export default function UserHistory() {
         nestedScrollEnabled
       >
         <UserGraph
+          active={active}
           sessions={filteredSessions}
           summary={{ total_batches: filteredSessions.length }}
           range={range}
           onChangeRange={setRange}
         />
+
+        {loading && sessions.length === 0 ? (
+          <ActivityIndicator size="large" color="#4fc3f7" style={{ marginVertical: 24 }} />
+        ) : null}
 
         <View style={styles.tableHeader}>
           <Text style={styles.headerText}> </Text>
@@ -291,13 +298,22 @@ export default function UserHistory() {
                 Planned duration: {fmtDryMins(selectedSession?.set_duration_minutes)}
               </Text>
               <Text style={styles.detailRow}>
+                Extension duration: {fmtDryMins(selectedSession?.extension_minutes ?? 0)}
+              </Text>
+              <Text style={styles.detailRow}>
+                Total duration: {fmtDryMins(
+                  (Number(selectedSession?.set_duration_minutes) || 0) +
+                    (Number(selectedSession?.extension_minutes) || 0)
+                )}
+              </Text>
+              <Text style={styles.detailRow}>
                 Temperature: {selectedSession?.temperature != null ? `${selectedSession.temperature} °C` : '--'}
               </Text>
               <Text style={styles.detailRow}>
                 Humidity: {fmtPct(selectedSession?.humidity ?? selectedSession?.avg_humidity)} %
               </Text>
               <Text style={styles.detailRow}>
-                Total drying time: {fmtSessionDryTime(selectedSession)}
+                Actual drying time: {fmtSessionDryTime(selectedSession)}
               </Text>
 
               {Array.isArray(selectedSession?.moisture_checks) &&
@@ -495,3 +511,5 @@ const styles = StyleSheet.create({
   }
 
 });
+
+export default React.memo(UserHistory);

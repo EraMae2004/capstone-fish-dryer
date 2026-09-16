@@ -11,10 +11,11 @@
  *           STU   VWX   YZ     ->
  *           spc   Del  Enter  Stop
  *
- * Raw codes from YOUR working pad (do not scramble KEY_MAP again):
- *   A=mode B=<- C=-> D=Stop *=0/spc
- *   '0' button face = Del   |   '#' button face = Enter
- * Mode col: GPIO12. LCD: SDA=21 SCL=23
+ * Keypad header LEFT→RIGHT pins 1→8 (GPIOs stay exactly as wired):
+ *   1=13  2=12  3=14  4=27  5=26  6=25  7=33  8=32
+ *   pins 1–4 = ROWS    pins 5–8 = COLS
+ * A=mode B=<- C=-> D=Stop  *=face0  0=Del  #=Enter
+ * LCD: SDA=21 SCL=23
  */
 
 #pragma once
@@ -69,17 +70,25 @@ class EspLcdI2c {
   uint8_t addr = LCD_I2C_ADDR;
   uint8_t bl = 0x08;
   bool ok = false;
+  bool ping(uint8_t a) {
+    for (int i = 0; i < 5; i++) {
+      Wire.beginTransmission(a);
+      if (Wire.endTransmission() == 0) return true;
+      delay(5);
+    }
+    return false;
+  }
   bool begin(uint8_t a) {
     addr = a;
-    Wire.beginTransmission(addr);
-    if (Wire.endTransmission() != 0) return false;
-    delay(50);
+    delay(100);
     write4(0x03); delay(5);
     write4(0x03); delay(5);
     write4(0x03); delay(1);
     write4(0x02);
     cmd(0x28); cmd(0x0C); cmd(0x06);
-    clear();
+    cmd(0x01); delay(3);
+    bl = 0x08;
+    exp(bl);
     ok = true;
     return true;
   }
@@ -93,6 +102,7 @@ class EspLcdI2c {
     snprintf(b, sizeof(b), "%-16.16s", s);
     for (int i = 0; b[i]; i++) data((uint8_t)b[i]);
   }
+  void writeChar(char c) { data((uint8_t)c); }
  private:
   void exp(uint8_t v) {
     Wire.beginTransmission(addr);
@@ -142,16 +152,17 @@ static EspLcdI2c lcd;
 
 static const byte ROWS = 4;
 static const byte COLS = 4;
-// EXACT map from when keypad worked ("GOOD"). Do not reshuffle cells.
-// Face bottom: 0 | Del | Enter | Stop  →  raw * | 0 | # | D
+// GPIOs stay YOUR pins 1–8 (1–4 rows, 5–8 cols). Do not change them.
+// Face lines 4 5 6 <-  and  7 8 9 ->  are KEY_MAP columns 1 and 2 (not rows).
+// Those two face lines were swapped; swap only those two columns here.
 static char keys[ROWS][COLS] = {
-    {'D', 'B', 'C', 'A'},
-    {'#', '6', '9', '3'},
-    {'0', '5', '8', '2'},
-    {'*', '4', '7', '1'},
+    {'D', 'C', 'B', 'A'},
+    {'#', '9', '6', '3'},
+    {'0', '8', '5', '2'},
+    {'*', '7', '4', '1'},
 };
-static byte rowPins[ROWS] = {14, 15, 17, 25};
-static byte colPins[COLS] = {26, 5, 18, 12};
+static byte rowPins[ROWS] = {13, 12, 14, 27};
+static byte colPins[COLS] = {26, 25, 33, 32};
 static Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 static bool gReady = false;
@@ -188,6 +199,7 @@ static uint8_t gKeypadTestLastCount = 0;
 static Screen gKeypadTestReturn = Screen::Start;
 static bool gKeypadTestNoTimeout = false;  // wait until all 16 keys
 static bool gUiSelfTestActive = false;
+static char gLastEchoKey = 0;
 
 static const char* ALPHA_MAP[10] = {
     " ", "ABC", "DEF", "GHI", "JKL", "MNO", "PQR", "STU", "VWX", "YZ",
@@ -217,6 +229,7 @@ static long durationDigitsToSeconds(const String& digits) {
 static void lcdLine(uint8_t row, const char* text) {
   if (!gLcdOk) return;
   lcd.setCursor(0, row);
+  delayMicroseconds(80);
   lcd.printPad16(text);
 }
 
@@ -436,9 +449,15 @@ static void renderLcdSelfTest() {
 
 static void renderKeypadSelfTest() {
   if (!gLcdOk) return;
-  lcdCentered(0, "PLEASE CLICK");
+  char top[17];
+  if (gLastEchoKey) {
+    snprintf(top, sizeof(top), "KEY: %c", gLastEchoKey);
+  } else {
+    snprintf(top, sizeof(top), "PRESS A KEY");
+  }
+  lcdCentered(0, top);
   char buf[17];
-  snprintf(buf, sizeof(buf), "ALL BTNS %u/16", (unsigned)keypadTestPressedCount());
+  snprintf(buf, sizeof(buf), "%u/16 PRESSED", (unsigned)keypadTestPressedCount());
   lcdCentered(1, buf);
 }
 
@@ -469,6 +488,12 @@ inline bool wantsNetworkQuiet() {
   const bool recentKeyActivity =
       gLastKeypressMs != 0 && (millis() - gLastKeypressMs) < 1200UL;
   return isEnteringParams() || recentKeyActivity;
+}
+
+/** History upload is OK on Message/Start; never during typing or STOP|PAUSE. */
+inline bool canFlushOfflineHistory() {
+  return !(gReady && (gScreen == Screen::EditParams || gScreen == Screen::ConfirmStart ||
+                      gScreen == Screen::StopOrPause));
 }
 
 inline bool uiSelfTestActive() { return gUiSelfTestActive; }
@@ -539,6 +564,7 @@ inline void startKeypadSelfTest(unsigned long durationMs = 0) {
   gUiSelfTestActive = true;
   gKeypadTestMask = 0;
   gKeypadTestLastCount = 0;
+  gLastEchoKey = 0;
   gKeypadTestNoTimeout = (durationMs == 0);
   gKeypadTestUntilMs = gKeypadTestNoTimeout ? 0 : (millis() + durationMs);
   gScreen = Screen::KeypadSelfTest;
@@ -551,7 +577,6 @@ inline void startKeypadSelfTest(unsigned long durationMs = 0) {
     delay(20);
     renderKeypadSelfTest();
   }
-  // Prime scan once (do NOT also call getKey — that eats the next edge).
   (void)keypad.getKeys();
   Serial.println("[hmi] Keypad self-test started — press ALL buttons (no countdown)");
 }
@@ -563,7 +588,19 @@ inline void paintUiSelfTest() {
   else if (gScreen == Screen::KeypadSelfTest) renderKeypadSelfTest();
 }
 
-/** Record one keypad-test key (idempotent). Returns true if newly counted. */
+static void echoPressedOnLcd(char key) {
+  gLastEchoKey = key;
+  if (!gLcdOk) return;
+  if (gScreen == Screen::KeypadSelfTest) {
+    renderKeypadSelfTest();
+    return;
+  }
+  if (gScreen != Screen::EditParams) return;
+  lcd.setCursor(15, 1);
+  delayMicroseconds(80);
+  lcd.writeChar(key);
+}
+
 static bool registerKeypadTestKey(char key) {
   const int idx = keypadTestIndex(key);
   if (idx < 0) return false;
@@ -601,28 +638,43 @@ inline void pollKeypadFast() {
 
   if (keypadSelfTestActiveScreen()) {
     (void)keypad.getKeys();
-    bool redrawNeeded = false;
     for (int i = 0; i < LIST_MAX; i++) {
       const char ch = keypad.key[i].kchar;
       if (ch == NO_KEY) continue;
       const KeyState st = keypad.key[i].kstate;
-      // Count while down OR on release edge (catches presses missed during LCD I2C).
-      if (st == PRESSED || st == HOLD ||
+      if (st == PRESSED ||
           (st == RELEASED && keypad.key[i].stateChanged)) {
-        if (registerKeypadTestKey(ch)) redrawNeeded = true;
+        registerKeypadTestKey(ch);
+        echoPressedOnLcd(ch);
       }
-    }
-    if (redrawNeeded && gScreen == Screen::KeypadSelfTest) {
-      renderKeypadSelfTest();
     }
     return;
   }
 
-  // Normal HMI: drain several presses so a held/mashing user is not lagged by loop timing.
   for (uint8_t n = 0; n < 4; n++) {
-    char key = keypad.getKey();
-    if (!key) break;
-    handleKey(key);
+    (void)keypad.getKeys();
+    bool got = false;
+    for (int i = 0; i < LIST_MAX; i++) {
+      const char ch = keypad.key[i].kchar;
+      if (ch == NO_KEY) continue;
+      const KeyState st = keypad.key[i].kstate;
+      // PRESSED is ideal; RELEASED catches keys whose press edge was lost
+      // during a blocking HTTPS GET (app Start poll).
+      if (keypad.key[i].stateChanged && (st == PRESSED || st == RELEASED)) {
+        static char lastCh = 0;
+        static unsigned long lastMs = 0;
+        if (st == RELEASED && lastCh == ch && (millis() - lastMs) < 450UL) {
+          continue;
+        }
+        lastCh = ch;
+        lastMs = millis();
+        Serial.printf("[hmi] key=%c\n", ch);
+        echoPressedOnLcd(ch);
+        handleKey(ch);
+        got = true;
+      }
+    }
+    if (!got) break;
   }
 }
 
@@ -632,6 +684,7 @@ inline void startCombinedUiSelfTest(unsigned long /*totalMs*/ = 0) {
   startLcdSelfTest(1500UL);
   gKeypadTestMask = 0;
   gKeypadTestLastCount = 0;
+  gLastEchoKey = 0;
   gKeypadTestNoTimeout = true;
   gKeypadTestUntilMs = 0;
   gKeypadTestReturn = gLcdTestReturn;
@@ -809,9 +862,8 @@ static void handleKey(char key) {
   // During keypad test OR combined LCD→keypad wait: count every raw key.
   if (gScreen == Screen::KeypadSelfTest ||
       (gScreen == Screen::LcdSelfTest && gKeypadTestNoTimeout)) {
-    if (registerKeypadTestKey(key) && gScreen == Screen::KeypadSelfTest) {
-      renderKeypadSelfTest();
-    }
+    registerKeypadTestKey(key);
+    echoPressedOnLcd(key);
     return;
   }
   if (gScreen == Screen::LcdSelfTest) {
@@ -895,18 +947,40 @@ static void handleKey(char key) {
 inline void begin() {
   Serial.println("[hmi] === LOCAL HMI READY ===");
   Serial.println("[hmi] boot: START DRYING SESSION -> Enter -> Fish Name (Alphabet)");
+  pinMode(PIN_LCD_SDA, INPUT_PULLUP);
+  pinMode(PIN_LCD_SCL, INPUT_PULLUP);
+  delay(50);
   Wire.begin(PIN_LCD_SDA, PIN_LCD_SCL);
-  Wire.setClock(100000);
-  delay(30);
+  Wire.setClock(50000);
+  delay(200);
 
   gLcdOk = false;
-  uint8_t addrs[] = {LCD_I2C_ADDR, 0x3F, 0x27};
-  for (uint8_t i = 0; i < 3; i++) {
-    if (lcd.begin(addrs[i])) {
-      gLcdOk = true;
-      Serial.printf("[hmi] LCD @0x%02X\n", addrs[i]);
-      break;
-    }
+  uint8_t found[8];
+  uint8_t nFound = 0;
+  Serial.println("[hmi] I2C scan...");
+  for (uint8_t a = 0x20; a <= 0x27; a++) {
+    if (lcd.ping(a) && nFound < 8) found[nFound++] = a;
+  }
+  for (uint8_t a = 0x38; a <= 0x3F; a++) {
+    if (lcd.ping(a) && nFound < 8) found[nFound++] = a;
+  }
+  if (nFound == 0) {
+    Serial.println("[hmi] I2C scan empty — still trying 0x27 and 0x3F");
+    found[nFound++] = 0x27;
+    found[nFound++] = 0x3F;
+  }
+  for (uint8_t i = 0; i < nFound; i++) {
+    Serial.printf("[hmi] LCD init @0x%02X SDA=%d SCL=%d\n", found[i], PIN_LCD_SDA, PIN_LCD_SCL);
+    lcd.begin(found[i]);
+    gLcdOk = true;
+    lcd.clear();
+    lcdCentered(0, "START DRYING");
+    lcdCentered(1, "SESSION!");
+    delay(80);
+    lcdCentered(0, "START DRYING");
+    lcdCentered(1, "SESSION!");
+    Serial.printf("[hmi] LCD @0x%02X\n", found[i]);
+    break;
   }
 
   keypad.setDebounceTime(20);
@@ -945,7 +1019,7 @@ inline void poll() {
         gScreen = Screen::KeypadSelfTest;
         keypad.setDebounceTime(20);
         keypad.setHoldTime(200);
-        (void)keypad.getKeys();  // prime only — do not call getKey()
+        (void)keypad.getKeys();
         if (gLcdOk) {
           lcd.clear();
           renderKeypadSelfTest();
@@ -1093,6 +1167,7 @@ inline bool lcdWorking() { return false; }
 inline bool keypadWorking() { return false; }
 inline bool isEnteringParams() { return false; }
 inline bool wantsNetworkQuiet() { return false; }
+inline bool canFlushOfflineHistory() { return true; }
 inline bool uiSelfTestActive() { return false; }
 inline uint8_t keypadSelfTestCount() { return 0; }
 inline uint16_t keypadSelfTestMask() { return 0; }

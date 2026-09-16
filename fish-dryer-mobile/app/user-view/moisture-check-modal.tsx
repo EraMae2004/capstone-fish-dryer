@@ -20,6 +20,7 @@ import {
   type MoistureFishReading,
 } from "@/lib/moisture-checks";
 import { userTypography } from "@/lib/user-typography";
+import { boxShadowStyle } from "@/lib/box-shadow";
 
 type Props = {
   visible: boolean;
@@ -347,11 +348,7 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 14,
     zIndex: 2,
-    shadowColor: "#0f172a",
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.28,
-    shadowRadius: 28,
-    elevation: 24,
+    ...boxShadowStyle({ color: "#0f172a", offsetY: 12, blur: 28, opacity: 0.28, elevation: 24 }),
   },
   headerRow: {
     flexDirection: "row",

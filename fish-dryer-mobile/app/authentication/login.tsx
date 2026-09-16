@@ -14,6 +14,7 @@ import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from "../../config/api";
+import { boxShadowStyle } from "@/lib/box-shadow";
 
 export default function Login() {
   const router = useRouter();
@@ -34,37 +35,80 @@ export default function Login() {
     try {
       setLoading(true);
 
-      const response = await fetch(`${API_BASE_URL}/mobile/login`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify({
-          email: email.trim(),
-          password: password.trim()
-        })
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 20000);
+      const loginBody = JSON.stringify({
+        email: email.trim(),
+        password: password.trim(),
       });
+      const loginOnce = () =>
+        fetch(`${API_BASE_URL}/mobile/login`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: loginBody,
+          signal: controller.signal,
+        });
+      let response!: Response;
+      try {
+        let lastErr: any = null;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          try {
+            response = await loginOnce();
+            lastErr = null;
+            break;
+          } catch (first: any) {
+            lastErr = first;
+            if (first?.name === "AbortError") throw first;
+            if (attempt === 3) throw first;
+            await new Promise((r) => setTimeout(r, 400));
+          }
+        }
+        if (lastErr) throw lastErr;
+      } finally {
+        clearTimeout(timer);
+      }
 
-      const data = await response.json();
+      const raw = await response.text();
+      let data: any = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        Alert.alert(
+          "Cannot reach server",
+          "Laravel did not return JSON. Check php artisan serve and that the phone uses the same Wi‑Fi as this PC."
+        );
+        return;
+      }
 
       if (!response.ok) {
         Alert.alert("Login Failed", data.message || "Invalid credentials");
         return;
       }
 
-      // ✅ Save Laravel user
-      await AsyncStorage.setItem('user', JSON.stringify(data.user));
+      if (!data?.user || typeof data.user !== "object") {
+        Alert.alert("Login Failed", data?.message || "Server did not return a user.");
+        return;
+      }
 
-      // ✅ Role based redirect
+      await AsyncStorage.setItem("user", JSON.stringify(data.user));
+
       if (data.user.role === "admin") {
-        router.replace('/admin-view/admin-view');
+        router.replace("/admin-view/admin-view");
       } else {
-        router.replace('/user-view/user-view');
+        router.replace("/user-view/user-view");
       }
 
     } catch (error: any) {
-      Alert.alert("Error", "Cannot connect to server");
+      const aborted = error?.name === "AbortError";
+      Alert.alert(
+        aborted ? "Server too slow" : "Error",
+        aborted
+          ? `Login timed out. Confirm php artisan serve is running and the phone is on the same Wi‑Fi.\n\n${API_BASE_URL}`
+          : String(error?.message ?? error ?? "Cannot connect to server.") + `\n\n${API_BASE_URL}`
+      );
     } finally {
       setLoading(false);
     }
@@ -197,11 +241,7 @@ const styles = StyleSheet.create({
     paddingVertical: 60,
     paddingHorizontal: 30,
     borderRadius: 18,
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 10 },
-    elevation: 10
+    ...boxShadowStyle({ color: '#000', offsetY: 10, blur: 20, opacity: 0.2, elevation: 10 }),
   },
 
   title: {

@@ -1,13 +1,15 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
   StyleSheet,
   useWindowDimensions,
   TouchableOpacity,
+  InteractionManager,
 } from "react-native";
 import { FontAwesome } from "@expo/vector-icons";
 import { LineChart } from "react-native-gifted-charts";
+import { boxShadowStyle } from "@/lib/box-shadow";
 
 export type HistoryRange = "all" | "weekly" | "monthly" | "3months";
 
@@ -34,15 +36,26 @@ export default function UserGraph({
   summary,
   range,
   onChangeRange,
+  active = true,
 }: {
   sessions?: any[];
   summary?: { total_batches?: number };
   range?: HistoryRange;
   onChangeRange?: (r: HistoryRange) => void;
+  active?: boolean;
 }) {
   const { width } = useWindowDimensions();
-  const activeRange = range ?? "weekly";
+  const activeRange = range ?? "all";
   const [rangeOpen, setRangeOpen] = useState(false);
+  const [paintChart, setPaintChart] = useState(false);
+
+  useEffect(() => {
+    if (!active) return;
+    const task = InteractionManager.runAfterInteractions(() => {
+      setPaintChart(true);
+    });
+    return () => task.cancel();
+  }, [active]);
 
   const activeLabel =
     RANGE_OPTIONS.find((o) => o.value === activeRange)?.label ?? "Weekly";
@@ -195,39 +208,43 @@ export default function UserGraph({
           </View>
         </View>
 
-        <LineChart
-          width={chartWidth}
-          data={graphHumidityData}
-          data2={graphTemperatureData}
-          data3={graphDurationData}
-          thickness={2.5}
-          thickness2={2.5}
-          thickness3={2.5}
-          color="#2563eb"
-          color2="#f97316"
-          color3="#16a34a"
-          hideDataPoints={false}
-          dataPointsColor="#2563eb"
-          dataPointsColor2="#f97316"
-          dataPointsColor3="#16a34a"
-          dataPointsRadius={3}
-          yAxisColor="#d5dbe3"
-          xAxisColor="#d5dbe3"
-          maxValue={Math.ceil(chartMax * 1.2)}
-          noOfSections={4}
-          spacing={Math.max(20, (chartWidth - 60) / Math.max(pointCount - 1, 1))}
-          initialSpacing={10}
-          endSpacing={10}
-          yAxisLabelWidth={36}
-          yAxisLabelSuffix=" "
-          xAxisLabelTextStyle={{ color: "#6b7280", fontSize: 10 }}
-          yAxisTextStyle={{ color: "#6b7280", fontSize: 10 }}
-          rulesColor="#eef2f7"
-          areaChart={false}
-          curved
-          disableScroll={false}
-          scrollToEnd
-        />
+        {paintChart ? (
+          <LineChart
+            width={chartWidth}
+            data={graphHumidityData}
+            data2={graphTemperatureData}
+            data3={graphDurationData}
+            thickness={2.5}
+            thickness2={2.5}
+            thickness3={2.5}
+            color="#2563eb"
+            color2="#f97316"
+            color3="#16a34a"
+            hideDataPoints={false}
+            dataPointsColor="#2563eb"
+            dataPointsColor2="#f97316"
+            dataPointsColor3="#16a34a"
+            dataPointsRadius={3}
+            yAxisColor="#d5dbe3"
+            xAxisColor="#d5dbe3"
+            maxValue={Math.ceil(chartMax * 1.2)}
+            noOfSections={4}
+            spacing={Math.max(20, (chartWidth - 60) / Math.max(pointCount - 1, 1))}
+            initialSpacing={10}
+            endSpacing={10}
+            yAxisLabelWidth={36}
+            yAxisLabelSuffix=" "
+            xAxisLabelTextStyle={{ color: "#6b7280", fontSize: 10 }}
+            yAxisTextStyle={{ color: "#6b7280", fontSize: 10 }}
+            rulesColor="#eef2f7"
+            areaChart={false}
+            curved
+            disableScroll={false}
+            scrollToEnd
+          />
+        ) : (
+          <View style={{ height: 220 }} />
+        )}
         {!groupedByPeriod.hasData && (
           <View style={styles.noDataHint}>
             <Text style={styles.emptyText}>No saved sessions in this period.</Text>
@@ -298,11 +315,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#ddd",
     overflow: "hidden",
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOpacity: 0.08,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
+    ...boxShadowStyle({ color: "#000", offsetY: 2, blur: 6, opacity: 0.08, elevation: 4 }),
   },
 
   rangeMenuItem: {

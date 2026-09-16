@@ -19,6 +19,7 @@ return new class extends Migration
             $table->float('target_temperature')->nullable();
             $table->integer('fan_speed')->nullable();
             $table->integer('set_duration_minutes')->nullable();
+            $table->integer('extension_minutes')->default(0);
             $table->integer('drying_time_minutes')->default(0);
             $table->enum('status', ['running','paused','completed','stopped'])->default('running');
             $table->enum('final_status', ['fully_dried', 'semi_dried', 'not_dried'])->nullable();

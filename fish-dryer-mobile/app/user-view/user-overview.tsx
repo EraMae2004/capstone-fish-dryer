@@ -2,6 +2,10 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from "react"
 import { View, TouchableOpacity, Text, StyleSheet, ActivityIndicator, Alert } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { onValue, ref as dbRef, set as dbSet, update as dbUpdate, type DataSnapshot } from "firebase/database";
+import {
+  firebaseUpdatedAtMs,
+  subscribeLiveHardwareStatus,
+} from "@/lib/live-hardware-rtdb";
 import OverviewStatus from "./overview-status";
 import OverviewParameters from "./overview-parameters";
 import OverviewHeader from "./overview-header";
@@ -34,11 +38,7 @@ import {
 import { formatRecommendationParams } from "@/lib/format-recommendation";
 import { readRealDoorIsOpen } from "@/lib/door-sensor-display";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
-import {
-  isMachineOnlineForUi,
-  RTDB_INITIAL_STALE_MS,
-  useStableMachineOnline,
-} from "@/lib/machine-presence";
+import { isMachineLive, isMachineOnlineForUi, useStableMachineOnline } from "@/lib/machine-presence";
 import {
   canonicalHardwareSensorKey,
   coerceHardwareStatus,
@@ -47,15 +47,28 @@ import {
   lookupComponentStatus,
   parseHardwareStatusFromRtdb,
 } from "@/lib/hardware-status-rtdb";
+import {
+  tryAcquireProblemNotifySlot,
+  clearProblemNotifyThrottleForMachine,
+  clearProblemNotifyThrottleForSensor,
+} from "@/lib/problem-notify-throttle";
 
 /** Poll Laravel for session + machine metadata (not used for online/offline when Firebase is on). */
-const OVERVIEW_API_POLL_MS = 15_000;
+const OVERVIEW_API_POLL_MS = 30_000;
 /** Single relay fan — fixed speed; not user-configurable. */
 const SESSION_FAN_SPEED = 1;
+/** Small incrementing seq so ESP32 does not drop Start/Pause/Stop (Date.now overflows float). */
+let rtdbCommandSeq = 1;
 
-function sessionDurationSeconds(session: { set_duration_minutes?: unknown } | null | undefined): number {
-  const m = Number(session?.set_duration_minutes);
-  return Number.isFinite(m) && m > 0 ? Math.floor(m * 60) : 0;
+function sessionDurationSeconds(session: {
+  set_duration_minutes?: unknown;
+  extension_minutes?: unknown;
+} | null | undefined): number {
+  const planned = Number(session?.set_duration_minutes);
+  const extra = Number(session?.extension_minutes);
+  const plannedSec = Number.isFinite(planned) && planned > 0 ? Math.floor(planned * 60) : 0;
+  const extraSec = Number.isFinite(extra) && extra > 0 ? Math.floor(extra * 60) : 0;
+  return plannedSec + extraSec;
 }
 
 function remainingSecToDurationDigits(totalSeconds: number): string {
@@ -84,13 +97,8 @@ function toPositiveId(value: unknown): number | null {
   return Number.isFinite(id) && id > 0 ? id : null;
 }
 
-/** Recompute RTDB staleness every second so offline appears soon after the ESP stops. */
-const PRESENCE_UI_TICK_MS = 500;
-import {
-  tryAcquireProblemNotifySlot,
-  clearProblemNotifyThrottleForMachine,
-  clearProblemNotifyThrottleForSensor,
-} from "@/lib/problem-notify-throttle";
+/** Recompute RTDB staleness so offline appears after the ESP stops. */
+const PRESENCE_UI_TICK_MS = 2000;
 
 function normalizeHardwareKey(value: string): string {
   return String(value ?? "")
@@ -156,7 +164,7 @@ const SENSOR_ALERT_META: Record<
     },
     critical: {
       title: "Reed switch not detected",
-      desc: "The reed switch (MC38) is not responding. Check wiring on GPIO16.",
+      desc: "The reed switch (MC38) is not responding. Check wiring on GPIO34 (10k pull-up to 3.3V).",
     },
   },
 };
@@ -165,12 +173,14 @@ type UserOverviewProps = {
   unreadNotificationCount?: number;
   onOpenNotifications?: () => void;
   onNotificationsChanged?: (opts?: { optimisticUnread?: number }) => void | Promise<void>;
+  isActive?: boolean;
 };
 
 export default function UserOverview({
   unreadNotificationCount = 0,
   onOpenNotifications,
   onNotificationsChanged,
+  isActive = true,
 }: UserOverviewProps) {
   // ✅ DEFAULT = PARAMETERS
   const [activeTab, setActiveTab] = useState<"status" | "control">("control");
@@ -184,14 +194,22 @@ export default function UserOverview({
 
   const [machine, setMachine] = useState<any>(null);
   const [session, setSession] = useState<any>(null);
+  const sessionRef = useRef<any>(null);
+  sessionRef.current = session;
+  const lastHwRef = useRef<Record<string, unknown> | null>(null);
+  const isActiveRef = useRef(true);
+  isActiveRef.current = isActive;
   /** Instant button/tab state while API catches up — cleared in postSessionControl finally. */
   const [uiSessionStatusOverride, setUiSessionStatusOverride] = useState<
     "running" | "paused" | "stopped" | null
   >(null);
   const [hardwareStatuses, setHardwareStatuses] = useState<any[]>([]);
   const [liveReadings, setLiveReadings] = useState<any>(null);
+  const liveReadingsRef = useRef<any>(null);
+  liveReadingsRef.current = liveReadings;
   const [loading, setLoading] = useState(true);
   const overviewRequestSeqRef = useRef(0);
+  const overviewBoundMachineRef = useRef<number | null | undefined>(undefined);
 
   const selectedMachineMeta = useMemo(
     () => userMachines.find((m) => m.id === selectedMachineId) ?? null,
@@ -213,10 +231,10 @@ export default function UserOverview({
   /** RTDB never fires when the ESP stops; tick so `updated_at` age crosses offline without user action. */
   const [presenceTick, setPresenceTick] = useState(0);
   useEffect(() => {
-    if (!firebaseDb) return;
+    if (!firebaseDb || !isActive) return;
     const id = setInterval(() => setPresenceTick((n) => n + 1), PRESENCE_UI_TICK_MS);
     return () => clearInterval(id);
-  }, [firebaseDb]);
+  }, [firebaseDb, isActive]);
 
   const overviewStableOnline = useStableMachineOnline(
     overviewRtdbLastReceiveMs,
@@ -275,6 +293,12 @@ export default function UserOverview({
   useEffect(() => {
     if (machinesLoading) return;
     const nextMachineId = toPositiveId(selectedMachineId);
+
+    // Same machine after a list refresh — do not wipe live Firebase Online.
+    if (overviewBoundMachineRef.current === nextMachineId) {
+      return;
+    }
+    overviewBoundMachineRef.current = nextMachineId;
 
     overviewRequestSeqRef.current += 1;
     setSession(null);
@@ -350,58 +374,48 @@ export default function UserOverview({
     }
 
     const boundMachineId = activeMachineId;
-    const r = dbRef(firebaseDb, `machines/${boundMachineId}/hardware_status`);
-    let hadAccepted = false;
-    const unsub = onValue(
-      r,
-      (snap: DataSnapshot) => {
-        const val = snap.val();
-        if (!val || typeof val !== "object") {
-          return;
-        }
+    lastHwRef.current = null;
 
-        const now = Date.now();
-        const payloadMs = parsePresenceMs(
-          (val as Record<string, unknown>).updated_at
-        );
-        if (
-          !hadAccepted &&
-          (payloadMs == null || now - payloadMs > RTDB_INITIAL_STALE_MS)
-        ) {
-          return;
-        }
-        hadAccepted = true;
-
-        const payloadMachineId = toPositiveId(
-          (val as Record<string, unknown>).microcontroller_id
-        );
-        if (payloadMachineId != null && payloadMachineId !== boundMachineId) {
-          return;
-        }
-
-        if (payloadMs != null) {
-          setOverviewRtdbPayloadAtMs(payloadMs);
-        }
-        setOverviewRtdbLastReceiveMs(now);
-
-        const parsed = parseHardwareStatusFromRtdb(val as Record<string, unknown>);
-        setHardwareStatuses(parsed.components);
-        overviewHardwareFromRtdbRef.current = true;
-
-        if (parsed.readings && typeof parsed.readings === "object") {
-          setLiveReadings(parsed.readings);
-        }
-      },
-      (err: unknown) => {
-        console.log("Overview hardware_status RTDB:", err);
+    const applyHw = (hw: Record<string, unknown>) => {
+      lastHwRef.current = hw;
+      if (!isActiveRef.current) return;
+      const payloadMs = firebaseUpdatedAtMs(hw.updated_at);
+      setOverviewRtdbPayloadAtMs(payloadMs);
+      setOverviewRtdbLastReceiveMs(Date.now());
+      const parsed = parseHardwareStatusFromRtdb(hw);
+      setHardwareStatuses(parsed.components);
+      overviewHardwareFromRtdbRef.current = true;
+      if (parsed.readings && typeof parsed.readings === "object") {
+        setLiveReadings(parsed.readings);
       }
-    );
+    };
+
+    const unsub = subscribeLiveHardwareStatus(firebaseDb, boundMachineId, applyHw, () => {
+      setOverviewRtdbLastReceiveMs(null);
+      setOverviewRtdbPayloadAtMs(null);
+      overviewHardwareFromRtdbRef.current = false;
+    });
 
     return () => {
       unsub();
       overviewHardwareFromRtdbRef.current = false;
     };
   }, [activeMachineId]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    const hw = lastHwRef.current;
+    if (!hw) return;
+    const payloadMs = firebaseUpdatedAtMs(hw.updated_at);
+    setOverviewRtdbPayloadAtMs(payloadMs);
+    setOverviewRtdbLastReceiveMs(Date.now());
+    const parsed = parseHardwareStatusFromRtdb(hw);
+    setHardwareStatuses(parsed.components);
+    overviewHardwareFromRtdbRef.current = true;
+    if (parsed.readings && typeof parsed.readings === "object") {
+      setLiveReadings(parsed.readings);
+    }
+  }, [isActive]);
 
   // RTDB pushes hardware/readings; Laravel overview poll is for session metadata only.
 
@@ -488,6 +502,8 @@ export default function UserOverview({
     },
     [captureRemainingSecondsForPause, applyPausedRemaining]
   );
+  const freezeCountdownAtPauseRef = useRef(freezeCountdownAtPause);
+  freezeCountdownAtPauseRef.current = freezeCountdownAtPause;
 
   const notifyProblemOnInterval = (
     key: string,
@@ -560,7 +576,7 @@ export default function UserOverview({
         Number.parseFloat(String(temperature || "0").trim());
       const tt =
         Number.isFinite(ttRaw) && ttRaw > 1 ? ttRaw : 60;
-      const seq = Date.now();
+      const seq = rtdbCommandSeq++;
       const fish =
         (opts?.fish_type ?? fishType ?? "").trim() || undefined;
       const totalFishRaw =
@@ -631,7 +647,7 @@ export default function UserOverview({
         targetTemperature ??
         Number.parseFloat(String(temperature || "0").trim());
       const tt = Number.isFinite(ttRaw) && ttRaw > 1 ? ttRaw : 60;
-      const seq = Date.now();
+      const seq = rtdbCommandSeq++;
       try {
         await dbUpdate(dbRef(firebaseDb, `machines/${microcontrollerId}/session`), {
           fan_speed: SESSION_FAN_SPEED,
@@ -696,10 +712,9 @@ export default function UserOverview({
           applyActiveSessionToForm(data.session);
         }
       } else if (!sessionSyncLockRef.current) {
-        setSession(null);
-        const mcId = Number(data.machine?.id);
-        if (firebaseDb && Number.isFinite(mcId) && mcId > 0) {
-          void writeMachineSessionToRtdb(mcId, "stopped");
+        const live = String(sessionRef.current?.status ?? "").trim().toLowerCase();
+        if (live !== "running" && live !== "paused") {
+          setSession(null);
         }
       }
       if (!firebaseDb) {
@@ -747,12 +762,12 @@ export default function UserOverview({
   }, [activeMachineId, applyOverviewPayload, overviewApiUrl]);
 
   useEffect(() => {
-    if (loading) return;
+    if (loading || !isActive) return;
     const id = setInterval(() => {
       void fetchOverviewPresenceOnly();
     }, OVERVIEW_API_POLL_MS);
     return () => clearInterval(id);
-  }, [loading, fetchOverviewPresenceOnly]);
+  }, [loading, fetchOverviewPresenceOnly, isActive]);
 
   const appendSessionMetaToBody = (body: Record<string, unknown>) => {
     const ft = fishType.trim();
@@ -775,12 +790,13 @@ export default function UserOverview({
   type SessionControlOverrides = {
     temperature?: string;
     durationDigits?: string;
+    addExtensionMinutes?: number;
   };
 
   const fetchRecommendation = useCallback(
     async (sessionOverride?: any) => {
       try {
-        const activeSession = sessionOverride ?? session;
+        const activeSession = sessionOverride ?? sessionRef.current;
         const st = String(activeSession?.status ?? "").trim().toLowerCase();
         const sessionRunning = st === "running" || st === "paused";
         const elapsed = sessionRunning
@@ -803,11 +819,14 @@ export default function UserOverview({
         }
         params.append("fish_type", fishForRec);
 
-        const lr = liveReadings && typeof liveReadings === "object" ? liveReadings : null;
+        const lr =
+          liveReadingsRef.current && typeof liveReadingsRef.current === "object"
+            ? liveReadingsRef.current
+            : null;
         const tempVal =
           lr?.temperature ?? lr?.temp ?? temperature ?? activeSession?.target_temperature;
         const humVal = lr?.humidity ?? lr?.hum;
-        const draftMoist = lastMoistureFromDraft(moistureDraftBatches);
+        const draftMoist = lastMoistureFromDraft(moistureDraftBatchesRef.current);
         const liveMoist = lr?.moisture_percent ?? lr?.moisture;
         const moistVal = draftMoist ?? liveMoist;
 
@@ -840,7 +859,7 @@ export default function UserOverview({
         setNeedsExtension(false);
       }
     },
-    [session, activeMachineId, fishType, temperature, liveReadings, moistureDraftBatches]
+    [activeMachineId, fishType, temperature]
   );
 
   const fetchOverview = useCallback(async (machineIdOverride?: number | null) => {
@@ -866,7 +885,6 @@ export default function UserOverview({
       }
 
       applyOverviewPayload(data);
-      void fetchRecommendation(data.session);
     } catch (err) {
       console.log(err);
     } finally {
@@ -875,7 +893,10 @@ export default function UserOverview({
         setRefreshing(false);
       }
     }
-  }, [activeMachineId, loading, applyOverviewPayload, overviewApiUrl, fetchRecommendation]);
+  }, [activeMachineId, applyOverviewPayload, overviewApiUrl]);
+
+  const fetchOverviewRef = useRef(fetchOverview);
+  fetchOverviewRef.current = fetchOverview;
 
   useEffect(() => {
     if (!firebaseDb || !activeMachineId) return;
@@ -896,12 +917,21 @@ export default function UserOverview({
           return;
         }
 
+        if (!isActiveRef.current) {
+          lastSeenStatus = status;
+          return;
+        }
+
         setUiSessionStatusOverride(status as "running" | "paused" | "stopped");
 
         setSession((prev: any) => {
           if (!prev && status === "stopped") return prev;
+          const newRun =
+            status === "running" &&
+            lastSeenStatus !== "running" &&
+            lastSeenStatus !== "paused";
           return {
-            ...(prev ?? {}),
+            ...(newRun ? {} : (prev ?? {})),
             status,
             fish_type:
               String(payload.fish_type ?? "").trim() || prev?.fish_type,
@@ -919,30 +949,53 @@ export default function UserOverview({
               Number(payload.set_duration_minutes) > 0
                 ? Number(payload.set_duration_minutes)
                 : prev?.set_duration_minutes,
+            extension_minutes:
+              Number.isFinite(Number(payload.extension_minutes)) &&
+              Number(payload.extension_minutes) >= 0
+                ? Number(payload.extension_minutes)
+                : newRun
+                  ? 0
+                  : prev?.extension_minutes,
+            started_at: newRun ? new Date().toISOString() : prev?.started_at,
+            id: newRun ? undefined : prev?.id,
           };
         });
 
-        if (status === "paused") {
-          freezeCountdownAtPause(session);
+        if (status === "paused" && lastSeenStatus !== "paused") {
+          freezeCountdownAtPauseRef.current(sessionRef.current);
         } else if (status === "running") {
+          if (lastSeenStatus !== "running" && lastSeenStatus !== "paused") {
+            pausedRemainingSecRef.current = null;
+            pausedRemainingAtPauseRef.current = null;
+            pauseRemainingSnapshotRef.current = null;
+            setPausedRemainingSec(null);
+            countdownEndMsRef.current = null;
+          }
           const rem =
             pausedRemainingSecRef.current ??
-            pausedRemainingAtPauseRef.current ??
-            pausedRemainingSec;
+            pausedRemainingAtPauseRef.current;
           if (rem != null && rem > 0 && countdownEndMsRef.current === null) {
             countdownEndMsRef.current = Date.now() + rem * 1000;
+          } else if (countdownEndMsRef.current === null) {
+            const planned = Number(payload.set_duration_minutes);
+            const extra = Number(payload.extension_minutes);
+            const plannedSec =
+              Number.isFinite(planned) && planned > 0 ? Math.floor(planned * 60) : 0;
+            const extraSec =
+              Number.isFinite(extra) && extra > 0 ? Math.floor(extra * 60) : 0;
+            const totalSec = plannedSec + extraSec;
+            if (totalSec > 0) {
+              countdownEndMsRef.current = Date.now() + totalSec * 1000;
+            }
           }
-        } else {
+        } else if (status === "stopped") {
           countdownEndMsRef.current = null;
           pausedRemainingSecRef.current = null;
           pausedRemainingAtPauseRef.current = null;
           setPausedRemainingSec(null);
         }
 
-        if (status !== lastSeenStatus) {
-          lastSeenStatus = status;
-          void fetchOverview(boundMachineId);
-        }
+        lastSeenStatus = status;
       },
       (err: unknown) => {
         console.log("Overview session RTDB:", err);
@@ -950,7 +1003,7 @@ export default function UserOverview({
     );
 
     return () => unsub();
-  }, [activeMachineId, fetchOverview, firebaseDb, pausedRemainingSec, session]);
+  }, [activeMachineId, firebaseDb]);
 
   const postSessionControl = async (
     action: "start" | "pause" | "stop",
@@ -1037,8 +1090,12 @@ export default function UserOverview({
         body.fan_speed = SESSION_FAN_SPEED;
         body.set_duration_minutes = dm;
         body.drying_time_minutes = 0;
+        body.extension_minutes = 0;
         activeDryingMsRef.current = 0;
         runningSinceMsRef.current = null;
+        countdownEndMsRef.current = Date.now() + Math.floor(dm * 60) * 1000;
+        pausedRemainingSecRef.current = null;
+        setPausedRemainingSec(null);
         setUiSessionStatusOverride("running");
       }
 
@@ -1063,8 +1120,13 @@ export default function UserOverview({
           startActiveDryingClock();
           body.drying_time_seconds = getUsedDryingSeconds();
           body.drying_time_minutes = getUsedDryingMinutes();
-          const resumeDm = digitsToMinutes(String(durVal).trim());
-          if (resumeDm != null) body.set_duration_minutes = resumeDm;
+          const addExt = Number(overrides?.addExtensionMinutes);
+          if (Number.isFinite(addExt) && addExt > 0) {
+            body.add_extension_minutes = Math.floor(addExt);
+          } else {
+            const resumeDm = digitsToMinutes(String(durVal).trim());
+            if (resumeDm != null) body.set_duration_minutes = resumeDm;
+          }
           appendSessionMetaToBody(body);
           const resumeTt = Number.parseFloat(String(tempVal).trim());
           if (Number.isFinite(resumeTt)) body.target_temperature = resumeTt;
@@ -1367,6 +1429,7 @@ export default function UserOverview({
       await postSessionControl("pause", {
         temperature: tt,
         durationDigits: durDigits,
+        addExtensionMinutes: extMin,
       });
       setNeedsExtension(false);
       timerZeroPauseRef.current = true;
@@ -1426,12 +1489,6 @@ export default function UserOverview({
   const isSessionRunning = uiSessionStatus === "running";
   const parametersLocked = isSessionRunning;
 
-  useEffect(() => {
-    if (!firebaseDb || !hasActiveSession) {
-      setLiveReadings(null);
-    }
-  }, [firebaseDb, hasActiveSession]);
-
   /**
    * One line for both tabs: Online when connected and no active drying session;
    * Idle when paused; Running when running; Offline when not live.
@@ -1447,14 +1504,15 @@ export default function UserOverview({
   const [tickNow, setTickNow] = useState<number>(Date.now());
 
   useEffect(() => {
-    if (!hasApiActiveSession && !session?.id) return;
+    if (!isActive) return;
+    if (uiSessionStatus !== "running" && uiSessionStatus !== "paused") return;
     const id = setInterval(() => setTickNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [hasApiActiveSession, session?.id, uiSessionStatusOverride]);
+  }, [isActive, uiSessionStatus]);
 
   useEffect(() => {
-    if (!session?.id) {
-      if (!hasApiActiveSession && uiSessionStatusOverride !== "running") {
+    if (uiSessionStatus === "stopped" || (!hasActiveSession && !hasApiActiveSession)) {
+      if (uiSessionStatusOverride !== "running") {
         countdownEndMsRef.current = null;
         pausedRemainingSecRef.current = null;
         setPausedRemainingSec(null);
@@ -1462,29 +1520,24 @@ export default function UserOverview({
       }
       return;
     }
-    if (timerSessionIdRef.current !== session.id) {
+    if (session?.id && timerSessionIdRef.current !== session.id) {
       timerSessionIdRef.current = session.id;
-      countdownEndMsRef.current = null;
-      pausedRemainingSecRef.current = null;
-      setPausedRemainingSec(null);
       const savedSec = Number(session.drying_time_minutes ?? 0);
       activeDryingMsRef.current =
         Number.isFinite(savedSec) && savedSec > 0 ? savedSec * 1000 : 0;
       runningSinceMsRef.current = null;
     }
-    const countdownFrozen =
-      countdownEndMsRef.current === null &&
-      (pausedRemainingSecRef.current != null ||
-        pausedRemainingAtPauseRef.current != null ||
-        pauseRemainingSnapshotRef.current != null);
-    if (apiSessionStatus === "running") {
+    if (apiSessionStatus === "running" || uiSessionStatus === "running") {
       startActiveDryingClock();
-    } else if (apiSessionStatus === "paused") {
+    } else if (apiSessionStatus === "paused" || uiSessionStatus === "paused") {
       accumulateActiveDrying();
     } else {
       runningSinceMsRef.current = null;
     }
-    if (apiSessionStatus === "running" && countdownEndMsRef.current === null && !countdownFrozen) {
+    if (
+      uiSessionStatus === "running" &&
+      countdownEndMsRef.current === null
+    ) {
       const pausedRem =
         pausedRemainingSecRef.current ?? pausedRemainingAtPauseRef.current;
       if (pausedRem != null && pausedRem > 0) {
@@ -1492,7 +1545,7 @@ export default function UserOverview({
       } else {
         const dur = sessionDurationSeconds(session);
         if (dur > 0) {
-          const started = parsePresenceMs(session.started_at);
+          const started = parsePresenceMs(session?.started_at);
           countdownEndMsRef.current = started
             ? started + dur * 1000
             : Date.now() + dur * 1000;
@@ -1501,10 +1554,13 @@ export default function UserOverview({
     }
   }, [
     hasApiActiveSession,
+    hasActiveSession,
     session?.id,
     apiSessionStatus,
+    uiSessionStatus,
     session?.started_at,
     session?.set_duration_minutes,
+    session?.extension_minutes,
     uiSessionStatusOverride,
   ]);
 
@@ -1514,36 +1570,41 @@ export default function UserOverview({
       pausedRemainingSec ??
       pausedRemainingSecRef.current ??
       pausedRemainingAtPauseRef.current;
-    const countdownFrozen =
-      frozenRem != null && countdownEndMsRef.current === null;
-    if (countdownFrozen || apiSessionStatus === "paused") {
+    if (uiSessionStatus === "paused" || apiSessionStatus === "paused") {
       if (frozenRem != null) return frozenRem;
       const fromDigits = durationDigitsToSeconds(String(duration).trim());
       if (fromDigits != null) return fromDigits;
       return null;
     }
-    if (sessionDurationSeconds(session) <= 0 && countdownEndMsRef.current === null) return null;
     if (countdownEndMsRef.current != null) {
       return Math.max(0, Math.floor((countdownEndMsRef.current - tickNow) / 1000));
     }
-    return sessionDurationSeconds(session) > 0 ? sessionDurationSeconds(session) : null;
+    const dur = sessionDurationSeconds(session);
+    return dur > 0 ? dur : null;
   })();
 
   const timerLabel = remainingSeconds !== null ? formatSecondsAsHMS(remainingSeconds) : "--";
   const waitingForExtension =
     hasActiveSession && (needsExtension || remainingSeconds === 0);
 
-  useEffect(() => {
-    const timeout = setTimeout(() => {
-      void fetchRecommendation();
-    }, 350);
-    return () => clearTimeout(timeout);
-  }, [fishType, temperature, duration, fetchRecommendation]);
+  const recInFlightRef = useRef(false);
+  const lastRecFishRef = useRef("");
 
   useEffect(() => {
-    if (!hasActiveSession) return;
-    void fetchRecommendation();
-  }, [remainingSeconds, hasActiveSession, session?.status, fetchRecommendation]);
+    if (!isActive) return;
+    const fish = fishType.trim();
+    if (!fish) return;
+    if (lastRecFishRef.current === fish) return;
+    lastRecFishRef.current = fish;
+    const timeout = setTimeout(() => {
+      if (recInFlightRef.current) return;
+      recInFlightRef.current = true;
+      void fetchRecommendation().finally(() => {
+        recInFlightRef.current = false;
+      });
+    }, 1500);
+    return () => clearTimeout(timeout);
+  }, [fishType, isActive, fetchRecommendation]);
 
   useEffect(() => {
     if (apiSessionStatus !== "paused") return;
@@ -1698,13 +1759,11 @@ export default function UserOverview({
     liveReadings,
     temperature,
     session?.started_at,
-    tickNow,
     activeMachineId,
     activeMachineForPresence,
     overviewRtdbLastReceiveMs,
     overviewStableOnline,
     firebaseDb,
-    presenceTick,
   ]);
 
   if (loading) {

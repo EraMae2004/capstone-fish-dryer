@@ -202,9 +202,9 @@ export default function OverviewParameters({
         {/* BUTTONS */}
         <View style={styles.buttonRow}>
           <TouchableOpacity
-            style={[styles.startBtn, (locked || !online) && styles.btnDisabled]}
+            style={[styles.startBtn, locked && styles.btnDisabled]}
             onPress={startMachine}
-            disabled={locked || !online}
+            disabled={locked}
           >
             <Text style={styles.btnText}>▶ Start</Text>
           </TouchableOpacity>
@@ -212,10 +212,10 @@ export default function OverviewParameters({
           <TouchableOpacity
             style={[
               styles.pauseBtn,
-              (!locked && !isPaused) || (isPaused && !online) ? styles.btnDisabled : null,
+              (!locked && !isPaused) ? styles.btnDisabled : null,
             ]}
             onPress={pauseMachine}
-            disabled={(!locked && !isPaused) || (isPaused && !online)}
+            disabled={!locked && !isPaused}
           >
             <Text style={styles.btnText}>{isPaused ? "▶ Resume" : "|| Pause"}</Text>
           </TouchableOpacity>
@@ -244,15 +244,13 @@ export default function OverviewParameters({
           style={[
             styles.applyBtn,
             ((locked && !waitingForExtension) ||
-              !hasApplicableRecommendation ||
-              (extensionMode && !online)) &&
+              !hasApplicableRecommendation) &&
               styles.btnDisabled,
           ]}
           onPress={() => void applyRecommendation()}
           disabled={
             (locked && !waitingForExtension) ||
-            !hasApplicableRecommendation ||
-            (extensionMode && !online)
+            !hasApplicableRecommendation
           }
         >
           <Text style={styles.applyText}>

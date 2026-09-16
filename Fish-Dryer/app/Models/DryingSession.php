@@ -18,6 +18,7 @@ class DryingSession extends Model
         'target_temperature',
         'fan_speed',
         'set_duration_minutes',
+        'extension_minutes',
         'drying_time_minutes',
         'status',
         'final_status',

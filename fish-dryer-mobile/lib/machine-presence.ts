@@ -5,16 +5,16 @@ import { parsePresenceMs } from "@/lib/parse-presence-ms";
 export const API_LAST_SEEN_MS = 3 * 60 * 1000;
 
 /** ESP nominally pushes ~every 2s, but Wi-Fi/Firebase writes can bunch up. */
-export const RTDB_GO_ONLINE_MS = 10_000;
+export const RTDB_GO_ONLINE_MS = 180_000;
 
 /** Raw offline threshold; UI uses the larger stable threshold below. */
-export const RTDB_GO_OFFLINE_MS = 10_000;
+export const RTDB_GO_OFFLINE_MS = 180_000;
 
 /** While Online, tolerate several missed heartbeats to avoid Wi-Fi jitter flicker. */
-export const RTDB_STAY_ONLINE_MS = 25_000;
+export const RTDB_STAY_ONLINE_MS = 180_000;
 
 /** First snapshot only — ignore clearly stale rows when opening the app. */
-export const RTDB_INITIAL_STALE_MS = 30_000;
+export const RTDB_INITIAL_STALE_MS = 180_000;
 
 /** Offline card flips only after this many presence ticks (not every React render). */
 export const RTDB_OFFLINE_CONFIRM_TICKS = 2;
@@ -65,7 +65,7 @@ export function isMachineDetectable(
   if (!isApiStatusOnline(machine.status)) return false;
   const lastSeenMs = parsePresenceMs(machine.last_seen);
   if (lastSeenMs === null) return false;
-  if (lastSeenMs > nowMs + 2000) return false;
+  if (lastSeenMs > nowMs + 120_000) return false;
   return nowMs - lastSeenMs <= RTDB_GO_ONLINE_MS;
 }
 
@@ -97,7 +97,15 @@ export function hardwareStatusBelongsToMachine(
   }
   const expectedMac = normalizeHardwareMacKey(machineMac);
   const payloadMac = normalizeHardwareMacKey(hwRec.mac);
-  if (expectedMac && payloadMac && expectedMac !== payloadMac) {
+  // Only compare real 12-hex MACs. device_id leftovers (8+ hex chars) were
+  // silently dropping live Firebase heartbeats.
+  if (
+    expectedMac &&
+    expectedMac.length >= 12 &&
+    payloadMac &&
+    payloadMac.length >= 12 &&
+    expectedMac.slice(0, 12) !== payloadMac.slice(0, 12)
+  ) {
     return false;
   }
   return true;
@@ -108,8 +116,10 @@ export function isRtdbPayloadFresh(
   nowMs: number = Date.now()
 ): boolean {
   if (payloadMs == null || !Number.isFinite(payloadMs)) return false;
-  if (payloadMs > nowMs + 2000) return false;
-  return nowMs - payloadMs <= RTDB_GO_ONLINE_MS;
+  const age = nowMs - payloadMs;
+  // ESP NTP can sit minutes ahead of the phone — that is still a live write.
+  if (age < 0) return age >= -600_000;
+  return age <= RTDB_GO_ONLINE_MS;
 }
 
 /**
@@ -133,9 +143,25 @@ export function recordMachineRtdbDelivery(
 } {
   const hadAccepted = seenCallbackById[machineId] ?? false;
   const payloadMs = parsePresenceMs(updatedAtRaw);
+  const prevPayload = prevPayloadById[machineId] ?? 0;
 
   if (!hadAccepted) {
+    seenCallbackById[machineId] = true;
+    const remembered =
+      payloadMs != null
+        ? { ...prevPayloadById, [machineId]: payloadMs }
+        : prevPayloadById;
+    // Leftover row on app open — remember its time, do not fake Online.
     if (payloadMs == null || nowMs - payloadMs > RTDB_INITIAL_STALE_MS) {
+      return {
+        receiveById: prevReceiveById,
+        payloadById: remembered,
+        accepted: false,
+      };
+    }
+  } else {
+    const newerWrite = payloadMs != null && payloadMs > prevPayload;
+    if (!newerWrite && !isRtdbPayloadFresh(payloadMs, nowMs)) {
       return {
         receiveById: prevReceiveById,
         payloadById: prevPayloadById,
@@ -143,8 +169,6 @@ export function recordMachineRtdbDelivery(
       };
     }
   }
-
-  seenCallbackById[machineId] = true;
 
   const receiveById = { ...prevReceiveById, [machineId]: nowMs };
   const payloadById = {
@@ -266,7 +290,6 @@ export function useStableMachineOnline(
     onlineRef.current = false;
     offlineStreakRef.current = 0;
     lastTickRef.current = -1;
-    return onlineRef.current;
   }
 
   if (lastReceiveMs != null && Number.isFinite(lastReceiveMs)) {
@@ -307,7 +330,7 @@ export function isMachineOnlineForUi(opts: {
   stableOnline?: boolean;
 }): boolean {
   if (opts.firebaseConfigured) {
-    return opts.stableOnline ?? isRtdbMicrocontrollerLiveStable(opts.rtdbLastReceiveMs, false);
+    return opts.stableOnline ?? isRtdbPayloadFresh(opts.rtdbLastReceiveMs);
   }
   return isMachineLive(opts.machine);
 }

@@ -173,7 +173,7 @@ export function componentsMapFromRtdbPayload(val: Record<string, unknown>): Reco
         rec.component_name ?? rec.component ?? rec.name ?? rec.key ?? rec.id ?? ""
       ).trim();
       if (!name) continue;
-      const canonical = canonicalKeyFromRawName(name);
+      const canonical = canonicalKeyFromRawName(name) ?? normalizeHardwareComponentKey(name);
       if (!canonical) continue;
       out[canonical] = coerceHardwareStatus(
         rec.status ?? rec.state ?? rec.value ?? rec.connected ?? rec.ok
@@ -186,7 +186,7 @@ export function componentsMapFromRtdbPayload(val: Record<string, unknown>): Reco
 
   for (const [key, status] of Object.entries(raw as Record<string, unknown>)) {
     if (HW_STATUS_SKIP_KEYS.has(key)) continue;
-    const canonical = canonicalKeyFromRawName(key);
+    const canonical = canonicalKeyFromRawName(key) ?? normalizeHardwareComponentKey(key);
     if (!canonical) continue;
     out[canonical] = coerceHardwareStatus(status);
   }
@@ -198,9 +198,15 @@ export function componentsMapFromRtdbPayload(val: Record<string, unknown>): Reco
 export function hardwareRowsFromComponentsMap(
   map: Record<string, string>
 ): HardwareComponentRow[] {
-  return FIREBASE_SENSOR_COMPONENT_KEYS.map((key) => ({
+  const keys = [...FIREBASE_SENSOR_COMPONENT_KEYS];
+  for (const key of Object.keys(map)) {
+    if (!keys.includes(key as (typeof keys)[number])) {
+      keys.push(key as (typeof keys)[number]);
+    }
+  }
+  return keys.map((key) => ({
     component_name: key,
-    status: map[key] ?? "not_working",
+    status: map[key] ?? "unknown",
   }));
 }
 

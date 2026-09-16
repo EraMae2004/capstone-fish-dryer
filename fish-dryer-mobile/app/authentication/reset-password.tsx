@@ -13,6 +13,7 @@ import {
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { API_BASE_URL } from "../../config/api";
+import { boxShadowStyle } from "@/lib/box-shadow";
 
 
 export default function ResetPassword() {
@@ -141,11 +142,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 25,
     borderRadius: 25,
     position: 'relative',
-    shadowColor: '#000',
-    shadowOpacity: 0.25,
-    shadowRadius: 30,
-    shadowOffset: { width: 0, height: 15 },
-    elevation: 15
+    ...boxShadowStyle({ color: '#000', offsetY: 15, blur: 30, opacity: 0.25, elevation: 15 }),
   },
   backArrow: {
     position: 'absolute',

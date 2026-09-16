@@ -41,6 +41,14 @@ export default function UserView() {
   const [activeScreen, setActiveScreen] = useState<
     'overview' | 'history' | 'notifications' | 'hardware' | 'profile'
   >('overview');
+  const [visitedScreens, setVisitedScreens] = useState({
+    overview: true,
+    history: false,
+    notifications: false,
+    hardware: false,
+    profile: false,
+  });
+
   const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
 
   const slideAnim = useState(new Animated.Value(-width))[0];
@@ -66,12 +74,17 @@ export default function UserView() {
       return;
     }
 
-    setUser(JSON.parse(storedUser));
+    try {
+      setUser(JSON.parse(storedUser));
+    } catch {
+      router.replace('/authentication/login');
+    }
   }, [router]);
 
   useEffect(() => {
     void reloadUserFromStorage();
-  }, [reloadUserFromStorage]);
+    void refreshUnreadNotificationCount();
+  }, [reloadUserFromStorage, refreshUnreadNotificationCount]);
 
   useEffect(() => {
     if (activeScreen === 'profile') {
@@ -79,9 +92,20 @@ export default function UserView() {
     }
   }, [activeScreen, reloadUserFromStorage]);
 
-  useEffect(() => {
-    void refreshUnreadNotificationCount();
-  }, [activeScreen, refreshUnreadNotificationCount]);
+  const closeSidebarNow = () => {
+    slideAnim.setValue(-width);
+    setSidebarVisible(false);
+  };
+
+  const goToScreen = (
+    key: 'overview' | 'history' | 'notifications' | 'hardware' | 'profile'
+  ) => {
+    setVisitedScreens((prev) =>
+      prev[key] ? prev : { ...prev, [key]: true }
+    );
+    setActiveScreen(key);
+    if (sidebarVisible) closeSidebarNow();
+  };
 
   const handleLogout = async () => {
     try {
@@ -104,39 +128,14 @@ export default function UserView() {
 
   const toggleSidebar = () => {
     if (sidebarVisible) {
-      Animated.timing(slideAnim, {
-        toValue: -width,
-        duration: 250,
-        useNativeDriver: true,
-      }).start(() => setSidebarVisible(false));
+      closeSidebarNow();
     } else {
       setSidebarVisible(true);
       Animated.timing(slideAnim, {
         toValue: 0,
-        duration: 250,
+        duration: 160,
         useNativeDriver: true,
       }).start();
-    }
-  };
-
-  const renderContent = () => {
-    switch (activeScreen) {
-      case 'history':
-        return <UserHistory />;
-      case 'notifications':
-        return (
-          <UserNotifications
-            onBack={() => setActiveScreen('overview')}
-            onNotificationsChanged={refreshUnreadNotificationCount}
-          />
-        );
-      case 'hardware':
-        return <HardwareStatus />;
-      case 'profile':
-        return <UserProfile onProfileSaved={setUser} />;
-      case 'overview':
-      default:
-        return null;
     }
   };
 
@@ -192,13 +191,59 @@ export default function UserView() {
             pointerEvents={activeScreen === 'overview' ? 'auto' : 'none'}
           >
             <UserOverview
+              isActive={activeScreen === 'overview'}
               unreadNotificationCount={unreadNotificationCount}
-              onOpenNotifications={() => setActiveScreen('notifications')}
+              onOpenNotifications={() => goToScreen('notifications')}
               onNotificationsChanged={refreshUnreadNotificationCount}
             />
           </View>
-          {activeScreen !== 'overview' ? (
-            <View style={styles.foregroundScreen}>{renderContent()}</View>
+          {visitedScreens.history ? (
+            <View
+              style={[
+                styles.screenLayer,
+                activeScreen !== 'history' && styles.screenHidden,
+              ]}
+              pointerEvents={activeScreen === 'history' ? 'auto' : 'none'}
+            >
+              <UserHistory active={activeScreen === 'history'} />
+            </View>
+          ) : null}
+          {visitedScreens.notifications ? (
+            <View
+              style={[
+                styles.screenLayer,
+                activeScreen !== 'notifications' && styles.screenHidden,
+              ]}
+              pointerEvents={activeScreen === 'notifications' ? 'auto' : 'none'}
+            >
+              <UserNotifications
+                visible={activeScreen === 'notifications'}
+                onBack={() => goToScreen('overview')}
+                onNotificationsChanged={refreshUnreadNotificationCount}
+              />
+            </View>
+          ) : null}
+          {visitedScreens.hardware ? (
+            <View
+              style={[
+                styles.screenLayer,
+                activeScreen !== 'hardware' && styles.screenHidden,
+              ]}
+              pointerEvents={activeScreen === 'hardware' ? 'auto' : 'none'}
+            >
+              <HardwareStatus active={activeScreen === 'hardware'} />
+            </View>
+          ) : null}
+          {visitedScreens.profile ? (
+            <View
+              style={[
+                styles.screenLayer,
+                activeScreen !== 'profile' && styles.screenHidden,
+              ]}
+              pointerEvents={activeScreen === 'profile' ? 'auto' : 'none'}
+            >
+              <UserProfile onProfileSaved={setUser} />
+            </View>
           ) : null}
         </View>
       </ShellSidebarOpenContext.Provider>
@@ -224,10 +269,7 @@ export default function UserView() {
             <TouchableOpacity
               key={item.key}
               style={[styles.menuItem, active && styles.activeItem]}
-              onPress={() => {
-                setActiveScreen(item.key);
-                toggleSidebar();
-              }}
+              onPress={() => goToScreen(item.key)}
             >
               <FontAwesome
                 name={item.icon}
@@ -327,16 +369,7 @@ const styles = StyleSheet.create({
   },
 
   screenHidden: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    opacity: 0,
-  },
-
-  foregroundScreen: {
-    flex: 1,
+    display: 'none',
   },
 
   sidebar: {

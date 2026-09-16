@@ -11,14 +11,14 @@ export function isDoorSensorUiLabel(name: string): boolean {
   return String(name ?? "").trim() === DOOR_SENSOR_UI_LABEL;
 }
 
-/** Live sensor: magnet apart (or unknown) = open. Offline / not_working ⇒ treat as not open. */
+/** Live sensor: only an explicit open reading counts. Missing/unknown is not open. */
 export function readRealDoorIsOpen(
   doorReading?: unknown,
   options?: { streamLive?: boolean }
 ): boolean {
   if (options?.streamLive === false) return false;
   const d = String(doorReading ?? "").trim().toLowerCase();
-  return d !== "closed";
+  return d === "open" || d === "true" || d === "1";
 }
 
 export function formatDoorSensorDisplay(

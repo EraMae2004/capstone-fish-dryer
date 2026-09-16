@@ -4,18 +4,40 @@ type ExpoExtra = {
   apiBaseUrl?: string;
 };
 
+function lanHostFromExpo(): string | null {
+  const extra = Constants.expoConfig?.extra as { expoGo?: { debuggerHost?: string } } | undefined;
+  const candidates = [
+    Constants.expoConfig?.hostUri,
+    extra?.expoGo?.debuggerHost,
+    Constants.linkingUri,
+  ];
+  for (const raw of candidates) {
+    const host = String(raw ?? "")
+      .replace(/^exp:\/\//, "")
+      .replace(/^https?:\/\//, "")
+      .split("/")[0]
+      .split(":")[0]
+      .trim();
+    if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) && host !== "127.0.0.1") {
+      return host;
+    }
+  }
+  return null;
+}
+
 function readApiBaseUrl(): string {
-  // 1) Expo public env (works with EAS / local env)
   const fromEnv = (process.env.EXPO_PUBLIC_API_BASE_URL ?? "").trim();
   if (fromEnv) return fromEnv.replace(/\/+$/, "");
 
-  // 2) app.json -> expo.extra.apiBaseUrl
+  // Same PC that is serving Expo Go — survives campus Wi‑Fi IP changes.
+  const expoHost = lanHostFromExpo();
+  if (expoHost) return `http://${expoHost}:8000/api`;
+
   const extra = (Constants.expoConfig?.extra ?? {}) as ExpoExtra;
   const fromExtra = String(extra.apiBaseUrl ?? "").trim();
   if (fromExtra) return fromExtra.replace(/\/+$/, "");
 
-  // 3) Final fallback (dev LAN). Change only if you want a default.
-  return "http://10.124.242.15:8000/api";
+  return "http://10.160.145.15:8000/api";
 }
 
 export const API_BASE_URL = readApiBaseUrl();

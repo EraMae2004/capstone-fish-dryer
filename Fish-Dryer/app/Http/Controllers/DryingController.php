@@ -238,7 +238,7 @@ class DryingController extends Controller
     public function history()
     {
         $histories = DryingSession::where('user_id', Auth::id())
-            ->whereIn('status', ['completed', 'extended'])
+            ->whereIn('status', ['completed', 'stopped'])
             ->latest()
             ->get();
 

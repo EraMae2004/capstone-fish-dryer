@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -7,7 +7,6 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { FontAwesome } from "@expo/vector-icons";
-import { onValue, ref as dbRef, type DataSnapshot } from "firebase/database";
 import { userTypography } from "@/lib/user-typography";
 import {
   useSelectedMachine,
@@ -16,9 +15,10 @@ import {
 import { useShellSidebarOpen } from "@/lib/shell-sidebar-context";
 import { firebaseDb } from "@/config/firebase";
 import {
-  computeStableOnlineByMachineId,
-  recordMachineRtdbDelivery,
-} from "@/lib/machine-presence";
+  firebaseUpdatedAtMs,
+  isFirebaseHeartbeatLive,
+  subscribeLiveHardwareStatus,
+} from "@/lib/live-hardware-rtdb";
 
 type MachineDropdownProps = {
   onMachineChange?: (machineId: number) => void;
@@ -52,11 +52,6 @@ export default function MachineDropdown({
 
   const [open, setOpen] = useState(false);
   const sidebarOpen = useShellSidebarOpen();
-  const rtdbReceiveRef = useRef<Record<number, number>>({});
-  const rtdbPayloadRef = useRef<Record<number, number>>({});
-  const rtdbSeenRef = useRef<Record<number, boolean>>({});
-  const stableOnlineRef = useRef<Record<number, boolean>>({});
-  const offlineStreakRef = useRef<Record<number, number>>({});
   const [stableOnlineById, setStableOnlineById] = useState<Record<number, boolean>>({});
 
   const machineIds = useMemo(
@@ -73,77 +68,60 @@ export default function MachineDropdown({
   }, [sidebarOpen]);
 
   useEffect(() => {
-    if (!firebaseDb || machineIds.length === 0) {
-      stableOnlineRef.current = {};
+    if (!firebaseDb) {
       setStableOnlineById({});
       return;
     }
 
-    const ids = [...machineIds];
-    const unsubs = ids.map((id) =>
-      onValue(dbRef(firebaseDb, `machines/${id}/hardware_status`), (snap: DataSnapshot) => {
-        const val = snap.val();
-        if (!val || typeof val !== "object") return;
-
-        const hw = val as Record<string, unknown>;
-        const payloadMachineId = toPositiveId(hw.microcontroller_id);
-        if (payloadMachineId != null && payloadMachineId !== id) return;
-
-        const bumped = recordMachineRtdbDelivery(
-          rtdbReceiveRef.current,
-          rtdbPayloadRef.current,
-          id,
-          hw.updated_at,
-          rtdbSeenRef.current,
-          Date.now()
-        );
-        if (!bumped.accepted) return;
-
-        rtdbReceiveRef.current = bumped.receiveById;
-        rtdbPayloadRef.current = bumped.payloadById;
-        const next = computeStableOnlineByMachineId(
-          rtdbReceiveRef.current,
-          stableOnlineRef.current,
-          ids,
-          Date.now(),
-          offlineStreakRef.current,
-          false
-        );
-        stableOnlineRef.current = next;
-        setStableOnlineById(next);
-      })
+    const watch = machineIds;
+    const updatedAtById: Record<number, number> = {};
+    const receiveById: Record<number, number> = {};
+    const unsubs = watch.map((id) =>
+      subscribeLiveHardwareStatus(
+        firebaseDb,
+        id,
+        (hw) => {
+          const now = Date.now();
+          const t = firebaseUpdatedAtMs(hw.updated_at);
+          if (t != null) updatedAtById[id] = t;
+          if (
+            isFirebaseHeartbeatLive(hw.updated_at, now) ||
+            isFirebaseHeartbeatLive(t, now)
+          ) {
+            receiveById[id] = now;
+          }
+          setStableOnlineById((prev) => ({
+            ...prev,
+            [id]: isFirebaseHeartbeatLive(
+              t ?? updatedAtById[id],
+              now,
+              receiveById[id]
+            ),
+          }));
+        },
+        () => {
+          delete updatedAtById[id];
+          delete receiveById[id];
+          setStableOnlineById((prev) => ({ ...prev, [id]: false }));
+        }
+      )
     );
-
-    return () => {
-      ids.forEach((id) => {
-        delete rtdbSeenRef.current[id];
-        delete rtdbReceiveRef.current[id];
-        delete rtdbPayloadRef.current[id];
-        delete stableOnlineRef.current[id];
-        delete offlineStreakRef.current[id];
-      });
-      unsubs.forEach((unsub) => unsub());
-    };
-  }, [machineIdsKey]);
-
-  useEffect(() => {
-    if (!firebaseDb || machineIds.length === 0) return;
-
-    const ids = [...machineIds];
-    const interval = setInterval(() => {
-      const next = computeStableOnlineByMachineId(
-        rtdbReceiveRef.current,
-        stableOnlineRef.current,
-        ids,
-        Date.now(),
-        offlineStreakRef.current,
-        true
-      );
-      stableOnlineRef.current = next;
+    const tick = setInterval(() => {
+      const next: Record<number, boolean> = {};
+      for (const id of watch) {
+        next[id] = isFirebaseHeartbeatLive(
+          updatedAtById[id],
+          Date.now(),
+          receiveById[id]
+        );
+      }
       setStableOnlineById(next);
     }, DROPDOWN_STATUS_TICK_MS);
 
-    return () => clearInterval(interval);
+    return () => {
+      unsubs.forEach((unsub) => unsub());
+      clearInterval(tick);
+    };
   }, [machineIdsKey]);
 
   const selectedMachine =

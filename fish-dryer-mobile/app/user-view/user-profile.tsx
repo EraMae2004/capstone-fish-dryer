@@ -64,6 +64,8 @@ export default function UserProfile({ onProfileSaved }: UserProfileProps) {
       if (!storedUser) return;
 
       const parsed = JSON.parse(storedUser) as ProfileUser;
+      applyUser(parsed);
+      setOriginalData(parsed);
 
       try {
         const response = await fetch(`${API_BASE_URL}/mobile/user/${parsed.id}`);
@@ -74,8 +76,7 @@ export default function UserProfile({ onProfileSaved }: UserProfileProps) {
           setOriginalData(data.user);
         }
       } catch {
-        applyUser(parsed);
-        setOriginalData(parsed);
+        // keep cached profile
       }
     };
 

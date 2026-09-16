@@ -1,9 +1,0 @@
-flask
-opencv-python-headless
-torch
-torchvision
-joblib
-numpy
-scikit-learn
-flask-cors
-scikit-image

@@ -13,6 +13,7 @@ import {
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { API_BASE_URL } from '@/config/api';
+import { boxShadowStyle } from '@/lib/box-shadow';
 
 const BASE_URL = "https://spinproof-brineless-marleen.ngrok-free.dev";
 
@@ -135,11 +136,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     borderRadius: 18,
     position: 'relative',
-    shadowColor: '#000',
-    shadowOpacity: 0.25,
-    shadowRadius: 25,
-    shadowOffset: { width: 0, height: 10 },
-    elevation: 12
+    ...boxShadowStyle({ color: '#000', offsetY: 10, blur: 25, opacity: 0.25, elevation: 12 }),
   },
   backArrow: {
     position: 'absolute',
