@@ -50,6 +50,7 @@ import {
   clearSelectedMachineId,
   getSelectedMachineId,
   setSelectedMachineId,
+  useSelectedMachine,
 } from "@/lib/selected-machine";
 
 type MachineOnlineStatus = "online" | "offline";
@@ -252,6 +253,7 @@ function parseHardwareStatusFromRtdb(val: Record<string, unknown>): {
 export default function HardwareStatus({ active = true }: { active?: boolean }) {
   const activeRef = useRef(active);
   activeRef.current = active;
+  const { selectedId: storeSelectedId, refresh: refreshStoreMachines } = useSelectedMachine();
   const machinesLoadedRef = useRef(false);
   const [machines, setMachines] = useState<Machine[]>([]);
   const [selectedMachine, setSelectedMachine] = useState<Machine | null>(null);
@@ -359,6 +361,18 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     selectedMachineIdRef.current = m.id;
     void setSelectedMachineId(m.id);
   };
+
+  useEffect(() => {
+    if (storeSelectedId == null) return;
+    if (selectedMachineIdRef.current === storeSelectedId) return;
+    const m =
+      machinesRef.current.find((row) => row.id === storeSelectedId) ??
+      machines.find((row) => row.id === storeSelectedId);
+    if (!m) return;
+    setSelectedMachine(m);
+    selectedMachineIdRef.current = m.id;
+    void loadComponents(m.id);
+  }, [storeSelectedId, machines]);
   useEffect(() => {
     selectedMachineIdRef.current = selectedMachine?.id ?? null;
   }, [selectedMachine?.id]);
@@ -1471,6 +1485,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       }
 
       await loadMachines();
+      void refreshStoreMachines();
       setModalVisible(false);
       Alert.alert(
         "Saved",
@@ -1503,6 +1518,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
         }
       }
       await loadMachines();
+      void refreshStoreMachines();
     } catch (e) {
       Alert.alert(
         "Could not remove machine",
@@ -1581,6 +1597,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
 
         {/* MACHINE DROPDOWN */}
         <MachineDropdown
+          active={active}
           machines={machines.map((m) => ({
             id: m.id,
             name: m.name,

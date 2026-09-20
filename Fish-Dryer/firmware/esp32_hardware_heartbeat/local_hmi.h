@@ -1,15 +1,20 @@
 /**
  * Local HMI — face layout:
  *
- * NUMBER:   1      2      3     mode
- *           4      5      6      <-
- *           7      8      9      ->
- *           0     Del  Enter  Stop
+ * NUMBER (N):  1      2      3     mode
+ *              4      5      6      <-
+ *              7      8      9      ->
+ *              0     Del  Enter  Stop
  *
- * ALPHABET: ABC   DEF   GHI    mode
- *           JKL   MNO   PQR    <-
- *           STU   VWX   YZ     ->
- *           spc   Del  Enter  Stop
+ * CAPS (A):    ABC   DEF   GHI    mode
+ *              JKL   MNO   PQR    <-
+ *              STU   VWX   YZ     ->
+ *              spc   Del  Enter  Stop
+ *
+ * SMALL (a):   abc   def   ghi    mode
+ *              jkl   mno   pqr    <-
+ *              stu   vwx   yz     ->
+ *              spc   Del  Enter  Stop
  *
  * Keypad header LEFT→RIGHT pins 1→8 (GPIOs stay exactly as wired):
  *   1=13  2=12  3=14  4=27  5=26  6=25  7=33  8=32
@@ -54,7 +59,8 @@ void hmiOnStartDrying(const String& fishType, int totalFish, float targetC,
                       int durationSec, int fanSpeed);
 void hmiOnStopDrying();
 void hmiOnPauseDrying();
-void hmiOnResumeDrying();
+void hmiOnResumeDrying(const String& fishType, int totalFish, float targetC,
+                      int remainingSec, int fanSpeed);
 void hmiOnDurationComplete();
 bool hmiSessionIsRunning();
 bool hmiSessionIsPaused();
@@ -141,7 +147,7 @@ enum class Screen : uint8_t {
 static const char KEYPAD_TEST_KEYS[16] = {
     '1', '2', '3', 'A', '4', '5', '6', 'B', '7', '8', '9', 'C', '*', '0', '#', 'D'};
 
-enum class InputMode : uint8_t { Numeric, Alphabet };
+enum class InputMode : uint8_t { Numeric, AlphabetUpper, AlphabetLower };
 
 static const uint8_t PARAM_COUNT = 4;
 static const char* PARAM_LABELS[PARAM_COUNT] = {
@@ -153,13 +159,12 @@ static EspLcdI2c lcd;
 static const byte ROWS = 4;
 static const byte COLS = 4;
 // GPIOs stay YOUR pins 1–8 (1–4 rows, 5–8 cols). Do not change them.
-// Face lines 4 5 6 <-  and  7 8 9 ->  are KEY_MAP columns 1 and 2 (not rows).
-// Those two face lines were swapped; swap only those two columns here.
+// Face lines 1 2 3 MODE and 4 5 6 <- were swapped; swap only those digit keys.
 static char keys[ROWS][COLS] = {
-    {'D', 'C', 'B', 'A'},
-    {'#', '9', '6', '3'},
-    {'0', '8', '5', '2'},
-    {'*', '7', '4', '1'},
+    {'D', 'C', 'A', 'B'},
+    {'#', '9', '3', '6'},
+    {'0', '8', '2', '5'},
+    {'*', '7', '1', '4'},
 };
 static byte rowPins[ROWS] = {13, 12, 14, 27};
 static byte colPins[COLS] = {26, 25, 33, 32};
@@ -169,7 +174,7 @@ static bool gReady = false;
 static bool gLcdOk = false;
 static bool gKeypadOk = false;
 static Screen gScreen = Screen::Start;
-static InputMode gMode = InputMode::Alphabet;
+static InputMode gMode = InputMode::AlphabetUpper;
 static uint8_t gParamIdx = 0;
 static String gParams[PARAM_COUNT];
 static unsigned long gMessageUntilMs = 0;
@@ -257,6 +262,36 @@ static void showMessage(const char* a, const char* b, unsigned long ms, Screen r
 // Forward declarations for helpers referenced before their definitions.
 static void clearTap();
 static void handlePauseYes();
+static void enterPausedEdit();
+
+static bool modeIsAlphabet() {
+  return gMode == InputMode::AlphabetUpper || gMode == InputMode::AlphabetLower;
+}
+
+static const char* modeName() {
+  switch (gMode) {
+    case InputMode::AlphabetUpper:
+      return "CAPS";
+    case InputMode::AlphabetLower:
+      return "SMALL";
+    default:
+      return "NUMBER";
+  }
+}
+
+static void cycleInputMode() {
+  switch (gMode) {
+    case InputMode::AlphabetUpper:
+      gMode = InputMode::AlphabetLower;
+      break;
+    case InputMode::AlphabetLower:
+      gMode = InputMode::Numeric;
+      break;
+    default:
+      gMode = InputMode::AlphabetUpper;
+      break;
+  }
+}
 
 static void syncModeForParam() {
   if (gParamIdx != 0) gMode = InputMode::Numeric;
@@ -264,12 +299,19 @@ static void syncModeForParam() {
 
 static char modeIndicator() {
   if (gParamIdx != 0) return 'N';
-  return (gMode == InputMode::Alphabet) ? 'A' : 'N';
+  switch (gMode) {
+    case InputMode::AlphabetUpper:
+      return 'A';
+    case InputMode::AlphabetLower:
+      return 'a';
+    default:
+      return 'N';
+  }
 }
 
 static void resetParams() {
   gParamIdx = 0;
-  gMode = InputMode::Alphabet;
+  gMode = InputMode::AlphabetUpper;
   for (uint8_t i = 0; i < PARAM_COUNT; i++) gParams[i] = "";
 }
 
@@ -378,6 +420,12 @@ static void actuallyStartDrying() {
   float target = gParams[2].toFloat();
   long durationSec = durationDigitsToSeconds(gParams[3]);
   if (durationSec < 1) durationSec = 1;
+  if (hmiSessionIsPaused()) {
+    hmiOnResumeDrying(gParams[0], total, target, (int)durationSec, 1);
+    beginRunningUi();
+    Serial.println("[hmi] drying resumed");
+    return;
+  }
   hmiOnStartDrying(gParams[0], total, target, (int)durationSec, 1);
   beginRunningUi();
   Serial.println("[hmi] drying started");
@@ -492,7 +540,7 @@ inline bool wantsNetworkQuiet() {
 
 /** History upload is OK on Message/Start; never during typing or STOP|PAUSE. */
 inline bool canFlushOfflineHistory() {
-  return !(gReady && (gScreen == Screen::EditParams || gScreen == Screen::ConfirmStart ||
+  return !(gReady && (gScreen == Screen::ConfirmStart ||
                       gScreen == Screen::StopOrPause));
 }
 
@@ -729,12 +777,16 @@ static void phoneMultiTap(char digitChar) {
 
   if (gTapKey == digitChar && (now - gTapMs) <= HMI_MULTITAP_MS) {
     gTapPos = (gTapPos + 1) % n;
-    if (s.length()) s.setCharAt(s.length() - 1, L[gTapPos]);
-    else s += L[gTapPos];
+    char ch = L[gTapPos];
+    if (gMode == InputMode::AlphabetLower && ch >= 'A' && ch <= 'Z') ch = (char)(ch + 32);
+    if (s.length()) s.setCharAt(s.length() - 1, ch);
+    else s += ch;
   } else {
     gTapKey = digitChar;
     gTapPos = 0;
-    appendChar(L[0]);
+    char ch = L[0];
+    if (gMode == InputMode::AlphabetLower && ch >= 'A' && ch <= 'Z') ch = (char)(ch + 32);
+    appendChar(ch);
   }
   gTapMs = now;
 }
@@ -751,7 +803,7 @@ static void goPrevParam() {
   clearTap();
   if (gParamIdx > 0) {
     gParamIdx--;
-    // Fish Name keeps last A/N choice; other params forced to N in syncModeForParam/render
+    // Fish Name keeps last N/A/a choice; other params stay N.
   }
 }
 
@@ -760,9 +812,9 @@ static void handleEnter() {
   if (gScreen == Screen::Start) {
     gScreen = Screen::EditParams;
     gParamIdx = 0;
-    gMode = InputMode::Alphabet;  // always Alphabet by default on Fish Name
+    gMode = InputMode::AlphabetUpper;  // Fish Name starts on capital letters
     for (uint8_t i = 0; i < PARAM_COUNT; i++) gParams[i] = "";
-    Serial.println("[hmi] -> Fish Name: (Alphabet)");
+    Serial.println("[hmi] -> Fish Name: (CAPS)");
     redraw();
     return;
   }
@@ -779,7 +831,10 @@ static void handleEnter() {
     return;
   }
   if (gScreen == Screen::DoorWarn) return;
-  if (gScreen == Screen::Running) return;
+  if (gScreen == Screen::Running) {
+    if (hmiSessionIsPaused()) enterPausedEdit();
+    return;
+  }
   if (gScreen != Screen::EditParams) return;
 
   String cur = gParams[gParamIdx];
@@ -796,6 +851,10 @@ static void handleEnter() {
     return;
   }
   if (!validateAllParams()) return;
+  if (hmiSessionIsPaused()) {
+    enterDoorWarn();
+    return;
+  }
   gScreen = Screen::ConfirmStart;
   redraw();
 }
@@ -825,12 +884,27 @@ static void handleStopOrNo() {
   }
 }
 
+static void enterPausedEdit() {
+  long rem = hmiRemainingDurationSec();
+  if (rem < 1) rem = durationDigitsToSeconds(gParams[3]);
+  if (rem < 1) rem = 1;
+  long hh = rem / 3600L;
+  long mm = (rem % 3600L) / 60L;
+  long ss = rem % 60L;
+  char dbuf[12];
+  snprintf(dbuf, sizeof(dbuf), "%02ld%02ld%02ld", hh > 99 ? 99 : hh, mm, ss);
+  gParams[3] = String(dbuf);
+  gParamIdx = 0;
+  gScreen = Screen::EditParams;
+  syncModeForParam();
+  redraw();
+  Serial.println("[hmi] paused — edit parameters");
+}
+
 static void handlePauseYes() {
   clearTap();
   if (gScreen != Screen::StopOrPause) return;
   hmiOnPauseDrying();
-  showMessage("PAUSED", "", 1200, Screen::Running);
-  // After message returns to Running — keep params visible while paused
 }
 
 static void handleFinished() {
@@ -848,15 +922,14 @@ static const char* keyMeaning(char key) {
     case 'D': return "Stop";
     case '0': return "Del";
     case '#': return "Enter";
-    case '*': return (gMode == InputMode::Alphabet) ? "space" : "0";
+    case '*': return modeIsAlphabet() ? "space" : "0";
     default: return "digit/letter";
   }
 }
 
 static void handleKey(char key) {
   gLastKeypressMs = millis();
-  Serial.printf("[hmi] KEY=%c (%s) mode=%s\n", key, keyMeaning(key),
-                gMode == InputMode::Alphabet ? "ALPHABET" : "NUMBER");
+  Serial.printf("[hmi] KEY=%c (%s) mode=%s\n", key, keyMeaning(key), modeName());
   gKeypadOk = true;
 
   // During keypad test OR combined LCD→keypad wait: count every raw key.
@@ -873,8 +946,8 @@ static void handleKey(char key) {
   if (key == 'A') {
     if (gScreen == Screen::EditParams && gParamIdx == 0) {
       clearTap();
-      gMode = (gMode == InputMode::Alphabet) ? InputMode::Numeric : InputMode::Alphabet;
-      Serial.printf("[hmi] mode=%s\n", gMode == InputMode::Alphabet ? "ALPHABET" : "NUMBER");
+      cycleInputMode();
+      Serial.printf("[hmi] mode=%s (%c)\n", modeName(), modeIndicator());
       redraw();
     }
     return;
@@ -928,13 +1001,13 @@ static void handleKey(char key) {
 
   if (key == '*') {
     clearTap();
-    appendChar(gMode == InputMode::Alphabet ? ' ' : '0');
+    appendChar(modeIsAlphabet() ? ' ' : '0');
     redraw();
     return;
   }
 
   if (key >= '1' && key <= '9') {
-    if (gMode == InputMode::Alphabet) {
+    if (modeIsAlphabet()) {
       phoneMultiTap(key);
     } else {
       clearTap();
@@ -946,7 +1019,7 @@ static void handleKey(char key) {
 
 inline void begin() {
   Serial.println("[hmi] === LOCAL HMI READY ===");
-  Serial.println("[hmi] boot: START DRYING SESSION -> Enter -> Fish Name (Alphabet)");
+  Serial.println("[hmi] boot: START DRYING SESSION -> Enter -> Fish Name (CAPS / SMALL / NUMBER)");
   pinMode(PIN_LCD_SDA, INPUT_PULLUP);
   pinMode(PIN_LCD_SCL, INPUT_PULLUP);
   delay(50);
@@ -990,7 +1063,7 @@ inline void begin() {
   gReady = true;
   gScreen = Screen::Start;
   resetParams();
-  gMode = InputMode::Alphabet;
+  gMode = InputMode::AlphabetUpper;
   if (gLcdOk) {
     lcd.clear();
     renderStart();
@@ -1140,11 +1213,12 @@ inline void adoptCloudPaused() {
       gScreen == Screen::DoorWarn || gScreen == Screen::ContinueDoor) {
     return;
   }
-  if (gScreen != Screen::Running && gScreen != Screen::StopOrPause &&
-      gScreen != Screen::Message) {
-    beginRunningUi();
-  }
-  showMessage("PAUSED", "", 1000, Screen::Running);
+  enterPausedEdit();
+}
+
+inline void enterPausedEditUi() {
+  if (!gReady) return;
+  enterPausedEdit();
 }
 
 inline void adoptCloudStopped() {
@@ -1183,6 +1257,7 @@ inline bool serviceKeypadSelfTestSlice() { return false; }
 inline void adoptCloudSession(const String&, int, float, int) {}
 inline void adoptCloudPaused() {}
 inline void adoptCloudStopped() {}
+inline void enterPausedEditUi() {}
 }
 
 #endif

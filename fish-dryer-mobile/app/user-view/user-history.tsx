@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -11,9 +11,10 @@ import {
 } from 'react-native';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_BASE_URL } from "@/config/api";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import UserGraph, { type HistoryRange } from './user-graph';
 import { userTypography } from "@/lib/user-typography";
-import { formatMinutesAsHMS, formatSecondsAsHMS } from "@/lib/duration-format";
+import { formatSecondsAsHMS } from "@/lib/duration-format";
 import { ListPaginationBar, useListPagination } from '@/lib/list-pagination';
 import MachineDropdown from './machine-dropdown';
 import { useSelectedMachine } from '@/lib/selected-machine';
@@ -22,12 +23,6 @@ function fmtPct(value: unknown): string {
   if (value === null || value === undefined || value === "") return "--";
   const n = Number(value);
   return Number.isFinite(n) ? `${n.toFixed(1)}` : "--";
-}
-
-function fmtDryMins(value: unknown): string {
-  if (value === null || value === undefined || value === "") return "--";
-  const n = Number(value);
-  return Number.isFinite(n) ? formatMinutesAsHMS(n) : "--";
 }
 
 function fmtSessionDryTime(row: any): string {
@@ -61,37 +56,134 @@ function UserHistory({ active = true }: { active?: boolean }) {
     loading: machinesLoading,
   } = useSelectedMachine();
 
-  const fetchInFlightRef = useRef(false);
+  const fetchSeqRef = useRef(0);
+  const selectedMachineIdRef = useRef(selectedMachineId);
+  selectedMachineIdRef.current = selectedMachineId;
+  const sessionsLenRef = useRef(0);
+  const sessionsRef = useRef<any[]>([]);
+  const deletedIdsRef = useRef<Set<number>>(new Set());
+  const deletedCodesRef = useRef<Set<string>>(new Set());
+  const HISTORY_DELETED_KEY = "history_deleted_sessions_v1";
 
-  const fetchHistory = async (rangeKey: typeof range, silent = false) => {
-    if (fetchInFlightRef.current) return;
-    fetchInFlightRef.current = true;
-    try {
-      if (!silent) {
-        setLoading((prev) => (sessions.length === 0 ? true : prev));
+  const persistDeletedSessions = () => {
+    void AsyncStorage.setItem(
+      HISTORY_DELETED_KEY,
+      JSON.stringify({
+        ids: Array.from(deletedIdsRef.current),
+        codes: Array.from(deletedCodesRef.current),
+      })
+    );
+  };
+
+  const [deletedReady, setDeletedReady] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(HISTORY_DELETED_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          const ids = Array.isArray(parsed?.ids) ? parsed.ids : [];
+          const codes = Array.isArray(parsed?.codes) ? parsed.codes : [];
+          ids.forEach((id: unknown) => {
+            const n = Number(id);
+            if (Number.isFinite(n) && n > 0) deletedIdsRef.current.add(n);
+          });
+          codes.forEach((code: unknown) => {
+            const s = String(code ?? "").trim();
+            if (s) deletedCodesRef.current.add(s);
+          });
+        }
+      } catch {
+        // ignore corrupt cache
+      } finally {
+        setDeletedReady(true);
       }
-      const params = new URLSearchParams({ range: rangeKey });
-      const res = await fetch(`${API_BASE_URL}/drying-sessions?${params.toString()}`);
-      const data = await res.json();
+    })();
+  }, []);
 
-      const rows = data?.sessions ?? data?.data ?? data ?? [];
-      setSessions(Array.isArray(rows) ? rows : []);
-      if (!silent) {
-        setSelectedIds(new Set());
-      }
+  const [boundMachineId, setBoundMachineId] = useState(selectedMachineId);
+  const [boundRange, setBoundRange] = useState(range);
+  if (boundMachineId !== selectedMachineId || boundRange !== range) {
+    setBoundMachineId(selectedMachineId);
+    setBoundRange(range);
+    fetchSeqRef.current += 1;
+    sessionsLenRef.current = 0;
+    sessionsRef.current = [];
+    setSelectedSession(null);
+    setSelectedIds(new Set());
+    setSessions([]);
+  } else {
+    sessionsRef.current = sessions;
+  }
 
-    } catch (error) {
-      console.log(error);
-    } finally {
-      fetchInFlightRef.current = false;
-      setLoading(false);
+  const applySessions = (list: any[], machineId: number | null) => {
+    const deleted = deletedIdsRef.current;
+    const deletedCodes = deletedCodesRef.current;
+    const next = list.filter((row) => {
+      const id = Number(row?.id);
+      if (Number.isFinite(id) && deleted.has(id)) return false;
+      const code = String(row?.session_code ?? "").trim();
+      if (code && deletedCodes.has(code)) return false;
+      if (machineId == null || machineId <= 0) return true;
+      const mid = Number(row?.microcontroller_id);
+      if (!Number.isFinite(mid) || mid <= 0) return true;
+      return mid === machineId;
+    });
+    sessionsLenRef.current = next.length;
+    setSessions(next);
+    return next;
+  };
+
+  const deleteSessionsOnServer = async (ids: number[]) => {
+    const res = await fetch(`${API_BASE_URL}/drying-sessions/batch-delete`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ ids }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.success === false) {
+      throw new Error(String(data?.message ?? 'delete failed'));
     }
   };
 
+  const fetchHistory = useCallback(async (rangeKey: typeof range, silent = false) => {
+    const seq = ++fetchSeqRef.current;
+    const machineId = selectedMachineIdRef.current;
+    try {
+      if (!silent && sessionsLenRef.current === 0) {
+        setLoading(true);
+      }
+      const params = new URLSearchParams({ range: rangeKey });
+      if (machineId != null && machineId > 0) {
+        params.set('machine_id', String(machineId));
+      }
+      const res = await fetch(`${API_BASE_URL}/drying-sessions?${params.toString()}`);
+      const data = await res.json();
+      if (seq !== fetchSeqRef.current) return;
+
+      const rows = data?.sessions ?? data?.data ?? data ?? [];
+      const list = Array.isArray(rows) ? rows : [];
+      applySessions(list, machineId);
+      if (!silent) {
+        setSelectedIds(new Set());
+      }
+    } catch (error) {
+      console.log(error);
+    } finally {
+      if (seq === fetchSeqRef.current) {
+        setLoading(false);
+      }
+    }
+  }, []);
+
   useEffect(() => {
-    if (!active) return;
+    if (!active || machinesLoading || !deletedReady) return;
     void fetchHistory(range);
-  }, [range, active]);
+  }, [range, active, selectedMachineId, machinesLoading, fetchHistory, deletedReady]);
 
   useEffect(() => {
     if (!active) return;
@@ -99,7 +191,7 @@ function UserHistory({ active = true }: { active?: boolean }) {
       void fetchHistory(range, true);
     }, 60000);
     return () => clearInterval(t);
-  }, [range, active]);
+  }, [range, active, fetchHistory]);
 
   /** API already filters by range; keep list in sync with graph. */
   const filteredSessions = sessions;
@@ -125,41 +217,55 @@ function UserHistory({ active = true }: { active?: boolean }) {
     });
   };
 
-  const handleViewDetails = async (id: number) => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/drying-sessions/${id}`);
-      const data = await res.json();
-      const detail = data?.data ?? data;
-      setSelectedSession(detail ?? null);
-    } catch (error) {
-      console.log(error);
+  const handleViewDetails = (id: number) => {
+    const existing = sessionsRef.current.find((row) => Number(row.id) === id) ?? null;
+    if (existing) {
+      setSelectedSession(existing);
     }
+    void (async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/drying-sessions/${id}`);
+        const data = await res.json();
+        const detail = data?.data ?? data?.session ?? data;
+        if (!detail || typeof detail !== 'object') return;
+        const merged = existing ? { ...existing, ...detail } : detail;
+        setSelectedSession(merged);
+        setSessions((prev) => {
+          const next = prev.map((row) =>
+            Number(row.id) === id ? { ...row, ...merged } : row
+          );
+          sessionsLenRef.current = next.length;
+          return next;
+        });
+      } catch (error) {
+        console.log(error);
+      }
+    })();
   };
 
-  const handleDelete = (id: number) => {
-    Alert.alert('Delete Session', 'Are you sure you want to delete this drying session?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await fetch(`${API_BASE_URL}/drying-sessions/${id}`, { method: 'DELETE' });
-            if (selectedSession?.id === id) {
-              setSelectedSession(null);
-            }
-            setSelectedIds((prev) => {
-              const next = new Set(prev);
-              next.delete(id);
-              return next;
-            });
-            void fetchHistory(range);
-          } catch (error) {
-            console.log(error);
-          }
-        }
-      }
-    ]);
+  const removeSessionsLocally = (ids: number[]) => {
+    const idSet = new Set(ids.map((n) => Number(n)));
+    idSet.forEach((id) => deletedIdsRef.current.add(id));
+    sessionsRef.current.forEach((row) => {
+      if (!idSet.has(Number(row?.id))) return;
+      const code = String(row?.session_code ?? "").trim();
+      if (code) deletedCodesRef.current.add(code);
+    });
+    persistDeletedSessions();
+    setSessions((prev) => {
+      const next = prev.filter((row) => !idSet.has(Number(row.id)));
+      sessionsLenRef.current = next.length;
+      sessionsRef.current = next;
+      return next;
+    });
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => next.delete(id));
+      return next;
+    });
+    setSelectedSession((prev: any | null) =>
+      prev && idSet.has(Number(prev.id)) ? null : prev
+    );
   };
 
   const handleDeleteSelected = () => {
@@ -173,21 +279,22 @@ function UserHistory({ active = true }: { active?: boolean }) {
         {
           text: 'Delete',
           style: 'destructive',
-          onPress: async () => {
-            try {
-              await fetch(`${API_BASE_URL}/drying-sessions/batch-delete`, {
-                method: 'POST',
-                headers: {
-                  Accept: 'application/json',
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ ids }),
-              });
-              setSelectedSession(null);
-              void fetchHistory(range);
-            } catch (error) {
-              console.log(error);
-            }
+          onPress: () => {
+            setTimeout(() => {
+              removeSessionsLocally(ids);
+              void (async () => {
+                try {
+                  await deleteSessionsOnServer(ids);
+                } catch (error) {
+                  console.log(error);
+                  try {
+                    await deleteSessionsOnServer(ids);
+                  } catch (retryError) {
+                    console.log(retryError);
+                  }
+                }
+              })();
+            }, 0);
           },
         },
       ]
@@ -204,9 +311,6 @@ function UserHistory({ active = true }: { active?: boolean }) {
         selectedId={selectedMachineId}
         loading={machinesLoading}
         onSelect={selectMachine}
-        onMachineChange={(id) => {
-          void fetchHistory(range);
-        }}
         style={styles.machineDropdown}
       />
 
@@ -217,6 +321,7 @@ function UserHistory({ active = true }: { active?: boolean }) {
         nestedScrollEnabled
       >
         <UserGraph
+          key={`history-graph-${selectedMachineId ?? 0}-${filteredSessions.length}-${filteredSessions[0]?.id ?? 0}`}
           active={active}
           sessions={filteredSessions}
           summary={{ total_batches: filteredSessions.length }}
@@ -257,9 +362,6 @@ function UserHistory({ active = true }: { active?: boolean }) {
                 <TouchableOpacity onPress={() => handleViewDetails(id)}>
                   <FontAwesome name="eye" size={18} color="#4fc3f7" />
                 </TouchableOpacity>
-                <TouchableOpacity onPress={() => handleDelete(id)}>
-                  <FontAwesome name="trash" size={18} color="#e74c3c" />
-                </TouchableOpacity>
               </View>
             </View>
           );
@@ -295,25 +397,13 @@ function UserHistory({ active = true }: { active?: boolean }) {
               <Text style={styles.detailRow}>No. of Fish: {selectedSession?.total_fish ?? '--'}</Text>
               <Text style={styles.detailRow}>Target Temp: {selectedSession?.target_temperature ?? '--'} °C</Text>
               <Text style={styles.detailRow}>
-                Planned duration: {fmtDryMins(selectedSession?.set_duration_minutes)}
-              </Text>
-              <Text style={styles.detailRow}>
-                Extension duration: {fmtDryMins(selectedSession?.extension_minutes ?? 0)}
-              </Text>
-              <Text style={styles.detailRow}>
-                Total duration: {fmtDryMins(
-                  (Number(selectedSession?.set_duration_minutes) || 0) +
-                    (Number(selectedSession?.extension_minutes) || 0)
-                )}
+                Drying time: {fmtSessionDryTime(selectedSession)}
               </Text>
               <Text style={styles.detailRow}>
                 Temperature: {selectedSession?.temperature != null ? `${selectedSession.temperature} °C` : '--'}
               </Text>
               <Text style={styles.detailRow}>
                 Humidity: {fmtPct(selectedSession?.humidity ?? selectedSession?.avg_humidity)} %
-              </Text>
-              <Text style={styles.detailRow}>
-                Actual drying time: {fmtSessionDryTime(selectedSession)}
               </Text>
 
               {Array.isArray(selectedSession?.moisture_checks) &&

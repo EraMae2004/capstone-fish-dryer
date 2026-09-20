@@ -21,6 +21,7 @@ import {
 } from "@/lib/live-hardware-rtdb";
 
 type MachineDropdownProps = {
+  active?: boolean;
   onMachineChange?: (machineId: number) => void;
   style?: object;
   machines?: UserMachine[];
@@ -29,7 +30,7 @@ type MachineDropdownProps = {
   onSelect?: (machineId: number) => void;
 };
 
-const DROPDOWN_STATUS_TICK_MS = 500;
+const DROPDOWN_STATUS_TICK_MS = 2000;
 
 function toPositiveId(value: unknown): number | null {
   const id = Number(value);
@@ -37,6 +38,7 @@ function toPositiveId(value: unknown): number | null {
 }
 
 export default function MachineDropdown({
+  active = true,
   onMachineChange,
   style,
   machines: machinesProp,
@@ -68,61 +70,56 @@ export default function MachineDropdown({
   }, [sidebarOpen]);
 
   useEffect(() => {
-    if (!firebaseDb) {
-      setStableOnlineById({});
+    if (!firebaseDb || !active) {
       return;
     }
 
     const watch = machineIds;
     const updatedAtById: Record<number, number> = {};
-    const receiveById: Record<number, number> = {};
     const unsubs = watch.map((id) =>
       subscribeLiveHardwareStatus(
         firebaseDb,
         id,
         (hw) => {
-          const now = Date.now();
           const t = firebaseUpdatedAtMs(hw.updated_at);
           if (t != null) updatedAtById[id] = t;
-          if (
-            isFirebaseHeartbeatLive(hw.updated_at, now) ||
-            isFirebaseHeartbeatLive(t, now)
-          ) {
-            receiveById[id] = now;
-          }
-          setStableOnlineById((prev) => ({
-            ...prev,
-            [id]: isFirebaseHeartbeatLive(
-              t ?? updatedAtById[id],
-              now,
-              receiveById[id]
-            ),
-          }));
+          setStableOnlineById((prev) => {
+            const online = isFirebaseHeartbeatLive(t ?? updatedAtById[id], Date.now());
+            if (prev[id] === online) return prev;
+            return { ...prev, [id]: online };
+          });
         },
         () => {
           delete updatedAtById[id];
-          delete receiveById[id];
-          setStableOnlineById((prev) => ({ ...prev, [id]: false }));
+          setStableOnlineById((prev) => {
+            if (prev[id] === false) return prev;
+            return { ...prev, [id]: false };
+          });
         }
       )
     );
     const tick = setInterval(() => {
       const next: Record<number, boolean> = {};
+      let changed = false;
       for (const id of watch) {
-        next[id] = isFirebaseHeartbeatLive(
-          updatedAtById[id],
-          Date.now(),
-          receiveById[id]
-        );
+        next[id] = isFirebaseHeartbeatLive(updatedAtById[id], Date.now());
       }
-      setStableOnlineById(next);
+      setStableOnlineById((prev) => {
+        for (const id of watch) {
+          if (prev[id] !== next[id]) {
+            changed = true;
+            break;
+          }
+        }
+        return changed ? next : prev;
+      });
     }, DROPDOWN_STATUS_TICK_MS);
 
     return () => {
       unsubs.forEach((unsub) => unsub());
       clearInterval(tick);
     };
-  }, [machineIdsKey]);
+  }, [machineIdsKey, active]);
 
   const selectedMachine =
     machines.find((m) => m.id === selectedId) ?? null;

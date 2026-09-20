@@ -37,7 +37,7 @@ function readApiBaseUrl(): string {
   const fromExtra = String(extra.apiBaseUrl ?? "").trim();
   if (fromExtra) return fromExtra.replace(/\/+$/, "");
 
-  return "http://10.160.145.15:8000/api";
+  return "http://10.71.41.15:8000/api";
 }
 
 export const API_BASE_URL = readApiBaseUrl();

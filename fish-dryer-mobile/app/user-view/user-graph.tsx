@@ -210,6 +210,7 @@ export default function UserGraph({
 
         {paintChart ? (
           <LineChart
+            key={`${graphHumidityData.map((d) => d.value).join("|")}|${graphTemperatureData.map((d) => d.value).join("|")}|${graphDurationData.map((d) => d.value).join("|")}`}
             width={chartWidth}
             data={graphHumidityData}
             data2={graphTemperatureData}

@@ -4,6 +4,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { onValue, ref as dbRef, set as dbSet, update as dbUpdate, type DataSnapshot } from "firebase/database";
 import {
   firebaseUpdatedAtMs,
+  isFirebaseHeartbeatLive,
   subscribeLiveHardwareStatus,
 } from "@/lib/live-hardware-rtdb";
 import OverviewStatus from "./overview-status";
@@ -59,6 +60,10 @@ const OVERVIEW_API_POLL_MS = 30_000;
 const SESSION_FAN_SPEED = 1;
 /** Small incrementing seq so ESP32 does not drop Start/Pause/Stop (Date.now overflows float). */
 let rtdbCommandSeq = 1;
+function nextRtdbCommandSeq(): number {
+  rtdbCommandSeq = (rtdbCommandSeq % 900) + 1;
+  return ((Date.now() % 15000000) + rtdbCommandSeq) % 16000000 || 1;
+}
 
 function sessionDurationSeconds(session: {
   set_duration_minutes?: unknown;
@@ -210,6 +215,8 @@ export default function UserOverview({
   const [loading, setLoading] = useState(true);
   const overviewRequestSeqRef = useRef(0);
   const overviewBoundMachineRef = useRef<number | null | undefined>(undefined);
+  const machineIdRef = useRef<number | null>(null);
+  const lastRecFishRef = useRef("");
 
   const selectedMachineMeta = useMemo(
     () => userMachines.find((m) => m.id === selectedMachineId) ?? null,
@@ -299,8 +306,11 @@ export default function UserOverview({
       return;
     }
     overviewBoundMachineRef.current = nextMachineId;
+    machineIdRef.current = nextMachineId;
+    lastHwRef.current = null;
 
     overviewRequestSeqRef.current += 1;
+    setUiSessionStatusOverride(null);
     setSession(null);
     setMoistureDraftBatches([]);
     setHardwareStatuses([]);
@@ -308,6 +318,11 @@ export default function UserOverview({
     setRecommendation(null);
     setNeedsExtension(false);
     setDoorBypassClosed(false);
+    setFishType("");
+    setTotalFish("");
+    setTemperature("");
+    setDuration("");
+    lastRecFishRef.current = "";
     setOverviewRtdbLastReceiveMs(null);
     setOverviewRtdbPayloadAtMs(null);
     overviewHardwareFromRtdbRef.current = false;
@@ -377,11 +392,15 @@ export default function UserOverview({
     lastHwRef.current = null;
 
     const applyHw = (hw: Record<string, unknown>) => {
+      if (machineIdRef.current !== boundMachineId) return;
       lastHwRef.current = hw;
       if (!isActiveRef.current) return;
       const payloadMs = firebaseUpdatedAtMs(hw.updated_at);
       setOverviewRtdbPayloadAtMs(payloadMs);
-      setOverviewRtdbLastReceiveMs(Date.now());
+      // Use payload age only. Cached leftover rows must not count as a new heartbeat.
+      setOverviewRtdbLastReceiveMs(
+        isFirebaseHeartbeatLive(hw.updated_at, Date.now()) ? Date.now() : null
+      );
       const parsed = parseHardwareStatusFromRtdb(hw);
       setHardwareStatuses(parsed.components);
       overviewHardwareFromRtdbRef.current = true;
@@ -408,7 +427,9 @@ export default function UserOverview({
     if (!hw) return;
     const payloadMs = firebaseUpdatedAtMs(hw.updated_at);
     setOverviewRtdbPayloadAtMs(payloadMs);
-    setOverviewRtdbLastReceiveMs(Date.now());
+    setOverviewRtdbLastReceiveMs(
+      isFirebaseHeartbeatLive(hw.updated_at, Date.now()) ? Date.now() : null
+    );
     const parsed = parseHardwareStatusFromRtdb(hw);
     setHardwareStatuses(parsed.components);
     overviewHardwareFromRtdbRef.current = true;
@@ -533,7 +554,6 @@ export default function UserOverview({
   const sessionControlBusyRef = useRef(false);
   const sessionSyncLockRef = useRef(false);
   const pauseRemainingSnapshotRef = useRef<number | null>(null);
-  const machineIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     machineIdRef.current = activeMachineId;
@@ -576,7 +596,7 @@ export default function UserOverview({
         Number.parseFloat(String(temperature || "0").trim());
       const tt =
         Number.isFinite(ttRaw) && ttRaw > 1 ? ttRaw : 60;
-      const seq = rtdbCommandSeq++;
+      const seq = nextRtdbCommandSeq();
       const fish =
         (opts?.fish_type ?? fishType ?? "").trim() || undefined;
       const totalFishRaw =
@@ -647,7 +667,7 @@ export default function UserOverview({
         targetTemperature ??
         Number.parseFloat(String(temperature || "0").trim());
       const tt = Number.isFinite(ttRaw) && ttRaw > 1 ? ttRaw : 60;
-      const seq = rtdbCommandSeq++;
+      const seq = nextRtdbCommandSeq();
       try {
         await dbUpdate(dbRef(firebaseDb, `machines/${microcontrollerId}/session`), {
           fan_speed: SESSION_FAN_SPEED,
@@ -702,6 +722,43 @@ export default function UserOverview({
     const tt = Number.parseFloat(String(temperature || "0").trim());
     void pushSessionParamsToRtdb(mcId, Number.isFinite(tt) ? tt : undefined);
   }, [firebaseDb, activeMachineId, session?.status, temperature, pushSessionParamsToRtdb]);
+
+  /** While paused, push edited parameters to the board without starting the fan/heater. */
+  useEffect(() => {
+    if (!firebaseDb) return;
+    const db = firebaseDb;
+    const mcId = toPositiveId(activeMachineId);
+    if (mcId == null) return;
+    if (sessionSyncLockRef.current || sessionControlBusyRef.current) return;
+    if (String(session?.status ?? "").trim().toLowerCase() !== "paused") return;
+    const t = setTimeout(() => {
+      const tt = Number.parseFloat(String(temperature || "0").trim());
+      const tf = Number.parseInt(String(totalFish ?? "").trim(), 10);
+      const dm = digitsToMinutes(String(duration ?? "").trim());
+      const patch: Record<string, unknown> = {
+        status: "paused",
+        command: "pause",
+        session_active: false,
+        fan_speed: SESSION_FAN_SPEED,
+        target_temperature: Number.isFinite(tt) && tt > 1 ? tt : 60,
+        updated_at: new Date().toISOString(),
+      };
+      const fish = String(fishType ?? "").trim();
+      if (fish) patch.fish_type = fish;
+      if (Number.isFinite(tf) && tf >= 0) patch.total_fish = tf;
+      if (dm != null) patch.set_duration_minutes = dm;
+      void dbUpdate(dbRef(db, `machines/${mcId}/session`), patch);
+    }, 700);
+    return () => clearTimeout(t);
+  }, [
+    firebaseDb,
+    activeMachineId,
+    session?.status,
+    fishType,
+    totalFish,
+    temperature,
+    duration,
+  ]);
 
   const applyOverviewPayload = useCallback(
     (data: any) => {
@@ -769,13 +826,23 @@ export default function UserOverview({
     return () => clearInterval(id);
   }, [loading, fetchOverviewPresenceOnly, isActive]);
 
+  const wasOverviewActiveRef = useRef(isActive);
+  useEffect(() => {
+    const becameActive = isActive && !wasOverviewActiveRef.current;
+    wasOverviewActiveRef.current = isActive;
+    if (!becameActive || loading) return;
+    void fetchOverview();
+  }, [isActive, loading, fetchOverview]);
+
   const appendSessionMetaToBody = (body: Record<string, unknown>) => {
     const ft = fishType.trim();
     const tf = Number.parseInt(String(totalFish).trim(), 10);
     const tt = Number.parseFloat(String(temperature).trim());
+    const dm = digitsToMinutes(String(duration).trim());
     if (ft) body.fish_type = ft;
     if (Number.isFinite(tf) && tf >= 0) body.total_fish = tf;
     if (Number.isFinite(tt)) body.target_temperature = tt;
+    if (dm != null) body.set_duration_minutes = dm;
     body.fan_speed = SESSION_FAN_SPEED;
   };
 
@@ -917,75 +984,76 @@ export default function UserOverview({
           return;
         }
 
-        if (!isActiveRef.current) {
-          lastSeenStatus = status;
-          return;
-        }
-
         setUiSessionStatusOverride(status as "running" | "paused" | "stopped");
 
         setSession((prev: any) => {
-          if (!prev && status === "stopped") return prev;
+          if (machineIdRef.current !== boundMachineId) return prev;
+          const prevMc = toPositiveId(prev?.microcontroller_id);
+          const base =
+            prevMc != null && prevMc !== boundMachineId ? null : prev;
+          if (!base && status === "stopped") return null;
           const newRun =
             status === "running" &&
             lastSeenStatus !== "running" &&
             lastSeenStatus !== "paused";
           return {
-            ...(newRun ? {} : (prev ?? {})),
+            ...(newRun ? {} : (base ?? {})),
+            microcontroller_id: boundMachineId,
             status,
             fish_type:
-              String(payload.fish_type ?? "").trim() || prev?.fish_type,
+              String(payload.fish_type ?? "").trim() || base?.fish_type,
             total_fish:
               Number.isFinite(Number(payload.total_fish)) && Number(payload.total_fish) >= 0
                 ? Number(payload.total_fish)
-                : prev?.total_fish,
+                : base?.total_fish,
             target_temperature:
               Number.isFinite(Number(payload.target_temperature)) &&
               Number(payload.target_temperature) > 0
                 ? Number(payload.target_temperature)
-                : prev?.target_temperature,
+                : base?.target_temperature,
             set_duration_minutes:
               Number.isFinite(Number(payload.set_duration_minutes)) &&
               Number(payload.set_duration_minutes) > 0
                 ? Number(payload.set_duration_minutes)
-                : prev?.set_duration_minutes,
+                : base?.set_duration_minutes,
             extension_minutes:
               Number.isFinite(Number(payload.extension_minutes)) &&
               Number(payload.extension_minutes) >= 0
                 ? Number(payload.extension_minutes)
                 : newRun
                   ? 0
-                  : prev?.extension_minutes,
-            started_at: newRun ? new Date().toISOString() : prev?.started_at,
-            id: newRun ? undefined : prev?.id,
+                  : base?.extension_minutes,
+            started_at: newRun ? new Date().toISOString() : base?.started_at,
+            id: newRun ? undefined : base?.id,
           };
         });
 
         if (status === "paused" && lastSeenStatus !== "paused") {
           freezeCountdownAtPauseRef.current(sessionRef.current);
         } else if (status === "running") {
-          if (lastSeenStatus !== "running" && lastSeenStatus !== "paused") {
+          const rem =
+            pausedRemainingSecRef.current ??
+            pausedRemainingAtPauseRef.current;
+          if (lastSeenStatus === "paused" || rem != null) {
+            if (rem != null && rem > 0 && countdownEndMsRef.current === null) {
+              countdownEndMsRef.current = Date.now() + rem * 1000;
+            }
+          } else if (lastSeenStatus !== "running") {
             pausedRemainingSecRef.current = null;
             pausedRemainingAtPauseRef.current = null;
             pauseRemainingSnapshotRef.current = null;
             setPausedRemainingSec(null);
-            countdownEndMsRef.current = null;
-          }
-          const rem =
-            pausedRemainingSecRef.current ??
-            pausedRemainingAtPauseRef.current;
-          if (rem != null && rem > 0 && countdownEndMsRef.current === null) {
-            countdownEndMsRef.current = Date.now() + rem * 1000;
-          } else if (countdownEndMsRef.current === null) {
-            const planned = Number(payload.set_duration_minutes);
-            const extra = Number(payload.extension_minutes);
-            const plannedSec =
-              Number.isFinite(planned) && planned > 0 ? Math.floor(planned * 60) : 0;
-            const extraSec =
-              Number.isFinite(extra) && extra > 0 ? Math.floor(extra * 60) : 0;
-            const totalSec = plannedSec + extraSec;
-            if (totalSec > 0) {
-              countdownEndMsRef.current = Date.now() + totalSec * 1000;
+            if (countdownEndMsRef.current === null) {
+              const planned = Number(payload.set_duration_minutes);
+              const extra = Number(payload.extension_minutes);
+              const plannedSec =
+                Number.isFinite(planned) && planned > 0 ? Math.floor(planned * 60) : 0;
+              const extraSec =
+                Number.isFinite(extra) && extra > 0 ? Math.floor(extra * 60) : 0;
+              const totalSec = plannedSec + extraSec;
+              if (totalSec > 0) {
+                countdownEndMsRef.current = Date.now() + totalSec * 1000;
+              }
             }
           }
         } else if (status === "stopped") {
@@ -1020,9 +1088,9 @@ export default function UserOverview({
     // Hardware first — same idea as Start (Firebase before slow API work).
     if (microcontrollerIdEarly != null) {
       if (action === "stop") {
-        void writeMachineSessionToRtdb(microcontrollerIdEarly, "stopped");
+        await writeMachineSessionToRtdb(microcontrollerIdEarly, "stopped");
       } else if (action === "pause" && sessionStatusBeforeControl !== "paused") {
-        void writeMachineSessionToRtdb(microcontrollerIdEarly, "paused", {
+        await writeMachineSessionToRtdb(microcontrollerIdEarly, "paused", {
           target_temperature: pauseTargetTemperature(overrides?.temperature),
         });
       }
@@ -1113,9 +1181,6 @@ export default function UserOverview({
             return;
           }
           countdownEndMsRef.current = Date.now() + newRemSec * 1000;
-          pausedRemainingSecRef.current = null;
-          setPausedRemainingSec(null);
-          pausedRemainingAtPauseRef.current = null;
           pauseRemainingSnapshotRef.current = null;
           startActiveDryingClock();
           body.drying_time_seconds = getUsedDryingSeconds();
@@ -1134,6 +1199,9 @@ export default function UserOverview({
           await writeMachineSessionToRtdb(microcontrollerId, "running", {
             fan_speed: SESSION_FAN_SPEED,
             target_temperature: pauseTtVal,
+            fish_type: fishType.trim() || undefined,
+            total_fish: Number.parseInt(String(totalFish).trim(), 10) || undefined,
+            set_duration_minutes: digitsToMinutes(String(durVal).trim()) ?? undefined,
           });
         } else if (cur === "running") {
           if (pauseRemainingSnapshotRef.current == null) {
@@ -1190,9 +1258,14 @@ export default function UserOverview({
 
       if (action === "start") {
         const startTt = Number.parseFloat(String(tempVal).trim());
+        const startDm = digitsToMinutes(String(durVal).trim());
+        const startTf = Number.parseInt(String(totalFish).trim(), 10);
         await writeMachineSessionToRtdb(microcontrollerId, "running", {
           fan_speed: SESSION_FAN_SPEED,
           target_temperature: Number.isFinite(startTt) ? startTt : 0,
+          fish_type: fishType.trim(),
+          total_fish: Number.isFinite(startTf) ? startTf : undefined,
+          set_duration_minutes: startDm ?? undefined,
         });
       }
 
@@ -1208,19 +1281,12 @@ export default function UserOverview({
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.success === false) {
         if (action === "pause" && sessionStatusBeforeControl === "running") {
-          const snap =
-            pauseRemainingSnapshotRef.current ??
-            pausedRemainingSecRef.current ??
-            pausedRemainingAtPauseRef.current;
-          if (snap != null && snap > 0) {
-            countdownEndMsRef.current = Date.now() + snap * 1000;
-            pausedRemainingSecRef.current = null;
-            setPausedRemainingSec(null);
-            pausedRemainingAtPauseRef.current = null;
-          }
+          // RTDB pause already applied — keep frozen remaining, do not restart the timer.
+          setUiSessionStatusOverride("paused");
+        } else {
+          setUiSessionStatusOverride(null);
         }
         pauseRemainingSnapshotRef.current = null;
-        setUiSessionStatusOverride(null);
         sessionSyncLockRef.current = false;
         sessionControlBusyRef.current = false;
         await fetchOverview();
@@ -1252,9 +1318,6 @@ export default function UserOverview({
           st === "running" &&
           sessionStatusBeforeControl === "paused"
         ) {
-          pausedRemainingSecRef.current = null;
-          setPausedRemainingSec(null);
-          pausedRemainingAtPauseRef.current = null;
           pauseRemainingSnapshotRef.current = null;
           startActiveDryingClock();
         } else if (
@@ -1293,6 +1356,13 @@ export default function UserOverview({
         await writeMachineSessionToRtdb(microcontrollerId, fwStatus, {
           fan_speed: SESSION_FAN_SPEED,
           target_temperature: tt,
+          fish_type: String(data.session.fish_type ?? fishType ?? "").trim() || undefined,
+          total_fish: Number.isFinite(Number(data.session.total_fish))
+            ? Number(data.session.total_fish)
+            : undefined,
+          set_duration_minutes: Number.isFinite(Number(data.session.set_duration_minutes))
+            ? Number(data.session.set_duration_minutes)
+            : undefined,
         });
       }
 
@@ -1484,9 +1554,12 @@ export default function UserOverview({
   const apiSessionStatus = String(session?.status ?? "").trim().toLowerCase();
   const uiSessionStatus = uiSessionStatusOverride ?? apiSessionStatus;
   const moistureSensorStatus = lookupComponentStatus(hardwareStatuses, "moisture_sensor");
-  const hasActiveSession = uiSessionStatus === "running" || uiSessionStatus === "paused";
-  const hasApiActiveSession = apiSessionStatus === "running" || apiSessionStatus === "paused";
-  const isSessionRunning = uiSessionStatus === "running";
+  const sessionLooksActive = uiSessionStatus === "running" || uiSessionStatus === "paused";
+  const hasActiveSession = Boolean(machineOnline) && sessionLooksActive;
+  const hasApiActiveSession =
+    Boolean(machineOnline) &&
+    (apiSessionStatus === "running" || apiSessionStatus === "paused");
+  const isSessionRunning = Boolean(machineOnline) && uiSessionStatus === "running";
   const parametersLocked = isSessionRunning;
 
   /**
@@ -1511,7 +1584,7 @@ export default function UserOverview({
   }, [isActive, uiSessionStatus]);
 
   useEffect(() => {
-    if (uiSessionStatus === "stopped" || (!hasActiveSession && !hasApiActiveSession)) {
+    if (uiSessionStatus === "stopped") {
       if (uiSessionStatusOverride !== "running") {
         countdownEndMsRef.current = null;
         pausedRemainingSecRef.current = null;
@@ -1522,10 +1595,16 @@ export default function UserOverview({
     }
     if (session?.id && timerSessionIdRef.current !== session.id) {
       timerSessionIdRef.current = session.id;
-      const savedSec = Number(session.drying_time_minutes ?? 0);
-      activeDryingMsRef.current =
-        Number.isFinite(savedSec) && savedSec > 0 ? savedSec * 1000 : 0;
-      runningSinceMsRef.current = null;
+      if (
+        countdownEndMsRef.current == null &&
+        pausedRemainingSecRef.current == null &&
+        pausedRemainingAtPauseRef.current == null
+      ) {
+        const savedSec = Number(session.drying_time_minutes ?? 0);
+        activeDryingMsRef.current =
+          Number.isFinite(savedSec) && savedSec > 0 ? savedSec * 1000 : 0;
+        runningSinceMsRef.current = null;
+      }
     }
     if (apiSessionStatus === "running" || uiSessionStatus === "running") {
       startActiveDryingClock();
@@ -1542,14 +1621,6 @@ export default function UserOverview({
         pausedRemainingSecRef.current ?? pausedRemainingAtPauseRef.current;
       if (pausedRem != null && pausedRem > 0) {
         countdownEndMsRef.current = Date.now() + pausedRem * 1000;
-      } else {
-        const dur = sessionDurationSeconds(session);
-        if (dur > 0) {
-          const started = parsePresenceMs(session?.started_at);
-          countdownEndMsRef.current = started
-            ? started + dur * 1000
-            : Date.now() + dur * 1000;
-        }
       }
     }
   }, [
@@ -1565,20 +1636,21 @@ export default function UserOverview({
   ]);
 
   const remainingSeconds: number | null = (() => {
-    if (!hasActiveSession && !hasApiActiveSession) return null;
+    if (!hasActiveSession && !hasApiActiveSession && uiSessionStatus !== "paused") return null;
     const frozenRem =
       pausedRemainingSec ??
       pausedRemainingSecRef.current ??
       pausedRemainingAtPauseRef.current;
     if (uiSessionStatus === "paused" || apiSessionStatus === "paused") {
-      if (frozenRem != null) return frozenRem;
       const fromDigits = durationDigitsToSeconds(String(duration).trim());
-      if (fromDigits != null) return fromDigits;
+      if (fromDigits != null && fromDigits > 0) return fromDigits;
+      if (frozenRem != null) return frozenRem;
       return null;
     }
     if (countdownEndMsRef.current != null) {
       return Math.max(0, Math.floor((countdownEndMsRef.current - tickNow) / 1000));
     }
+    if (frozenRem != null && frozenRem > 0) return frozenRem;
     const dur = sessionDurationSeconds(session);
     return dur > 0 ? dur : null;
   })();
@@ -1588,7 +1660,6 @@ export default function UserOverview({
     hasActiveSession && (needsExtension || remainingSeconds === 0);
 
   const recInFlightRef = useRef(false);
-  const lastRecFishRef = useRef("");
 
   useEffect(() => {
     if (!isActive) return;
@@ -1606,13 +1677,19 @@ export default function UserOverview({
     return () => clearTimeout(timeout);
   }, [fishType, isActive, fetchRecommendation]);
 
+  const pauseDurationBoundRef = useRef(false);
   useEffect(() => {
-    if (apiSessionStatus !== "paused") return;
+    if (apiSessionStatus !== "paused" && uiSessionStatus !== "paused") {
+      pauseDurationBoundRef.current = false;
+      return;
+    }
+    if (pauseDurationBoundRef.current) return;
     const rem = pausedRemainingSecRef.current ?? pausedRemainingSec;
     if (rem != null && rem > 0) {
+      pauseDurationBoundRef.current = true;
       setDuration(remainingSecToDurationDigits(rem));
     }
-  }, [apiSessionStatus, pausedRemainingSec]);
+  }, [apiSessionStatus, uiSessionStatus, pausedRemainingSec]);
 
   useEffect(() => {
     if (apiSessionStatus !== "running") {
@@ -1785,13 +1862,11 @@ export default function UserOverview({
         timerLabel={timerLabel}
         machineSelector={
           <MachineDropdown
+            active={isActive}
             machines={userMachines}
             selectedId={selectedMachineId}
             loading={machinesLoading}
             onSelect={selectMachine}
-            onMachineChange={(machineId) => {
-              void fetchOverview(machineId);
-            }}
           />
         }
       />

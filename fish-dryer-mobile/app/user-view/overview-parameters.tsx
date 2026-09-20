@@ -107,7 +107,7 @@ export default function OverviewParameters({
         )}
         {isPaused && (
           <Text style={styles.lockNotice}>
-            Drying is paused. Tap Resume to continue, or Stop to end the session.
+            Drying is paused. Edit parameters here, then tap Resume or Stop.
           </Text>
         )}
 

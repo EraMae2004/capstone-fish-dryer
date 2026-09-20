@@ -282,6 +282,8 @@ export function useStableMachineOnline(
   const offlineStreakRef = useRef(0);
   const lastTickRef = useRef(-1);
   const boundMachineRef = useRef<number | null | undefined>(undefined);
+  /** Skip copying the previous machine's timestamp on the switch render. */
+  const ignoreStaleReceiveRef = useRef(false);
   const now = Date.now();
 
   if (machineId !== undefined && boundMachineRef.current !== machineId) {
@@ -289,11 +291,21 @@ export function useStableMachineOnline(
     lastReceiveRef.current = null;
     onlineRef.current = false;
     offlineStreakRef.current = 0;
-    lastTickRef.current = -1;
+    lastTickRef.current = presenceTick;
+    ignoreStaleReceiveRef.current = true;
   }
 
-  if (lastReceiveMs != null && Number.isFinite(lastReceiveMs)) {
+  if (ignoreStaleReceiveRef.current) {
+    if (lastReceiveMs == null) {
+      ignoreStaleReceiveRef.current = false;
+      lastReceiveRef.current = null;
+    }
+  } else if (lastReceiveMs != null && Number.isFinite(lastReceiveMs)) {
     lastReceiveRef.current = lastReceiveMs;
+  } else if (lastReceiveMs == null) {
+    lastReceiveRef.current = null;
+    onlineRef.current = false;
+    offlineStreakRef.current = 0;
   }
 
   const wouldBeOnline = isRtdbMicrocontrollerLiveStable(
