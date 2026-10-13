@@ -5,7 +5,6 @@ import {
   StyleSheet,
   useWindowDimensions,
   TouchableOpacity,
-  InteractionManager,
 } from "react-native";
 import { FontAwesome } from "@expo/vector-icons";
 import { LineChart } from "react-native-gifted-charts";
@@ -27,7 +26,7 @@ function parseSessionDate(raw: unknown): Date | null {
 }
 
 function sessionDurationMinutes(row: any): number {
-  const sec = Number(row?.drying_time_seconds ?? row?.drying_time_minutes ?? 0);
+  const sec = Number(row?.drying_time_seconds);
   return Number.isFinite(sec) && sec > 0 ? sec / 60 : 0;
 }
 
@@ -51,10 +50,8 @@ export default function UserGraph({
 
   useEffect(() => {
     if (!active) return;
-    const task = InteractionManager.runAfterInteractions(() => {
-      setPaintChart(true);
-    });
-    return () => task.cancel();
+    const id = requestAnimationFrame(() => setPaintChart(true));
+    return () => cancelAnimationFrame(id);
   }, [active]);
 
   const activeLabel =
@@ -204,7 +201,7 @@ export default function UserGraph({
           </View>
           <View style={styles.legendRow}>
             <View style={[styles.legendDot, { backgroundColor: "#16a34a" }]} />
-            <Text style={styles.legendItem}>Duration</Text>
+            <Text style={styles.legendItem}>Time used (min)</Text>
           </View>
         </View>
 

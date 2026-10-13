@@ -15,7 +15,7 @@ import OverviewParameters from "./overview-parameters";
 
 const BATCH_PAGE_WIDTH = Dimensions.get("window").width - 60;
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { API_BASE_URL } from "@/config/api";
+import { getApiBaseUrl } from "@/config/api";
 import { useRouter, useLocalSearchParams} from "expo-router";
 
 /* TYPES */
@@ -285,7 +285,7 @@ export default function OverviewBatch({ session }: any) {
 
     try {
 
-      const res = await fetch(`${API_BASE_URL}/ai/analyze`, {
+      const res = await fetch(`${getApiBaseUrl()}/ai/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -334,7 +334,7 @@ export default function OverviewBatch({ session }: any) {
 
     try {
 
-      await fetch("http://localhost:8000/api/apply-recommendation", {
+      await fetch(`${getApiBaseUrl()}/apply-recommendation`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -12,10 +12,9 @@ import {
 } from 'react-native';
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { API_BASE_URL } from '@/config/api';
+import { getApiBaseUrl } from '@/config/api';
 import { boxShadowStyle } from '@/lib/box-shadow';
-
-const BASE_URL = "https://spinproof-brineless-marleen.ngrok-free.dev";
+import { ensureApiBaseUrl } from '@/lib/lan-api-discovery';
 
 export default function ForgotPassword() {
   const router = useRouter();
@@ -26,7 +25,8 @@ export default function ForgotPassword() {
 
   const handleVerify = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/mobile/verify-identity`, {
+      await ensureApiBaseUrl();
+      const response = await fetch(`${getApiBaseUrl()}/mobile/verify-identity`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"

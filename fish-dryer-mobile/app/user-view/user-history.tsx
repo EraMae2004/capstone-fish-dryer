@@ -10,7 +10,7 @@ import {
   Alert
 } from 'react-native';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_BASE_URL } from "@/config/api";
+import { getApiBaseUrl } from "@/config/api";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import UserGraph, { type HistoryRange } from './user-graph';
 import { userTypography } from "@/lib/user-typography";
@@ -25,14 +25,11 @@ function fmtPct(value: unknown): string {
   return Number.isFinite(n) ? `${n.toFixed(1)}` : "--";
 }
 
+/** Actual running time only (pause excluded). Never the planned or extended duration. */
 function fmtSessionDryTime(row: any): string {
   const sec = Number(row?.drying_time_seconds);
   if (Number.isFinite(sec) && sec >= 0) {
     return formatSecondsAsHMS(sec);
-  }
-  const mins = Number(row?.drying_time_minutes ?? row?.duration_minutes);
-  if (Number.isFinite(mins) && mins > 0) {
-    return formatSecondsAsHMS(mins * 60);
   }
   return "00:00:00";
 }
@@ -135,14 +132,14 @@ function UserHistory({ active = true }: { active?: boolean }) {
     return next;
   };
 
-  const deleteSessionsOnServer = async (ids: number[]) => {
-    const res = await fetch(`${API_BASE_URL}/drying-sessions/batch-delete`, {
+  const deleteSessionsOnServer = async (ids: number[], codes: string[]) => {
+    const res = await fetch(`${getApiBaseUrl()}/drying-sessions/batch-delete`, {
       method: 'POST',
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ ids }),
+      body: JSON.stringify({ ids, session_codes: codes }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data?.success === false) {
@@ -161,7 +158,7 @@ function UserHistory({ active = true }: { active?: boolean }) {
       if (machineId != null && machineId > 0) {
         params.set('machine_id', String(machineId));
       }
-      const res = await fetch(`${API_BASE_URL}/drying-sessions?${params.toString()}`);
+      const res = await fetch(`${getApiBaseUrl()}/drying-sessions?${params.toString()}`);
       const data = await res.json();
       if (seq !== fetchSeqRef.current) return;
 
@@ -208,11 +205,29 @@ function UserHistory({ active = true }: { active?: boolean }) {
     resetPage();
   }, [range, selectedMachineId, resetPage]);
 
+  const pageIds = pagedSessions
+    .map((item) => Number(item.id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+  const allPageSelected =
+    pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id));
+
   const toggleSelect = (id: number) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectPage = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (pageIds.length > 0 && pageIds.every((id) => next.has(id))) {
+        pageIds.forEach((id) => next.delete(id));
+      } else {
+        pageIds.forEach((id) => next.add(id));
+      }
       return next;
     });
   };
@@ -224,7 +239,7 @@ function UserHistory({ active = true }: { active?: boolean }) {
     }
     void (async () => {
       try {
-        const res = await fetch(`${API_BASE_URL}/drying-sessions/${id}`);
+        const res = await fetch(`${getApiBaseUrl()}/drying-sessions/${id}`);
         const data = await res.json();
         const detail = data?.data ?? data?.session ?? data;
         if (!detail || typeof detail !== 'object') return;
@@ -280,26 +295,42 @@ function UserHistory({ active = true }: { active?: boolean }) {
           text: 'Delete',
           style: 'destructive',
           onPress: () => {
-            setTimeout(() => {
-              removeSessionsLocally(ids);
-              void (async () => {
+            const codes = sessionsRef.current
+              .filter((row) => ids.includes(Number(row?.id)))
+              .map((row) => String(row?.session_code ?? "").trim())
+              .filter((code) => code.length > 0);
+            void (async () => {
+              try {
+                await deleteSessionsOnServer(ids, codes);
+              } catch (error) {
+                console.log(error);
                 try {
-                  await deleteSessionsOnServer(ids);
-                } catch (error) {
-                  console.log(error);
-                  try {
-                    await deleteSessionsOnServer(ids);
-                  } catch (retryError) {
-                    console.log(retryError);
-                  }
+                  await deleteSessionsOnServer(ids, codes);
+                } catch (retryError) {
+                  console.log(retryError);
+                  Alert.alert("Delete failed", "Those sessions are still saved. Try again.");
+                  return;
                 }
-              })();
-            }, 0);
+              }
+              removeSessionsLocally(ids);
+              await fetchHistory(range, true);
+            })();
           },
         },
       ]
     );
   };
+
+  const detailChecks = Array.isArray(selectedSession?.moisture_checks)
+    ? selectedSession.moisture_checks
+    : [];
+  const detailMoistureAvg =
+    detailChecks.length > 0
+      ? detailChecks.reduce(
+          (sum: number, check: { moisture?: unknown }) => sum + Number(check?.moisture ?? 0),
+          0
+        ) / detailChecks.length
+      : null;
 
   return (
     <View style={styles.screen}>
@@ -334,10 +365,22 @@ function UserHistory({ active = true }: { active?: boolean }) {
         ) : null}
 
         <View style={styles.tableHeader}>
-          <Text style={styles.headerText}> </Text>
+          <TouchableOpacity
+            onPress={toggleSelectPage}
+            style={styles.checkboxTouch}
+            disabled={pageIds.length === 0}
+            accessibilityLabel="Select all sessions on this page"
+          >
+            <FontAwesome
+              name={allPageSelected ? 'check-square' : 'square-o'}
+              size={20}
+              color="#1f3b57"
+            />
+          </TouchableOpacity>
           <Text style={styles.headerText}>ID</Text>
           <Text style={styles.headerText}>Date</Text>
           <Text style={styles.headerText}>Fish</Text>
+          <Text style={styles.headerText}>Time</Text>
           <Text style={styles.headerText}>Action</Text>
         </View>
 
@@ -357,6 +400,7 @@ function UserHistory({ active = true }: { active?: boolean }) {
               <Text style={styles.cell}>#{item.id}</Text>
               <Text style={styles.cell}>{String(item.date).replace('T', ' ').slice(0, 16)}</Text>
               <Text style={styles.cell}>{item.fish_type}</Text>
+              <Text style={styles.timeCell}>{fmtSessionDryTime(item)}</Text>
 
               <View style={styles.actions}>
                 <TouchableOpacity onPress={() => handleViewDetails(id)}>
@@ -397,7 +441,7 @@ function UserHistory({ active = true }: { active?: boolean }) {
               <Text style={styles.detailRow}>No. of Fish: {selectedSession?.total_fish ?? '--'}</Text>
               <Text style={styles.detailRow}>Target Temp: {selectedSession?.target_temperature ?? '--'} °C</Text>
               <Text style={styles.detailRow}>
-                Drying time: {fmtSessionDryTime(selectedSession)}
+                Total drying time: {fmtSessionDryTime(selectedSession)}
               </Text>
               <Text style={styles.detailRow}>
                 Temperature: {selectedSession?.temperature != null ? `${selectedSession.temperature} °C` : '--'}
@@ -419,6 +463,9 @@ function UserHistory({ active = true }: { active?: boolean }) {
                         : `Check ${index + 1}: ${fmtPct(check.moisture)}%`}
                     </Text>
                   ))}
+                  <Text style={styles.moistureSummaryRow}>
+                    Average: {fmtPct(detailMoistureAvg)}%
+                  </Text>
                   <Text style={styles.moistureSummaryRow}>
                     Last: {fmtPct(selectedSession?.moisture)}%
                   </Text>
@@ -495,6 +542,11 @@ const styles = StyleSheet.create({
 
   cell: {
     ...userTypography.tableCell,
+  },
+
+  timeCell: {
+    ...userTypography.tableCell,
+    minWidth: 72,
   },
 
   loader: {

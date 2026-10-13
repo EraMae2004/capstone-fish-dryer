@@ -29,6 +29,10 @@
 #include <Wire.h>
 #include <Keypad.h>
 #include <string.h>
+#if defined(ESP32)
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#endif
 
 #ifndef ENABLE_LOCAL_HMI
 #define ENABLE_LOCAL_HMI 1
@@ -65,11 +69,29 @@ void hmiOnDurationComplete();
 bool hmiSessionIsRunning();
 bool hmiSessionIsPaused();
 float hmiLiveTemperatureC();
+float hmiLiveHumidity();
+void hmiFormatDryingProblem(char* out, size_t outSz);
+bool hmiHasDryingProblem();
+bool hmiDht22NotWorking();
 bool hmiDoorIsOpen();
 bool hmiLocalDurationExpired();
 long hmiRemainingDurationSec();
 
 namespace LocalHmi {
+
+#if defined(ESP32)
+static SemaphoreHandle_t gUiMutex = nullptr;
+static bool uiLock() {
+  if (!gUiMutex) return false;
+  return xSemaphoreTakeRecursive(gUiMutex, portMAX_DELAY) == pdTRUE;
+}
+static void uiUnlock(bool locked) {
+  if (locked && gUiMutex) xSemaphoreGiveRecursive(gUiMutex);
+}
+#else
+static bool uiLock() { return false; }
+static void uiUnlock(bool) {}
+#endif
 
 class EspLcdI2c {
  public:
@@ -90,35 +112,69 @@ class EspLcdI2c {
     write4(0x03); delay(5);
     write4(0x03); delay(5);
     write4(0x03); delay(1);
-    write4(0x02);
-    cmd(0x28); cmd(0x0C); cmd(0x06);
-    cmd(0x01); delay(3);
+    write4(0x02); delay(5);
+    cmd(0x28); delay(1);
+    cmd(0x0C);
+    cmd(0x06);
+    cmd(0x01); delay(5);
     bl = 0x08;
     exp(bl);
     ok = true;
     return true;
   }
-  void clear() { cmd(0x01); delay(2); }
+  void clear() {
+    const bool locked = uiLock();
+    needRecover = true;
+    consumeRecover();
+    cmd(0x01);
+    delay(5);
+    uiUnlock(locked);
+  }
   void setCursor(uint8_t c, uint8_t r) {
     static const uint8_t off[] = {0x00, 0x40};
     cmd(0x80 | (off[r > 1 ? 1 : r] + c));
   }
   void printPad16(const char* s) {
-    char b[17];
-    snprintf(b, sizeof(b), "%-16.16s", s);
-    for (int i = 0; b[i]; i++) data((uint8_t)b[i]);
+    if (!s) s = "";
+    for (uint8_t i = 0; i < 16; i++) {
+      unsigned char c = (unsigned char)s[i];
+      if (c == 0) {
+        for (; i < 16; i++) data(' ');
+        return;
+      }
+      if (c < 32 || c > 126) c = ' ';
+      data(c);
+    }
   }
+  bool consumeRecover() {
+    if (!needRecover) return false;
+    needRecover = false;
+    // Re-enter 4-bit mode without clearing the glass. One dropped nibble
+    // otherwise turns every later character into a random glyph.
+    write4(0x03); delay(5);
+    write4(0x03); delay(5);
+    write4(0x03); delay(1);
+    write4(0x02); delay(2);
+    cmd(0x28); delay(1);
+    cmd(0x0C);
+    cmd(0x06);
+    return true;
+  }
+  bool needRecover = false;
   void writeChar(char c) { data((uint8_t)c); }
  private:
   void exp(uint8_t v) {
     Wire.beginTransmission(addr);
     Wire.write(v | bl);
-    Wire.endTransmission();
+    if (Wire.endTransmission() != 0) needRecover = true;
   }
   void pulse(uint8_t d) {
-    exp(d | 0x04);
-    delayMicroseconds(1);
-    exp(d & ~0x04);
+    const uint8_t bits = d & ~0x04;
+    exp(bits);
+    delayMicroseconds(40);
+    exp(bits | 0x04);
+    delayMicroseconds(20);
+    exp(bits);
     delayMicroseconds(50);
   }
   void write4(uint8_t v) { pulse((v & 0x0F) << 4); }
@@ -138,6 +194,7 @@ enum class Screen : uint8_t {
   ContinueDoor,
   Running,
   StopOrPause,  // STOP left / PAUSE right — Enter=Pause, Stop=Stop+save
+  ResumePrompt,  // power returned — GO continues, STOP saves
   Message,
   LcdSelfTest,
   KeypadSelfTest,
@@ -187,7 +244,7 @@ static unsigned long gLastKeypressMs = 0;
 
 static uint8_t gDoorCountLeft = HMI_DOOR_COUNTDOWN_S;
 static unsigned long gDoorTickMs = 0;
-static uint8_t gRunPage = 0;  // 0 = FISH+Qty, 1 = Temp+Time
+static uint8_t gRunPage = 0;  // 0 Fish+Qty, 1 Temp+Left, 2 Now+Humidity, 3 Problem, 4 DHT22 warning
 static unsigned long gRunPageMs = 0;
 static unsigned long gRunTickMs = 0;  // 1 Hz countdown refresh on Temp/Left page
 
@@ -203,7 +260,12 @@ static uint16_t gKeypadTestMask = 0;
 static uint8_t gKeypadTestLastCount = 0;
 static Screen gKeypadTestReturn = Screen::Start;
 static bool gKeypadTestNoTimeout = false;  // wait until all 16 keys
+static bool gLcdTestHold = false;          // LCD message until cloud Done
 static bool gUiSelfTestActive = false;
+static bool gTestAllUi = false;
+static bool gOutputTestBanner = false;
+static char gOutputTestLine0[17] = "";
+static char gOutputTestLine1[17] = "";
 static char gLastEchoKey = 0;
 
 static const char* ALPHA_MAP[10] = {
@@ -233,9 +295,14 @@ static long durationDigitsToSeconds(const String& digits) {
 
 static void lcdLine(uint8_t row, const char* text) {
   if (!gLcdOk) return;
-  lcd.setCursor(0, row);
-  delayMicroseconds(80);
-  lcd.printPad16(text);
+  const bool locked = uiLock();
+  if (lcd.consumeRecover()) {
+    // I2C missed a nibble. 4-bit mode is restored, then this line is rewritten.
+  }
+  lcd.setCursor(0, row > 1 ? 1 : row);
+  delayMicroseconds(50);
+  lcd.printPad16(text ? text : "");
+  uiUnlock(locked);
 }
 
 static void lcdCentered(uint8_t row, const char* text) {
@@ -377,18 +444,45 @@ static void formatRemainingHms(long remSec, char* out, size_t outSz) {
   snprintf(out, outSz, "%02ld:%02ld:%02ld", hh, mm, ss);
 }
 
+static void formatSensorLine(char* out, size_t outSz, const char* label, float value, const char* unit) {
+  if (isnan(value)) {
+    snprintf(out, outSz, "%s:--", label);
+    return;
+  }
+  snprintf(out, outSz, "%s:%.1f%s", label, value, unit);
+}
+
 static void renderRunning() {
   if (!gLcdOk) return;
+  static uint8_t syncedPage = 255;
+  if (syncedPage != gRunPage) {
+    syncedPage = gRunPage;
+    lcd.needRecover = true;
+  }
   char a[17], b[17];
   if (gRunPage == 0) {
-    snprintf(a, sizeof(a), "FISH:%.11s", gParams[0].c_str());
+    snprintf(a, sizeof(a), "Fish:%.11s", gParams[0].c_str());
     snprintf(b, sizeof(b), "Qty:%s", gParams[1].c_str());
-  } else {
+  } else if (gRunPage == 1) {
     snprintf(a, sizeof(a), "Temp:%sC", gParams[2].c_str());
     char hms[9];
-    // Countdown remaining time (same idea as the app Overview timer).
     formatRemainingHms(hmiRemainingDurationSec(), hms, sizeof(hms));
     snprintf(b, sizeof(b), "Left:%s", hms);
+  } else if (gRunPage == 2) {
+    formatSensorLine(a, sizeof(a), "Current", hmiLiveTemperatureC(), "C");
+    formatSensorLine(b, sizeof(b), "Humidity", hmiLiveHumidity(), "%");
+  } else if (gRunPage == 3 && hmiHasDryingProblem()) {
+    snprintf(a, sizeof(a), "Problem:");
+    char prob[17];
+    hmiFormatDryingProblem(prob, sizeof(prob));
+    snprintf(b, sizeof(b), "%.16s", prob);
+  } else if (gRunPage == 4 && hmiDht22NotWorking()) {
+    snprintf(a, sizeof(a), "Monitor the");
+    snprintf(b, sizeof(b), "fish inside");
+  } else {
+    gRunPage = 0;
+    snprintf(a, sizeof(a), "Fish:%.11s", gParams[0].c_str());
+    snprintf(b, sizeof(b), "Qty:%s", gParams[1].c_str());
   }
   lcdLine(0, a);
   lcdLine(1, b);
@@ -401,11 +495,33 @@ static void renderStopOrPause() {
   lcdLine(1, "NO(S)      YES(E)");
 }
 
+static void renderResumePrompt() {
+  if (!gLcdOk) return;
+  char hms[9];
+  formatRemainingHms(hmiRemainingDurationSec(), hms, sizeof(hms));
+  char top[17];
+  const char* fish = gParams[0].length() ? gParams[0].c_str() : "PAUSED";
+  snprintf(top, sizeof(top), "%-7.7s %s", fish, hms);
+  lcdLine(0, top);
+  lcdLine(1, "GO(E)     STOP(S)");
+}
+
 static void beginRunningUi() {
   gScreen = Screen::Running;
   gRunPage = 0;
   gRunPageMs = millis();
+  gRunTickMs = millis();
+  if (!gLcdOk) return;
+  lcd.clear();
   renderRunning();
+  Serial.println("[hmi] LCD drying details");
+}
+
+/** Idle / param-entry screens that must yield once a session is actually running. */
+static bool screenYieldsToDryingDetails() {
+  return gScreen == Screen::Start || gScreen == Screen::EditParams ||
+         gScreen == Screen::ConfirmStart || gScreen == Screen::DoorWarn ||
+         gScreen == Screen::ContinueDoor || gScreen == Screen::Message;
 }
 
 static void enterStopOrPausePrompt() {
@@ -518,11 +634,20 @@ static void redraw() {
   else if (gScreen == Screen::ContinueDoor) renderContinueDoor();
   else if (gScreen == Screen::Running) renderRunning();
   else if (gScreen == Screen::StopOrPause) renderStopOrPause();
+  else if (gScreen == Screen::ResumePrompt) renderResumePrompt();
   else if (gScreen == Screen::LcdSelfTest) renderLcdSelfTest();
   else if (gScreen == Screen::KeypadSelfTest) renderKeypadSelfTest();
 }
 
+/** Parameter entry only — sensor scans stay off so a key paints on this loop. */
+inline bool isTypingParams() {
+  if (gUiSelfTestActive) return false;
+  return gReady && gScreen == Screen::EditParams;
+}
+
 inline bool isEnteringParams() {
+  // A hardware test must leave the parameter screen. Quiet mode would block it.
+  if (gUiSelfTestActive) return false;
   // Quiet while typing OR on STOP|PAUSE / short messages — keeps keys snappy.
   // Running sessions still heartbeats so the app stays Online.
   return gReady && (gScreen == Screen::EditParams || gScreen == Screen::ConfirmStart ||
@@ -530,12 +655,20 @@ inline bool isEnteringParams() {
                     gScreen == Screen::StopOrPause || gScreen == Screen::Message);
 }
 
+inline bool blockNetworkForKey() {
+  // Hardware tests must still see RTDB (Done / heartbeat). Do not freeze HTTPS.
+  if (gUiSelfTestActive) return false;
+  return gLastKeypressMs != 0 && (millis() - gLastKeypressMs) < 1200UL;
+}
+
 inline bool wantsNetworkQuiet() {
   // Also give the keypad a short priority window right after any press so
   // the very first Enter / typed character is not lost to HTTPS polling.
-  const bool recentKeyActivity =
-      gLastKeypressMs != 0 && (millis() - gLastKeypressMs) < 1200UL;
-  return isEnteringParams() || recentKeyActivity;
+  return isEnteringParams() || blockNetworkForKey();
+}
+
+inline bool keySettledForSync() {
+  return gLastKeypressMs == 0 || (millis() - gLastKeypressMs) >= 350UL;
 }
 
 /** History upload is OK on Message/Start; never during typing or STOP|PAUSE. */
@@ -562,12 +695,25 @@ inline String keypadSelfTestKeysCsv() {
   return out;
 }
 
+static void renderTestAllUi() {
+  if (!gLcdOk) return;
+  lcdLine(0, "LCD IS WORKING!");
+  char b[17];
+  snprintf(b, sizeof(b), "KEY %u/16", (unsigned)keypadTestPressedCount());
+  lcdLine(1, b);
+}
+
 inline void endUiSelfTest() {
-  if (!gUiSelfTestActive) return;
+  if (!gUiSelfTestActive && !gOutputTestBanner) return;
   gUiSelfTestActive = false;
+  gOutputTestBanner = false;
+  gOutputTestLine0[0] = 0;
+  gOutputTestLine1[0] = 0;
+  gTestAllUi = false;
   gLcdTestUntilMs = 0;
   gKeypadTestUntilMs = 0;
   gKeypadTestNoTimeout = false;
+  gLcdTestHold = false;
   keypad.setDebounceTime(50);
   const Screen ret =
       (gScreen == Screen::LcdSelfTest)     ? gLcdTestReturn
@@ -578,8 +724,8 @@ inline void endUiSelfTest() {
   redraw();
 }
 
-/** Show "LCD IS WORKING!" briefly (no countdown), then optional keypad phase. */
-inline void startLcdSelfTest(unsigned long durationMs = 2000UL) {
+/** Show "LCD IS WORKING!" until Done (endUiSelfTest). */
+inline void startLcdSelfTest(unsigned long /*durationMs*/ = 0) {
   if (!gReady) return;
   if (gScreen != Screen::LcdSelfTest && gScreen != Screen::KeypadSelfTest) {
     gLcdTestReturn = gScreen;
@@ -587,8 +733,9 @@ inline void startLcdSelfTest(unsigned long durationMs = 2000UL) {
   gUiSelfTestActive = true;
   gKeypadTestNoTimeout = false;
   gKeypadTestUntilMs = 0;
-  gLcdTestUntilMs = millis() + (durationMs < 500UL ? 2000UL : durationMs);
-  gLcdTestCountLeft = 0;  // no countdown display
+  gLcdTestHold = true;
+  gLcdTestUntilMs = 0;
+  gLcdTestCountLeft = 0;
   gLcdTestTickMs = millis();
   gScreen = Screen::LcdSelfTest;
   if (gLcdOk) {
@@ -597,14 +744,11 @@ inline void startLcdSelfTest(unsigned long durationMs = 2000UL) {
     delay(20);
     renderLcdSelfTest();
   }
-  Serial.println("[hmi] LCD self-test started (no countdown)");
+  Serial.println("[hmi] LCD self-test — stays until Done");
 }
 
-/**
- * Prompt user to press every keypad button.
- * durationMs == 0 → no timeout; stays until all 16 keys OR endUiSelfTest().
- */
-inline void startKeypadSelfTest(unsigned long durationMs = 0) {
+/** Keypad test until Done (endUiSelfTest). */
+inline void startKeypadSelfTest(unsigned long /*durationMs*/ = 0) {
   if (!gReady) return;
   if (gScreen != Screen::LcdSelfTest && gScreen != Screen::KeypadSelfTest) {
     gKeypadTestReturn = gScreen;
@@ -613,8 +757,8 @@ inline void startKeypadSelfTest(unsigned long durationMs = 0) {
   gKeypadTestMask = 0;
   gKeypadTestLastCount = 0;
   gLastEchoKey = 0;
-  gKeypadTestNoTimeout = (durationMs == 0);
-  gKeypadTestUntilMs = gKeypadTestNoTimeout ? 0 : (millis() + durationMs);
+  gKeypadTestNoTimeout = true;
+  gKeypadTestUntilMs = 0;
   gScreen = Screen::KeypadSelfTest;
   // Faster debounce during test — 50ms was dropping quick taps.
   keypad.setDebounceTime(20);
@@ -632,21 +776,49 @@ inline void startKeypadSelfTest(unsigned long durationMs = 0) {
 /** Re-paint current self-test screen (call from main loop so message stays visible). */
 inline void paintUiSelfTest() {
   if (!gUiSelfTestActive || !gLcdOk) return;
+  if (gOutputTestBanner) {
+    lcdCentered(0, gOutputTestLine0);
+    lcdCentered(1, gOutputTestLine1);
+    return;
+  }
+  if (gTestAllUi) {
+    renderTestAllUi();
+    return;
+  }
   if (gScreen == Screen::LcdSelfTest) renderLcdSelfTest();
   else if (gScreen == Screen::KeypadSelfTest) renderKeypadSelfTest();
+}
+
+/** Leave Fish Name / parameter entry so a hardware test can own the LCD. */
+inline void showHardwareTestBanner(const char* line0, const char* line1) {
+  if (!gReady) return;
+  if (gScreen != Screen::LcdSelfTest && gScreen != Screen::KeypadSelfTest) {
+    gLcdTestReturn = gScreen;
+  }
+  gUiSelfTestActive = true;
+  gTestAllUi = false;
+  gKeypadTestNoTimeout = false;
+  gOutputTestBanner = true;
+  snprintf(gOutputTestLine0, sizeof(gOutputTestLine0), "%s", line0 ? line0 : "");
+  snprintf(gOutputTestLine1, sizeof(gOutputTestLine1), "%s", line1 ? line1 : "");
+  gLcdTestHold = true;
+  gScreen = Screen::LcdSelfTest;
+  if (gLcdOk) {
+    lcd.clear();
+    paintUiSelfTest();
+  }
 }
 
 static void echoPressedOnLcd(char key) {
   gLastEchoKey = key;
   if (!gLcdOk) return;
-  if (gScreen == Screen::KeypadSelfTest) {
-    renderKeypadSelfTest();
+  if (gTestAllUi) {
+    renderTestAllUi();
     return;
   }
-  if (gScreen != Screen::EditParams) return;
-  lcd.setCursor(15, 1);
-  delayMicroseconds(80);
-  lcd.writeChar(key);
+  if (gScreen == Screen::KeypadSelfTest) {
+    renderKeypadSelfTest();
+  }
 }
 
 static bool registerKeypadTestKey(char key) {
@@ -667,75 +839,141 @@ inline bool keypadSelfTestWaiting() {
 }
 
 inline bool keypadSelfTestActiveScreen() {
-  return gScreen == Screen::KeypadSelfTest ||
-         (gScreen == Screen::LcdSelfTest && gKeypadTestNoTimeout);
+  return gScreen == Screen::KeypadSelfTest || gTestAllUi;
 }
 
 /**
- * Drain keypad.
- * During self-test: level-based (PRESSED/HOLD/RELEASED) so a missed PRESSED edge
- * still counts — fixes "have to press another key to register the previous one".
- * Never call getKeys()+getKey() together (getKey consumes the same edge).
+ * Direct matrix read. The Keypad library only reports a key on a later scan,
+ * so the LCD character showed up on the next click. One stable press = one character now.
  */
-inline void pollKeypadFast() {
-  if (!gReady) return;
+static uint16_t gKeyStableMask = 0;
+static volatile uint8_t gKeyQ[16];
+static volatile uint8_t gKeyQHead = 0;
+static volatile uint8_t gKeyQTail = 0;
+static TaskHandle_t gKeyTask = nullptr;
+static uint16_t sampleKeyMask();
 
-#ifndef LIST_MAX
-#define LIST_MAX 10
-#endif
+static void keypadEnqueue(char ch) {
+  const uint8_t next = (uint8_t)((gKeyQHead + 1u) % 16u);
+  if (next == gKeyQTail) return;
+  gKeyQ[gKeyQHead] = (uint8_t)ch;
+  gKeyQHead = next;
+}
 
-  if (keypadSelfTestActiveScreen()) {
-    (void)keypad.getKeys();
-    for (int i = 0; i < LIST_MAX; i++) {
-      const char ch = keypad.key[i].kchar;
-      if (ch == NO_KEY) continue;
-      const KeyState st = keypad.key[i].kstate;
-      if (st == PRESSED ||
-          (st == RELEASED && keypad.key[i].stateChanged)) {
-        registerKeypadTestKey(ch);
-        echoPressedOnLcd(ch);
-      }
-    }
+static void dispatchKeyChar(char ch);
+/** Letters and digits paint here, on the scan task, so HTTPS cannot delay the LCD. */
+static bool keyPaintsImmediately(char ch) {
+  if (gUiSelfTestActive && gScreen != Screen::KeypadSelfTest && !gTestAllUi) return false;
+  if (gScreen == Screen::KeypadSelfTest || gTestAllUi) return true;
+  if (gScreen == Screen::LcdSelfTest && gKeypadTestNoTimeout) return true;
+  if (gScreen != Screen::EditParams) return false;
+  if (ch == '#' || ch == 'D') return false;
+  return true;
+}
+
+static void acceptKey(char ch) {
+  if (!keyPaintsImmediately(ch)) {
+    keypadEnqueue(ch);
     return;
   }
+  const bool locked = uiLock();
+  dispatchKeyChar(ch);
+  uiUnlock(locked);
+}
 
-  for (uint8_t n = 0; n < 4; n++) {
-    (void)keypad.getKeys();
-    bool got = false;
-    for (int i = 0; i < LIST_MAX; i++) {
-      const char ch = keypad.key[i].kchar;
-      if (ch == NO_KEY) continue;
-      const KeyState st = keypad.key[i].kstate;
-      // PRESSED is ideal; RELEASED catches keys whose press edge was lost
-      // during a blocking HTTPS GET (app Start poll).
-      if (keypad.key[i].stateChanged && (st == PRESSED || st == RELEASED)) {
-        static char lastCh = 0;
-        static unsigned long lastMs = 0;
-        if (st == RELEASED && lastCh == ch && (millis() - lastMs) < 450UL) {
-          continue;
+static void keypadSampleTask(void*) {
+  uint16_t stable = 0;
+  for (;;) {
+    uint16_t raw = sampleKeyMask();
+    if (raw != stable) {
+      delayMicroseconds(150);
+      if (sampleKeyMask() == raw) {
+        const uint16_t rose = (uint16_t)(raw & ~stable);
+        stable = raw;
+        for (uint8_t i = 0; i < 16; i++) {
+          if (rose & (uint16_t)(1u << i)) acceptKey(KEYPAD_TEST_KEYS[i]);
         }
-        lastCh = ch;
-        lastMs = millis();
-        Serial.printf("[hmi] key=%c\n", ch);
-        echoPressedOnLcd(ch);
-        handleKey(ch);
-        got = true;
       }
+    } else {
+      stable = raw;
     }
-    if (!got) break;
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
 
-/** LCD flash then keypad with NO timeout — user finishes all buttons. */
-inline void startCombinedUiSelfTest(unsigned long /*totalMs*/ = 0) {
-  // Brief LCD confirmation, then keypad until all 16 keys (or cloud clears test).
-  startLcdSelfTest(1500UL);
+static uint16_t sampleKeyMask() {
+  uint16_t mask = 0;
+  for (byte r = 0; r < ROWS; r++) pinMode(rowPins[r], INPUT_PULLUP);
+  for (byte c = 0; c < COLS; c++) {
+    pinMode(colPins[c], OUTPUT);
+    digitalWrite(colPins[c], LOW);
+    delayMicroseconds(15);
+    for (byte r = 0; r < ROWS; r++) {
+      if (digitalRead(rowPins[r]) == LOW) {
+        const int idx = keypadTestIndex(keys[r][c]);
+        if (idx >= 0) mask |= (uint16_t)(1u << idx);
+      }
+    }
+    digitalWrite(colPins[c], HIGH);
+    pinMode(colPins[c], INPUT);
+  }
+  return mask;
+}
+
+static void dispatchKeyChar(char ch) {
+  if (keypadSelfTestActiveScreen()) {
+    registerKeypadTestKey(ch);
+    echoPressedOnLcd(ch);
+  } else {
+    handleKey(ch);
+  }
+}
+
+inline bool keyQueued() { return gKeyQHead != gKeyQTail; }
+
+inline void pollKeypadFast() {
+  if (!gReady) return;
+  if (gKeyTask) {
+    while (gKeyQTail != gKeyQHead) {
+      const char ch = (char)gKeyQ[gKeyQTail];
+      gKeyQTail = (uint8_t)((gKeyQTail + 1u) % 16u);
+      const bool locked = uiLock();
+      dispatchKeyChar(ch);
+      uiUnlock(locked);
+    }
+    return;
+  }
+  uint16_t raw = sampleKeyMask();
+  if (raw != gKeyStableMask) {
+    delayMicroseconds(300);
+    const uint16_t again = sampleKeyMask();
+    if (again != raw) return;
+  }
+  if (raw == gKeyStableMask) return;
+  const uint16_t rose = (uint16_t)(raw & ~gKeyStableMask);
+  gKeyStableMask = raw;
+  if (!rose) return;
+  for (uint8_t i = 0; i < 16; i++) {
+    if ((rose & (uint16_t)(1u << i)) == 0) continue;
+    dispatchKeyChar(KEYPAD_TEST_KEYS[i]);
+  }
+}
+
+/** Test All: hold "LCD IS WORKING!" and collect keypad presses until Done. */
+inline void startTestAllUi() {
+  startLcdSelfTest(0);
+  gTestAllUi = true;
   gKeypadTestMask = 0;
   gKeypadTestLastCount = 0;
   gLastEchoKey = 0;
   gKeypadTestNoTimeout = true;
   gKeypadTestUntilMs = 0;
   gKeypadTestReturn = gLcdTestReturn;
+  renderTestAllUi();
+}
+
+inline void startCombinedUiSelfTest(unsigned long /*totalMs*/ = 0) {
+  startTestAllUi();
 }
 
 static void clearTap() {
@@ -914,22 +1152,8 @@ static void handleFinished() {
   showMessage("Finished/Saved", "", 2000, Screen::Start);
 }
 
-static const char* keyMeaning(char key) {
-  switch (key) {
-    case 'A': return "mode";
-    case 'B': return "<-";
-    case 'C': return "->";
-    case 'D': return "Stop";
-    case '0': return "Del";
-    case '#': return "Enter";
-    case '*': return modeIsAlphabet() ? "space" : "0";
-    default: return "digit/letter";
-  }
-}
-
 static void handleKey(char key) {
   gLastKeypressMs = millis();
-  Serial.printf("[hmi] KEY=%c (%s) mode=%s\n", key, keyMeaning(key), modeName());
   gKeypadOk = true;
 
   // During keypad test OR combined LCD→keypad wait: count every raw key.
@@ -940,6 +1164,22 @@ static void handleKey(char key) {
     return;
   }
   if (gScreen == Screen::LcdSelfTest) {
+    return;
+  }
+
+  // Plug pulled mid-dry: this screen is the paused session. Enter continues, Stop saves.
+  if (gScreen == Screen::ResumePrompt) {
+    if (key == '#') {
+      if (hmiDoorIsOpen()) enterDoorWarn();
+      else actuallyStartDrying();
+      return;
+    }
+    if (key == 'D') {
+      hmiOnStopDrying();
+      resetParams();
+      showMessage("Stopped/Saved", "", 1500, Screen::Start);
+      return;
+    }
     return;
   }
 
@@ -1018,13 +1258,16 @@ static void handleKey(char key) {
 }
 
 inline void begin() {
+#if defined(ESP32)
+  if (!gUiMutex) gUiMutex = xSemaphoreCreateRecursiveMutex();
+#endif
   Serial.println("[hmi] === LOCAL HMI READY ===");
   Serial.println("[hmi] boot: START DRYING SESSION -> Enter -> Fish Name (CAPS / SMALL / NUMBER)");
   pinMode(PIN_LCD_SDA, INPUT_PULLUP);
   pinMode(PIN_LCD_SCL, INPUT_PULLUP);
   delay(50);
   Wire.begin(PIN_LCD_SDA, PIN_LCD_SCL);
-  Wire.setClock(50000);
+  Wire.setClock(100000);
   delay(200);
 
   gLcdOk = false;
@@ -1059,6 +1302,10 @@ inline void begin() {
   keypad.setDebounceTime(20);
   keypad.setHoldTime(400);
 
+  if (gKeyTask == nullptr) {
+    xTaskCreatePinnedToCore(keypadSampleTask, "keypad", 2048, nullptr, 3, &gKeyTask, 0);
+  }
+
   gKeypadOk = true;
   gReady = true;
   gScreen = Screen::Start;
@@ -1080,45 +1327,49 @@ inline void poll() {
   commitTapIfNeeded();
 
   if (gScreen == Screen::Message && (long)(millis() - gMessageUntilMs) >= 0) {
-    gScreen = gMessageReturn;
-    if (gScreen == Screen::Start) resetParams();
-    redraw();
-  }
-
-  // LCD self-test: brief "LCD IS WORKING!" then keypad (no countdown).
-  if (gScreen == Screen::LcdSelfTest) {
-    if ((long)(millis() - gLcdTestUntilMs) >= 0) {
-      if (gKeypadTestNoTimeout) {
-        gScreen = Screen::KeypadSelfTest;
-        keypad.setDebounceTime(20);
-        keypad.setHoldTime(200);
-        (void)keypad.getKeys();
-        if (gLcdOk) {
-          lcd.clear();
-          renderKeypadSelfTest();
-        }
-        Serial.println("[hmi] LCD done → keypad (wait for all buttons)");
+    if (hmiSessionIsRunning()) {
+      beginRunningUi();
+    } else {
+      gScreen = gMessageReturn;
+      if (gScreen == Screen::Start) resetParams();
+      if (gLcdOk && gScreen == Screen::Start) {
+        lcd.clear();
+        renderStart();
       } else {
-        endUiSelfTest();
+        redraw();
       }
     }
   }
 
+  // Keypad start and app start both land here: if the session is running,
+  // replace START / param entry with fish, qty, target, and time left.
+  if (hmiSessionIsRunning() && screenYieldsToDryingDetails() &&
+      gScreen != Screen::LcdSelfTest && gScreen != Screen::KeypadSelfTest &&
+      gScreen != Screen::StopOrPause) {
+    beginRunningUi();
+  }
+
+  // LCD self-test stays on until the app taps Done (endUiSelfTest).
+  if (gScreen == Screen::LcdSelfTest) {
+    gLcdTestHold = true;
+    paintUiSelfTest();
+  }
+
   // Keypad self-test: no timeout when gKeypadTestNoTimeout — finish at 16/16 only.
   if (gScreen == Screen::KeypadSelfTest) {
+    static bool sLoggedComplete = false;
     if (keypadTestPressedCount() >= 16) {
-      Serial.println("[hmi] keypad test COMPLETE 16/16");
-      if (gLcdOk) {
-        lcd.clear();
-        lcdCentered(0, "KEYPAD OK!");
-        lcdCentered(1, "16/16 DONE");
+      if (!sLoggedComplete) {
+        sLoggedComplete = true;
+        Serial.println("[hmi] keypad test 16/16 — waiting for Done");
+        if (gLcdOk) {
+          lcd.clear();
+          lcdCentered(0, "KEYPAD OK!");
+          lcdCentered(1, "TAP DONE");
+        }
       }
-      // Keep screen briefly; cloud/mobile ends the command.
-      gKeypadTestNoTimeout = false;
-      gKeypadTestUntilMs = millis() + 1500UL;
-    } else if (!gKeypadTestNoTimeout && gKeypadTestUntilMs != 0 &&
-               (long)(millis() - gKeypadTestUntilMs) >= 0) {
-      endUiSelfTest();
+    } else {
+      sLoggedComplete = false;
     }
   }
 
@@ -1138,16 +1389,30 @@ inline void poll() {
     }
   }
 
-  // Rotate FISH/Qty <-> Temp/Left every 5s while drying; refresh countdown 1 Hz
+  // Fish/Qty → Temp/Left → Current/Humidity → Problem (if any) → DHT22 warning (if sensor is dead).
   if (gScreen == Screen::Running && (hmiSessionIsRunning() || hmiSessionIsPaused())) {
     if (hmiSessionIsRunning() && hmiLocalDurationExpired()) {
       handleFinished();
-    } else if (millis() - gRunPageMs >= HMI_PARAM_ROTATE_MS) {
+    } else if (gRunPage == 3 && !hmiHasDryingProblem()) {
+      gRunPage = hmiDht22NotWorking() ? 4 : 0;
       gRunPageMs = millis();
-      gRunPage = (gRunPage == 0) ? 1 : 0;
       gRunTickMs = millis();
       renderRunning();
-    } else if (gRunPage == 1 && hmiSessionIsRunning() &&
+    } else if (gRunPage == 4 && !hmiDht22NotWorking()) {
+      gRunPage = 0;
+      gRunPageMs = millis();
+      gRunTickMs = millis();
+      renderRunning();
+    } else if (millis() - gRunPageMs >= HMI_PARAM_ROTATE_MS) {
+      gRunPageMs = millis();
+      uint8_t next = (uint8_t)(gRunPage + 1);
+      if (next == 3 && !hmiHasDryingProblem()) next = 4;
+      if (next == 4 && !hmiDht22NotWorking()) next = 0;
+      if (next > 4) next = 0;
+      gRunPage = next;
+      gRunTickMs = millis();
+      renderRunning();
+    } else if ((gRunPage == 1 || gRunPage == 2) && hmiSessionIsRunning() &&
                (millis() - gRunTickMs >= 1000UL)) {
       gRunTickMs = millis();
       renderRunning();
@@ -1174,34 +1439,33 @@ inline bool serviceKeypadSelfTestSlice() {
   return keypadSelfTestWaiting();
 }
 
-/** App/cloud started a session — show the same rotating LCD params. */
+/** App or keypad session is running — remember details and show them on the LCD. */
 inline void adoptCloudSession(const String& fishType, int totalFish, float targetC,
                               int durationSec) {
   if (!gReady) return;
-  if (gScreen == Screen::EditParams || gScreen == Screen::ConfirmStart ||
-      gScreen == Screen::DoorWarn || gScreen == Screen::ContinueDoor) {
-    return;  // don't interrupt local param entry
-  }
-  if (gScreen == Screen::LcdSelfTest || gScreen == Screen::KeypadSelfTest ||
-      gScreen == Screen::StopOrPause) {
-    return;
-  }
+  if (gScreen == Screen::LcdSelfTest || gScreen == Screen::KeypadSelfTest) return;
   if (fishType.length() > 0) gParams[0] = fishType;
-  gParams[1] = String(totalFish < 0 ? 0 : totalFish);
-  {
+  if (totalFish >= 0) gParams[1] = String(totalFish);
+  if (targetC > 1.0f && targetC < 120.0f) {
     char tbuf[12];
     snprintf(tbuf, sizeof(tbuf), "%.0f", targetC);
     gParams[2] = String(tbuf);
   }
-  long sec = durationSec < 1 ? 1 : durationSec;
-  long hh = sec / 3600L;
-  long mm = (sec % 3600L) / 60L;
-  long ss = sec % 60L;
-  char dbuf[12];
-  snprintf(dbuf, sizeof(dbuf), "%02ld%02ld%02ld", hh > 99 ? 99 : hh, mm, ss);
-  gParams[3] = String(dbuf);
-  if (gScreen == Screen::Running || gScreen == Screen::Message) {
-    return;  // already on drying UI — don't reset rotate page every poll
+  if (durationSec > 0) {
+    long sec = durationSec;
+    long hh = sec / 3600L;
+    long mm = (sec % 3600L) / 60L;
+    long ss = sec % 60L;
+    if (hh > 99) hh = 99;
+    char dbuf[12];
+    snprintf(dbuf, sizeof(dbuf), "%02ld%02ld%02ld", hh, mm, ss);
+    gParams[3] = String(dbuf);
+  }
+  // STOP/PAUSE prompt stays up; details are already stored for when it closes.
+  if (gScreen == Screen::StopOrPause) return;
+  if (gScreen == Screen::Running) {
+    renderRunning();
+    return;
   }
   beginRunningUi();
 }
@@ -1209,11 +1473,32 @@ inline void adoptCloudSession(const String& fishType, int totalFish, float targe
 inline void adoptCloudPaused() {
   if (!gReady) return;
   if (gScreen == Screen::LcdSelfTest || gScreen == Screen::KeypadSelfTest) return;
+  if (gScreen == Screen::ResumePrompt) return;
   if (gScreen == Screen::EditParams || gScreen == Screen::ConfirmStart ||
       gScreen == Screen::DoorWarn || gScreen == Screen::ContinueDoor) {
     return;
   }
   enterPausedEdit();
+}
+
+inline void showInterruptedSession(const String& fish, int qty, float targetC, long remainingSec) {
+  if (!gReady) return;
+  gParams[0] = fish;
+  gParams[1] = String(qty < 0 ? 0 : qty);
+  char tbuf[12];
+  snprintf(tbuf, sizeof(tbuf), "%.0f", (targetC > 1.0f && targetC < 120.0f) ? targetC : 60.0f);
+  gParams[2] = String(tbuf);
+  if (remainingSec < 0) remainingSec = 0;
+  long hh = remainingSec / 3600L;
+  long mm = (remainingSec % 3600L) / 60L;
+  long ss = remainingSec % 60L;
+  if (hh > 99) hh = 99;
+  char dbuf[12];
+  snprintf(dbuf, sizeof(dbuf), "%02ld%02ld%02ld", hh, mm, ss);
+  gParams[3] = String(dbuf);
+  gScreen = Screen::ResumePrompt;
+  redraw();
+  Serial.println("[hmi] power resume — PAUSED, GO or STOP");
 }
 
 inline void enterPausedEditUi() {
@@ -1224,10 +1509,14 @@ inline void enterPausedEditUi() {
 inline void adoptCloudStopped() {
   if (!gReady) return;
   if (gScreen == Screen::LcdSelfTest || gScreen == Screen::KeypadSelfTest) return;
+  if (gScreen == Screen::Message) return;
   if (gScreen == Screen::EditParams || gScreen == Screen::ConfirmStart) return;
   resetParams();
   gScreen = Screen::Start;
-  redraw();
+  if (gLcdOk) {
+    lcd.clear();
+    renderStart();
+  }
 }
 
 }  // namespace LocalHmi
@@ -1239,17 +1528,22 @@ inline void begin() {}
 inline void poll() {}
 inline bool lcdWorking() { return false; }
 inline bool keypadWorking() { return false; }
+inline bool keyQueued() { return false; }
+inline bool isTypingParams() { return false; }
 inline bool isEnteringParams() { return false; }
+inline bool blockNetworkForKey() { return false; }
 inline bool wantsNetworkQuiet() { return false; }
+inline bool keySettledForSync() { return true; }
 inline bool canFlushOfflineHistory() { return true; }
 inline bool uiSelfTestActive() { return false; }
 inline uint8_t keypadSelfTestCount() { return 0; }
 inline uint16_t keypadSelfTestMask() { return 0; }
 inline String keypadSelfTestKeysCsv() { return String(); }
 inline void endUiSelfTest() {}
-inline void startLcdSelfTest(unsigned long = 2000UL) {}
+inline void startLcdSelfTest(unsigned long = 0) {}
 inline void startKeypadSelfTest(unsigned long = 0) {}
 inline void startCombinedUiSelfTest(unsigned long = 0) {}
+inline void startTestAllUi() {}
 inline void paintUiSelfTest() {}
 inline bool keypadSelfTestWaiting() { return false; }
 inline void pollKeypadFast() {}
@@ -1258,6 +1552,7 @@ inline void adoptCloudSession(const String&, int, float, int) {}
 inline void adoptCloudPaused() {}
 inline void adoptCloudStopped() {}
 inline void enterPausedEditUi() {}
+inline void showInterruptedSession(const String&, int, float, long) {}
 }
 
 #endif

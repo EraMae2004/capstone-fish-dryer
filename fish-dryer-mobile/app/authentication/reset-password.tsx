@@ -12,8 +12,9 @@ import {
 } from 'react-native';
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { API_BASE_URL } from "../../config/api";
+import { getApiBaseUrl } from "../../config/api";
 import { boxShadowStyle } from "@/lib/box-shadow";
+import { ensureApiBaseUrl } from "@/lib/lan-api-discovery";
 
 
 export default function ResetPassword() {
@@ -32,7 +33,8 @@ export default function ResetPassword() {
     }
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/mobile/reset-password`, {
+      await ensureApiBaseUrl();
+      const response = await fetch(`${getApiBaseUrl()}/mobile/reset-password`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -258,12 +258,14 @@ export function moistureSensorDisplayColor(status: unknown): string {
   return "#ef4444";
 }
 
-/** True when YL-69 probe is in contact (working), not idle standby. */
+/** True when the YL-69 is actually returning a moisture reading. */
 export function isMoistureProbeWorking(
   liveReadings: Record<string, unknown> | null | undefined,
   componentStatus?: unknown
 ): boolean {
   if (liveReadings && typeof liveReadings === "object") {
+    const pct = liveReadings.moisture_percent;
+    if (typeof pct === "number" && Number.isFinite(pct) && pct >= 0) return true;
     if (liveReadings.moisture_connected === false) return false;
     if (liveReadings.moisture_connected === true) return true;
   }

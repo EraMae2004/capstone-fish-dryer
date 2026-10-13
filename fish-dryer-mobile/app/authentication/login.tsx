@@ -13,8 +13,9 @@ import {
 import { FontAwesome, Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { API_BASE_URL } from "../../config/api";
+import { getApiBaseUrl } from "../../config/api";
 import { boxShadowStyle } from "@/lib/box-shadow";
+import { ensureApiBaseUrl } from "@/lib/lan-api-discovery";
 
 export default function Login() {
   const router = useRouter();
@@ -41,8 +42,18 @@ export default function Login() {
         email: email.trim(),
         password: password.trim(),
       });
+      await ensureApiBaseUrl();
+      const apiBase = getApiBaseUrl();
+      if (!apiBase) {
+        clearTimeout(timer);
+        Alert.alert(
+          "Server not found",
+          "This PC must run start-presentation.ps1 (Laravel + firebase:publish-lan --watch). Phone, laptop, and dryer stay on the same Wi‑Fi — the app learns the address from Firebase, not a typed IPv4."
+        );
+        return;
+      }
       const loginOnce = () =>
-        fetch(`${API_BASE_URL}/mobile/login`, {
+        fetch(`${apiBase}/mobile/login`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -106,8 +117,8 @@ export default function Login() {
       Alert.alert(
         aborted ? "Server too slow" : "Error",
         aborted
-          ? `Login timed out. Confirm php artisan serve is running and the phone is on the same Wi‑Fi.\n\n${API_BASE_URL}`
-          : String(error?.message ?? error ?? "Cannot connect to server.") + `\n\n${API_BASE_URL}`
+          ? `Login timed out. Confirm start-presentation.ps1 is running and the phone is on the same Wi‑Fi as this PC.\n\n${getApiBaseUrl()}`
+          : String(error?.message ?? error ?? "Cannot connect to server.") + `\n\n${getApiBaseUrl()}`
       );
     } finally {
       setLoading(false);

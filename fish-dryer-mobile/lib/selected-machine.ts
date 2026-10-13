@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { API_BASE_URL } from "@/config/api";
+import { getApiBaseUrl } from "@/config/api";
 
 const STORAGE_KEY = "fish_dryer_selected_machine_id";
 
@@ -76,7 +76,7 @@ export async function fetchUserMachines(force = false): Promise<UserMachine[]> {
 
   machinesInFlight = (async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/machines`, {
+      const res = await fetch(`${getApiBaseUrl()}/machines`, {
         headers: { Accept: "application/json" },
       });
       const data = await res.json();

@@ -4,20 +4,20 @@ import { parsePresenceMs } from "@/lib/parse-presence-ms";
 /** Laravel `last_seen` — API-only mode when Firebase is not configured. */
 export const API_LAST_SEEN_MS = 3 * 60 * 1000;
 
-/** ESP nominally pushes ~every 2s, but Wi-Fi/Firebase writes can bunch up. */
-export const RTDB_GO_ONLINE_MS = 180_000;
+/** ESP nominally pushes ~every 5s. Stay online through a short Wi-Fi gap during drying. */
+export const RTDB_GO_ONLINE_MS = 45_000;
 
 /** Raw offline threshold; UI uses the larger stable threshold below. */
-export const RTDB_GO_OFFLINE_MS = 180_000;
+export const RTDB_GO_OFFLINE_MS = 45_000;
 
-/** While Online, tolerate several missed heartbeats to avoid Wi-Fi jitter flicker. */
-export const RTDB_STAY_ONLINE_MS = 180_000;
+/** While Online, tolerate missed heartbeats during a drying run (heater Wi-Fi dips). */
+export const RTDB_STAY_ONLINE_MS = 90_000;
 
 /** First snapshot only — ignore clearly stale rows when opening the app. */
-export const RTDB_INITIAL_STALE_MS = 180_000;
+export const RTDB_INITIAL_STALE_MS = 45_000;
 
 /** Offline card flips only after this many presence ticks (not every React render). */
-export const RTDB_OFFLINE_CONFIRM_TICKS = 2;
+export const RTDB_OFFLINE_CONFIRM_TICKS = 3;
 
 /** @deprecated Use API_LAST_SEEN_MS. */
 export const LIVE_LAST_SEEN_MS = API_LAST_SEEN_MS;
@@ -117,8 +117,8 @@ export function isRtdbPayloadFresh(
 ): boolean {
   if (payloadMs == null || !Number.isFinite(payloadMs)) return false;
   const age = nowMs - payloadMs;
-  // ESP NTP can sit minutes ahead of the phone — that is still a live write.
-  if (age < 0) return age >= -600_000;
+  // ESP NTP can sit slightly ahead of the phone — that is still a live write.
+  if (age < 0) return age >= -15_000;
   return age <= RTDB_GO_ONLINE_MS;
 }
 
@@ -222,14 +222,15 @@ export function isRtdbMicrocontrollerLive(
 export function isRtdbMicrocontrollerLiveStable(
   lastReceiveMs: number | null | undefined,
   wasOnline: boolean,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  stayOnlineMs: number = RTDB_STAY_ONLINE_MS
 ): boolean {
   if (lastReceiveMs == null || !Number.isFinite(lastReceiveMs)) {
     return false;
   }
   const age = nowMs - lastReceiveMs;
   if (wasOnline) {
-    return age <= RTDB_STAY_ONLINE_MS;
+    return age <= stayOnlineMs;
   }
   return age <= RTDB_GO_ONLINE_MS;
 }
@@ -275,7 +276,8 @@ export function computeStableOnlineByMachineId(
 export function useStableMachineOnline(
   lastReceiveMs: number | null | undefined,
   presenceTick: number,
-  machineId?: number | null
+  machineId?: number | null,
+  stayOnlineMs: number = RTDB_STAY_ONLINE_MS
 ): boolean {
   const onlineRef = useRef(false);
   const lastReceiveRef = useRef<number | null>(null);
@@ -311,7 +313,8 @@ export function useStableMachineOnline(
   const wouldBeOnline = isRtdbMicrocontrollerLiveStable(
     lastReceiveRef.current,
     onlineRef.current,
-    now
+    now,
+    stayOnlineMs
   );
 
   if (wouldBeOnline) {

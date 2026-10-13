@@ -18,10 +18,10 @@ import AdminProfile from './admin-profile';
 import AdminUserManagement from './admin-user-management';
 import AdminDryingMachines from './admin-drying-machines';
 import AdminOverview from './admin-overview';
+import { apiStorageUrl } from '@/config/api';
 
 const { width } = Dimensions.get('window');
 const TOPBAR_HEIGHT = 80;
-const BASE_URL = 'https://spinproof-brineless-marleen.ngrok-free.dev';
 
 export default function AdminView() {
   const router = useRouter();
@@ -120,7 +120,7 @@ export default function AdminView() {
           <View style={styles.profileCircle}>
             {user?.profile_picture ? (
               <Image
-                source={{ uri: `${BASE_URL}/storage/${user.profile_picture}` }}
+                source={{ uri: apiStorageUrl(user.profile_picture) }}
                 style={styles.profileImage}
               />
             ) : (

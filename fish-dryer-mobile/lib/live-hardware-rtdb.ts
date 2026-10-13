@@ -1,8 +1,8 @@
 import { onValue, ref as dbRef, type Database, type Unsubscribe } from "firebase/database";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
 
-/** ESP writes ~2s; HTTPS/keypad can gap. Older than this is not a live board. */
-export const LIVE_HEARTBEAT_MS = 180_000;
+/** ESP writes ~5s; drying can delay one write. Older than this is not a live board. */
+export const LIVE_HEARTBEAT_MS = 25_000;
 
 function isServerTimestampPlaceholder(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && ".sv" in (value as object));
@@ -23,12 +23,12 @@ export function isFirebaseHeartbeatLive(
     const recvAge = nowMs - lastReceiveMs;
     if (recvAge >= -5_000 && recvAge <= LIVE_HEARTBEAT_MS) return true;
   }
-  if (isServerTimestampPlaceholder(updatedAt)) return true;
+  if (isServerTimestampPlaceholder(updatedAt)) return false;
   const t = firebaseUpdatedAtMs(updatedAt);
   if (t == null || !Number.isFinite(t)) return false;
   const age = nowMs - t;
   // Phone/ESP clocks can differ; Firebase server time can sit slightly ahead.
-  return age >= -600_000 && age <= LIVE_HEARTBEAT_MS;
+  return age >= -15_000 && age <= LIVE_HEARTBEAT_MS;
 }
 
 /** Live listener. Delivers every snapshot. Path empty → onDead. */

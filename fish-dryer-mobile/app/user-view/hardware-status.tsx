@@ -13,7 +13,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { FontAwesome as Icon, MaterialCommunityIcons } from "@expo/vector-icons";
-import { API_BASE_URL } from "@/config/api";
+import { getApiBaseUrl } from "@/config/api";
 import HardwareStatusModal from "./hardware-status-modal";
 import { onValue, ref as dbRef, get as dbGet, type DataSnapshot } from "firebase/database";
 import { firebaseDb } from "@/config/firebase";
@@ -34,11 +34,11 @@ import {
 import { moistureSensorDisplayColor, moistureSensorDisplayLabel } from "@/lib/hardware-status-rtdb";
 import {
   clearHardwareTestCommand,
-  HARDWARE_TEST_KEYPAD_MS,
   hardwareTestKeyForLabel,
   publishHardwareTestCommand,
 } from "@/lib/hardware-test-command";
 import { userTypography } from "@/lib/user-typography";
+import { useFirebaseAuthReady } from "@/lib/use-firebase-auth-ready";
 import {
   formatDoorSensorDisplay,
   doorSensorDisplayColorHardware,
@@ -155,7 +155,23 @@ const DEFAULT_COMPONENTS = [
   "Door Sensor (MC38)",
   "LCD 16x2",
   "Keypad 4x4",
+  "Heater",
+  "Fan",
+  "LED Green",
+  "LED Yellow",
+  "LED Red",
+  "Buzzer",
 ];
+
+/** Outputs have no feedback wire. The user answers Yes or No while the part is on. */
+const OUTPUT_CONFIRM_KEYS = new Set([
+  "heater",
+  "fan",
+  "led_green",
+  "led_yellow",
+  "led_red",
+  "buzzer",
+]);
 
 /** MaterialCommunityIcons glyph names (Expo) — per hardware row. */
 const HARDWARE_ICON_BY_LABEL: Record<
@@ -170,6 +186,11 @@ const HARDWARE_ICON_BY_LABEL: Record<
   "Fan 3": "fan",
   "Heater 1": "radiator",
   "Heater 2": "radiator",
+  Heater: "radiator",
+  Fan: "fan",
+  "LED Green": "lightbulb-on-outline",
+  "LED Yellow": "lightbulb-on-outline",
+  "LED Red": "lightbulb-on-outline",
   "Moisture Sensor": "scale-balance",
   "DHT22 (Temp & Humidity)": "thermometer",
   "LCD 16x2": "monitor",
@@ -181,7 +202,19 @@ const HARDWARE_ICON_BY_LABEL: Record<
 
 /** Sensor / HMI diagnostic payload built from latest RTDB heartbeat. Used by Test buttons. */
 type SensorDiagnostic = {
-  key: "esp32" | "dht22" | "moisture_sensor" | "door_sensor" | "lcd" | "keypad";
+  key:
+    | "esp32"
+    | "dht22"
+    | "moisture_sensor"
+    | "door_sensor"
+    | "lcd"
+    | "keypad"
+    | "heater"
+    | "fan"
+    | "led_green"
+    | "led_yellow"
+    | "led_red"
+    | "buzzer";
   label: string;
   ok: boolean;
   /** Short headline shown in alert/title row. */
@@ -225,6 +258,7 @@ const HW_STATUS_SKIP_KEYS = new Set([
   "readings",
   "name",
   "mac",
+  "session_status",
 ]);
 
 function parseHardwareStatusFromRtdb(val: Record<string, unknown>): {
@@ -251,6 +285,7 @@ function parseHardwareStatusFromRtdb(val: Record<string, unknown>): {
 }
 
 export default function HardwareStatus({ active = true }: { active?: boolean }) {
+  const firebaseAuthReady = useFirebaseAuthReady();
   const activeRef = useRef(active);
   activeRef.current = active;
   const { selectedId: storeSelectedId, refresh: refreshStoreMachines } = useSelectedMachine();
@@ -267,6 +302,9 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
   const testPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   /** User closed the diagnostic modal — do not reopen until the next test starts. */
   const testDismissedRef = useRef(false);
+  /** Yes/No answers for fan, heater, LEDs, and buzzer. Survives Done. */
+  const [outputVerdicts, setOutputVerdicts] = useState<Record<string, boolean>>({});
+  const outputVerdictRef = useRef<Record<string, boolean>>({});
   /** Guards async refreshModal from a previous or cancelled test run. */
   const activeTestRunRef = useRef<number | null>(null);
 
@@ -294,7 +332,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
 
   /** Live keypad press progress from firmware `test_ack` + heartbeat readings. */
   useEffect(() => {
-    if (!firebaseDb || !diagModalOpen || !diagIncludesKeypad) return;
+    if (!firebaseDb || !firebaseAuthReady || !diagModalOpen || !diagIncludesKeypad) return;
     const mid = selectedMachineIdRef.current;
     if (mid == null) return;
 
@@ -333,7 +371,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       unsubAck();
       unsubHw();
     };
-  }, [firebaseDb, diagModalOpen, diagIncludesKeypad]);
+  }, [firebaseDb, firebaseAuthReady, diagModalOpen, diagIncludesKeypad]);
 
   const [modalVisible, setModalVisible] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
@@ -477,7 +515,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
   }, []);
 
   useEffect(() => {
-    if (!firebaseDb) return;
+    if (!firebaseDb || !firebaseAuthReady) return;
     const db = firebaseDb;
     const ids = machineIdsKey
       ? machineIdsKey
@@ -498,7 +536,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     return () => {
       unsubs.forEach((u) => u());
     };
-  }, [firebaseDb, machineIdsKey, applyLiveHw, markHardwareDead]);
+  }, [firebaseDb, firebaseAuthReady, machineIdsKey, applyLiveHw, markHardwareDead]);
 
   useEffect(() => {
     if (!active) return;
@@ -522,8 +560,11 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     ESP32: ["esp32", "esp32_controller"],
     Buzzer: ["buzzer"],
     "Door Sensor (MC38)": ["door_sensor", "door", "mc38", "reed_switch", "reed", "magnetic_switch"],
-    "Heater 1": ["heater_1"],
-    "Heater 2": ["heater_2"],
+    "Heater": ["heater", "heater_1", "heater1"],
+    "Fan": ["fan", "fan_1", "fan1"],
+    "LED Green": ["led_green", "led_1", "led1"],
+    "LED Yellow": ["led_yellow", "led_2", "led2"],
+    "LED Red": ["led_red", "led_3", "led3"],
     "Fan 1": ["fan_1", "fan1", "heater_fan_1"],
     "Fan 2": ["fan_2", "fan2", "heater_fan_2"],
     "Fan 3": ["fan_3", "fan3", "ventilation_fan", "fan"],
@@ -543,7 +584,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
   };
 
   const apiRequest = async (endpoint: string, options: RequestInit = {}) => {
-    const res = await fetch(`${API_BASE_URL}${endpoint}`, {
+    const res = await fetch(`${getApiBaseUrl()}${endpoint}`, {
       headers: { "Content-Type": "application/json" },
       ...options,
     });
@@ -674,6 +715,19 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
   };
 
   const getComponentStatus = (name: string) => {
+    if (
+      name === "Heater" ||
+      name === "Fan" ||
+      name === "LED Green" ||
+      name === "LED Yellow" ||
+      name === "LED Red" ||
+      name === "Buzzer"
+    ) {
+      if (Object.prototype.hasOwnProperty.call(outputVerdicts, name)) {
+        return outputVerdicts[name] ? "working" : "not_working";
+      }
+      return "untested";
+    }
     const keyName = normalizeKey(name);
     const aliases = displayToKeys[name] ?? [keyName];
     const found = components.find((c) => {
@@ -696,6 +750,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
 
   const getStatusColor = (status: string) => {
     const s = normalizeStatusWord(status);
+    if (s === "untested") return "#94a3b8";
     if (["working", "ok", "online", "pass", "passed"].includes(s)) return "#22c55e";
     if (s === "standby" || s === "idle") return "#95a5a6";
     if (["not_working", "error", "offline", "fail", "failed"].includes(s)) return "#ef4444";
@@ -717,6 +772,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       return moistureSensorDisplayLabel(getComponentStatus(name));
     }
     const s = normalizeStatusWord(getComponentStatus(name));
+    if (s === "untested") return "Not tested";
     if (["working", "ok", "online", "pass", "passed"].includes(s)) return "Working";
     if (s === "standby" || s === "idle") return "Standby";
     if (["not_working", "error", "offline", "fail", "failed"].includes(s)) return "Not Working";
@@ -914,6 +970,46 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       };
     }
 
+    if (OUTPUT_CONFIRM_KEYS.has(key)) {
+      const verdict = outputVerdictRef.current[key];
+      const prompt =
+        key === "fan"
+          ? "Is the fan spinning?"
+          : key === "heater"
+            ? "Is the heater on?"
+            : key === "led_green"
+              ? "Is the green LED on?"
+              : key === "led_yellow"
+                ? "Is the yellow LED on?"
+                : key === "led_red"
+                  ? "Is the red LED on?"
+                  : "Do you hear the buzzer?";
+      const label =
+        key === "fan"
+          ? "Fan"
+          : key === "heater"
+            ? "Heater"
+            : key === "led_green"
+              ? "LED Green"
+              : key === "led_yellow"
+                ? "LED Yellow"
+                : key === "led_red"
+                  ? "LED Red"
+                  : "Buzzer";
+      return {
+        key,
+        label,
+        ok: verdict === true,
+        headline: verdict === true ? "Working" : verdict === false ? "Not working" : prompt,
+        details:
+          verdict == null
+            ? "It stays on until you tap Done. Tap Yes if it works, or No if it does not."
+            : verdict
+              ? "Marked working."
+              : "Marked not working.",
+      };
+    }
+
     if (key === "lcd") {
       return {
         key,
@@ -921,7 +1017,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
         ok: connected,
         headline: connected ? "Check the display" : "Not responding",
         details: connected
-          ? 'The board should show "LCD IS WORKING!" with a 5-second countdown.'
+          ? 'The board should show "LCD IS WORKING!" until you tap Done.'
           : "LCD did not report as working. Check I2C wiring (SDA/SCL) and power.",
       };
     }
@@ -945,6 +1041,12 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     if (name === "Door Sensor (MC38)") return "door_sensor";
     if (name === "LCD 16x2") return "lcd";
     if (name === "Keypad 4x4") return "keypad";
+    if (name === "Heater") return "heater";
+    if (name === "Fan") return "fan";
+    if (name === "LED Green") return "led_green";
+    if (name === "LED Yellow") return "led_yellow";
+    if (name === "LED Red") return "led_red";
+    if (name === "Buzzer") return "buzzer";
     return null;
   };
 
@@ -994,11 +1096,29 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     }
   }, []);
 
+  const answerOutput = (key: string, yes: boolean) => {
+    const label =
+      key === "fan"
+        ? "Fan"
+        : key === "heater"
+          ? "Heater"
+          : key === "led_green"
+            ? "LED Green"
+            : key === "led_yellow"
+              ? "LED Yellow"
+              : key === "led_red"
+                ? "LED Red"
+                : key === "buzzer"
+                  ? "Buzzer"
+                  : key;
+    outputVerdictRef.current = { ...outputVerdictRef.current, [key]: yes };
+    setOutputVerdicts((prev) => ({ ...prev, [label]: yes, [key]: yes }));
+  };
+
   const runLiveSensorTest = async (
     machineId: number,
     keys: SensorDiagnostic["key"][],
     title: string,
-    durationMs: number,
     onStart: () => void,
     onEnd: () => void,
     opts?: { waitForKeypad?: boolean }
@@ -1021,7 +1141,6 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     }
     onStart();
     const waitForKeypad = opts?.waitForKeypad === true;
-    const endAt = Date.now() + durationMs;
 
     const applyDiagnosticData = (
       results: SensorDiagnostic[],
@@ -1035,9 +1154,27 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       );
     };
 
+    const snapshotFromCache = () => {
+      const cached = machineHwByIdRef.current[machineId];
+      if (!cached || ((cached.components ?? []).length === 0 && !cached.readings)) {
+        return null;
+      }
+      const componentsMap: Record<string, string> = {};
+      (cached.components ?? []).forEach((c) => {
+        if (c?.component_name) {
+          componentsMap[normalizeKey(c.component_name)] = String(c.status ?? "");
+        }
+      });
+      return {
+        components: componentsMap,
+        readings: (cached.readings ?? {}) as LiveReadings,
+        updatedAtMs: cached.payloadMs ?? cached.receiveMs ?? null,
+      };
+    };
+
     const refreshModal = async (openAfterUpdate: boolean) => {
       if (activeTestRunRef.current !== runId || testDismissedRef.current) return;
-      const snapshot = await fetchLatestSnapshot(machineId);
+      const snapshot = snapshotFromCache() ?? (await fetchLatestSnapshot(machineId));
       if (activeTestRunRef.current !== runId || testDismissedRef.current) return;
       const results = snapshot
         ? keys.map((k) => buildDiagnostic(k, snapshot))
@@ -1054,6 +1191,10 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
                       ? "LCD 16x2"
                       : k === "keypad"
                         ? "Keypad 4x4"
+                        : k === "heater"
+                      ? "Heater"
+                      : k === "fan"
+                        ? "Fan"
                         : "Door Sensor",
             ok: false,
             headline: "Waiting for data…",
@@ -1090,18 +1231,14 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       await refreshModal(true);
       stopTestPolling();
       testPollRef.current = setInterval(() => {
-        void refreshModal(false);
-        if (waitForKeypad) {
-          // Stay open until all keypad buttons are detected (or user hits Done).
-          if (keypadTestProgressRef.current?.ok) {
-            void finishTest();
-          }
-          return;
-        }
-        if (Date.now() >= endAt) {
-          void finishTest();
-        }
-      }, 500);
+        const snap = snapshotFromCache();
+        if (!snap || activeTestRunRef.current !== runId || testDismissedRef.current) return;
+        applyDiagnosticData(
+          keys.map((k) => buildDiagnostic(k, snap)),
+          snap.updatedAtMs
+        );
+        void waitForKeypad;
+      }, 300);
     } catch (e) {
       console.log(e);
       await finishTest();
@@ -1118,7 +1255,6 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     try {
       await publishHardwareTestCommand(firebaseDb!, machineId, {
         mode: "all",
-        durationMs: HARDWARE_TEST_KEYPAD_MS,
       });
     } catch (e) {
       console.log(e);
@@ -1126,7 +1262,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       return;
     }
 
-    setDiagIncludesLcd(false);
+    setDiagIncludesLcd(true);
     setDiagIncludesKeypad(true);
     setKeypadTestProgress({ keysPressed: 0, keysTotal: 16, keys: "", ok: false });
 
@@ -1135,14 +1271,19 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       "dht22",
       "moisture_sensor",
       "door_sensor",
+      "heater",
+      "fan",
+      "led_green",
+      "led_yellow",
+      "led_red",
+      "buzzer",
       "lcd",
       "keypad",
     ];
     await runLiveSensorTest(
       machineId,
       keys,
-      "Test All — press every keypad button",
-      HARDWARE_TEST_KEYPAD_MS,
+      "Test All — stays on until Done",
       () => setTestingAll(true),
       () => setTestingAll(false),
       { waitForKeypad: true }
@@ -1167,17 +1308,10 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
 
     const machineId = selectedMachine!.id;
     const waitForKeypad = key === "keypad";
-    const durationMs =
-      key === "keypad"
-        ? HARDWARE_TEST_KEYPAD_MS
-        : key === "lcd"
-          ? 3000
-          : 8000;
     try {
       await publishHardwareTestCommand(firebaseDb!, machineId, {
         mode: "component",
         component: componentKey,
-        durationMs,
       });
     } catch (e) {
       console.log(e);
@@ -1211,7 +1345,6 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       machineId,
       [key],
       title,
-      durationMs,
       () => setTestingComponent(name),
       () => setTestingComponent(null),
       { waitForKeypad }
@@ -1738,6 +1871,8 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
         includesLcd={diagIncludesLcd}
         includesKeypad={diagIncludesKeypad}
         keypadProgress={keypadTestProgress}
+        outputVerdicts={outputVerdicts}
+        onOutputAnswer={answerOutput}
         onClose={closeDiagnosticModal}
       />
     </SafeAreaView>
@@ -1762,6 +1897,8 @@ function DiagnosticResultsModal({
   includesLcd,
   includesKeypad,
   keypadProgress,
+  outputVerdicts,
+  onOutputAnswer,
   onClose,
 }: {
   visible: boolean;
@@ -1774,14 +1911,18 @@ function DiagnosticResultsModal({
   includesLcd: boolean;
   includesKeypad: boolean;
   keypadProgress: KeypadTestProgress | null;
+  outputVerdicts: Record<string, boolean>;
+  onOutputAnswer: (key: string, yes: boolean) => void;
   onClose: () => void;
 }) {
   const summary = (() => {
     if (results.length === 0) return null;
-    const countable = results.filter(
-      (r) => !(isTestAll && testInProgress && r.key === "moisture_sensor")
-    );
+    const countable = results.filter((r) => {
+      if (OUTPUT_CONFIRM_KEYS.has(r.key)) return outputVerdicts[r.key] !== undefined;
+      return !(isTestAll && testInProgress && r.key === "moisture_sensor");
+    });
     const passes = countable.filter((r) => {
+      if (OUTPUT_CONFIRM_KEYS.has(r.key)) return outputVerdicts[r.key] === true;
       if (r.key === "keypad" && keypadProgress) return keypadProgress.ok;
       return r.ok;
     }).length;
@@ -1798,6 +1939,13 @@ function DiagnosticResultsModal({
       case "door_sensor": return "door";
       case "lcd": return "monitor";
       case "keypad": return "dialpad";
+      case "heater": return "radiator";
+      case "fan": return "fan";
+      case "led_green":
+      case "led_yellow":
+      case "led_red":
+        return "lightbulb-on-outline";
+      case "buzzer": return "bell";
     }
   };
 
@@ -1895,6 +2043,57 @@ function DiagnosticResultsModal({
             bounces
           >
             {results.map((r) => {
+              if (OUTPUT_CONFIRM_KEYS.has(r.key)) {
+                const answered = outputVerdicts[r.key];
+                const accent =
+                  answered === true ? "#22c55e" : answered === false ? "#ef4444" : "#d97706";
+                const tint =
+                  answered === true ? "#f0fdf4" : answered === false ? "#fef2f2" : "#fffbeb";
+                return (
+                  <View key={r.key} style={[diagStyles.resultCard, { borderLeftColor: accent }]}>
+                    <View style={diagStyles.resultHeader}>
+                      <View style={[diagStyles.resultIcon, { backgroundColor: tint }]}>
+                        <MaterialCommunityIcons
+                          name={iconForKey(r.key)}
+                          size={20}
+                          color={accent}
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={diagStyles.resultLabel}>{r.label}</Text>
+                        <Text style={[diagStyles.resultHeadline, { color: accent }]}>
+                          {answered === true
+                            ? "Working"
+                            : answered === false
+                              ? "Not working"
+                              : r.headline}
+                        </Text>
+                      </View>
+                      <View style={[diagStyles.resultBadge, { backgroundColor: accent }]}>
+                        <Text style={diagStyles.resultBadgeText}>
+                          {answered === true ? "YES" : answered === false ? "NO" : "CHECK"}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={diagStyles.detailLine}>{r.details}</Text>
+                    <View style={diagStyles.answerRow}>
+                      <TouchableOpacity
+                        style={[diagStyles.yesBtn, answered === true && diagStyles.answerOn]}
+                        onPress={() => onOutputAnswer(r.key, true)}
+                      >
+                        <Text style={diagStyles.answerBtnText}>Yes</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[diagStyles.noBtn, answered === false && diagStyles.answerOn]}
+                        onPress={() => onOutputAnswer(r.key, false)}
+                      >
+                        <Text style={diagStyles.answerBtnText}>No</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                );
+              }
+
               const moisturePending =
                 isTestAll && testInProgress && r.key === "moisture_sensor";
 
@@ -1999,7 +2198,7 @@ function DiagnosticResultsModal({
                         <Text style={diagStyles.resultLabel}>{r.label}</Text>
                         <Text style={[diagStyles.resultHeadline, { color: headlineColor }]}>
                           {testInProgress
-                            ? "Showing countdown on LCD…"
+                            ? "LCD IS WORKING! (until Done)"
                             : r.ok
                               ? "LCD IS WORKING!"
                               : "Not Working"}
@@ -2014,7 +2213,7 @@ function DiagnosticResultsModal({
                     <View style={diagStyles.detailsBlock}>
                       <Text style={diagStyles.detailLine}>
                         {r.details ||
-                          'Look at the machine display for "LCD IS WORKING!" and a 5-second countdown.'}
+                          'Look at the machine display for "LCD IS WORKING!" Tap Done to stop.'}
                       </Text>
                     </View>
                   </View>
@@ -2075,11 +2274,7 @@ function DiagnosticResultsModal({
 
           {/* Footer */}
           <View style={diagStyles.footer}>
-            {summary && summary.total === 1 && ageSec != null ? (
-              <Text style={diagStyles.footerNote}>Readings age: {ageSec}s</Text>
-            ) : (
-              <View style={{ flex: 1 }} />
-            )}
+            <View style={{ flex: 1 }} />
             <TouchableOpacity style={diagStyles.doneBtn} onPress={onClose}>
               <Text style={diagStyles.doneBtnText}>Done</Text>
             </TouchableOpacity>
@@ -2491,6 +2686,32 @@ const diagStyles = StyleSheet.create({
     color: "#64748b",
   },
 
+  answerRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 10,
+  },
+  yesBtn: {
+    flex: 1,
+    backgroundColor: "#15803d",
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: "center",
+  },
+  noBtn: {
+    flex: 1,
+    backgroundColor: "#b91c1c",
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: "center",
+  },
+  answerOn: {
+    opacity: 1,
+  },
+  answerBtnText: {
+    color: "#fff",
+    ...userTypography.bodyStrong,
+  },
   doneBtn: {
     backgroundColor: "#0f172a",
     paddingHorizontal: 18,

@@ -13,8 +13,7 @@ import {
 import { Ionicons, FontAwesome } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
-
-const BASE_URL = "https://spinproof-brineless-marleen.ngrok-free.dev";
+import { apiStorageUrl, getApiBaseUrl } from "@/config/api";
 
 export default function AdminProfile() {
   const [user, setUser] = useState<any | null>(null);
@@ -52,7 +51,7 @@ export default function AdminProfile() {
       if (parsed.role !== "admin") return;
 
       const response = await fetch(
-        `${BASE_URL}/api/mobile/user/${parsed.id}`
+        `${getApiBaseUrl()}/mobile/user/${parsed.id}`
       );
 
       const data = await response.json();
@@ -140,7 +139,7 @@ export default function AdminProfile() {
     }
 
     const response = await fetch(
-      `${BASE_URL}/api/mobile/update-profile/${user.id}`,
+      `${getApiBaseUrl()}/mobile/update-profile/${user.id}`,
       {
         method: "POST",
         body: formData,
@@ -191,7 +190,7 @@ export default function AdminProfile() {
       return Alert.alert("Passwords do not match");
 
     const response = await fetch(
-      `${BASE_URL}/api/mobile/change-password/${user?.id}`,
+      `${getApiBaseUrl()}/mobile/change-password/${user?.id}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -233,19 +232,21 @@ export default function AdminProfile() {
 
       <View style={styles.card}>
         <View style={styles.profileSection}>
-          <View style={styles.profileCircle}>
-            {selectedImage ? (
-              <Image source={{ uri: selectedImage }} style={styles.image} />
-            ) : !removeImageFlag && user?.profile_picture ? (
-              <Image
-                source={{
-                  uri: `${BASE_URL}/storage/${user.profile_picture}`,
-                }}
-                style={styles.image}
-              />
-            ) : (
-              <Text style={styles.initialText}>{initials}</Text>
-            )}
+          <View style={styles.profileFrame}>
+            <View style={styles.profileCircle}>
+              {selectedImage ? (
+                <Image source={{ uri: selectedImage }} style={styles.image} />
+              ) : !removeImageFlag && user?.profile_picture ? (
+                <Image
+                  source={{
+                    uri: apiStorageUrl(user.profile_picture),
+                  }}
+                  style={styles.image}
+                />
+              ) : (
+                <Text style={styles.initialText}>{initials}</Text>
+              )}
+            </View>
           </View>
 
           <View style={styles.imageButtons}>
@@ -352,6 +353,16 @@ const styles = StyleSheet.create({
 
   profileSection: { alignItems: "center", marginBottom: 20 },
 
+  profileFrame: {
+    width: 148,
+    height: 148,
+    borderRadius: 74,
+    borderWidth: 3,
+    borderColor: "#113F67",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+
   profileCircle: {
     width: 140,
     height: 140,
@@ -367,7 +378,7 @@ const styles = StyleSheet.create({
   imageButtons: { flexDirection: "row", gap: 20, marginTop: 15 },
 
   editBtn: {
-    backgroundColor: "#495057",
+    backgroundColor: "#113F67",
     padding: 8,
     borderRadius: 6,
     flexDirection: "row",

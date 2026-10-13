@@ -88,13 +88,14 @@ class DryingController extends Controller
 
             // ESP parses seq as float32 (exact only below 2^24). Unix-ms overflows and
             // then blocks the app's small counters.
-            $seq = ((int) round(microtime(true) * 1000)) % 16000000;
+            $seq = (((int) round(microtime(true) * 1000)) % 15000000) + random_int(1, 999);
             if ($seq < 1) {
                 $seq = 1;
             }
 
             $commandPayload = [
                 'action' => $command,
+                'command' => $command,
                 'fan_speed' => $fs,
                 'target_temperature' => $tt,
                 'seq' => $seq,
@@ -108,6 +109,9 @@ class DryingController extends Controller
             }
             if ($setDurationMinutes !== null && $setDurationMinutes > 0) {
                 $commandPayload['set_duration_minutes'] = $setDurationMinutes;
+                if ($running || $paused) {
+                    $commandPayload['remaining_sec'] = $setDurationMinutes * 60;
+                }
             }
 
             $firebase->setMachineCommand($microcontrollerId, $commandPayload);
@@ -1049,12 +1053,9 @@ class DryingController extends Controller
             })
             ->orderByRaw('COALESCE(ended_at, started_at, created_at) DESC')
             ->latest('id')
-            ->limit(80)
             ->get();
 
-        $rows = $sessions->map(function (DryingSession $session) {
-            return $this->transformSessionForHistory($session);
-        })->values();
+        $rows = $this->transformSessionsForHistoryList($sessions);
 
         return response()->json([
             'range' => $range,
@@ -1107,9 +1108,36 @@ class DryingController extends Controller
             $ids = [];
         }
 
+        $codes = $request->input('session_codes', []);
+        if (! is_array($codes)) {
+            $codes = [];
+        }
+        $codes = collect($codes)
+            ->filter(fn ($code) => is_string($code) && trim($code) !== '')
+            ->map(fn ($code) => trim((string) $code))
+            ->unique()
+            ->values();
+
+        $this->ensureDeletedSessionTombstonesTable();
+        $now = now();
+        foreach ($codes as $code) {
+            DB::table('deleted_drying_session_codes')->updateOrInsert(
+                ['session_code' => $code],
+                ['updated_at' => $now, 'created_at' => $now]
+            );
+        }
+
+        if ($codes->isNotEmpty()) {
+            $byCode = DryingSession::withTrashed()
+                ->whereIn('session_code', $codes->all())
+                ->pluck('id')
+                ->all();
+            $ids = array_merge($ids, $byCode);
+        }
+
         $deleted = $this->permanentlyDeleteSessions($ids);
 
-        if ($deleted < 1) {
+        if ($deleted < 1 && $codes->isEmpty()) {
             return response()->json([
                 'success' => false,
                 'deleted' => 0,
@@ -1226,6 +1254,7 @@ class DryingController extends Controller
             'add_extension_minutes' => 'nullable|integer|min:0',
             'drying_time_minutes' => 'nullable|integer|min:0',
             'drying_time_seconds' => 'nullable|integer|min:0',
+            'client_ref' => 'nullable|string|max:40',
             'temperature' => 'nullable|numeric',
             'humidity' => 'nullable|numeric',
             'moisture' => 'nullable|numeric',
@@ -1240,6 +1269,8 @@ class DryingController extends Controller
         $mcId = (int) $data['microcontroller_id'];
         $userId = (int) $data['user_id'];
         $action = $data['action'];
+        $clientRef = (string) preg_replace('/[^A-Za-z0-9_\-]/', '', (string) ($data['client_ref'] ?? ''));
+        $clientCode = $clientRef !== '' ? ('mob-'.$clientRef) : '';
 
         $machine = Microcontroller::find($mcId);
         if ($machine instanceof Microcontroller && $this->isMicrocontrollerReachable($machine)) {
@@ -1262,20 +1293,55 @@ class DryingController extends Controller
                     }
                 }
 
-                $blocking = DryingSession::where('microcontroller_id', $mcId)
-                    ->whereIn('status', ['running', 'paused'])
-                    ->whereNull('ended_at')
-                    ->exists();
+                $active = null;
+                if ($clientCode !== '') {
+                    $active = DryingSession::query()->where('session_code', $clientCode)->first();
+                    if ($active && in_array((string) $active->status, ['stopped', 'completed'], true)) {
+                        return response()->json([
+                            'success' => true,
+                            'session' => $active,
+                            'duplicate' => true,
+                            'firebase_command' => 'start',
+                        ]);
+                    }
+                }
+                if (! $active) {
+                    $active = DryingSession::where('microcontroller_id', $mcId)
+                        ->whereIn('status', ['running', 'paused'])
+                        ->whereNull('ended_at')
+                        ->latest('started_at')
+                        ->first();
+                }
 
-                if ($blocking) {
+                if ($active) {
+                    $active->update([
+                        'status' => 'running',
+                        'fish_type' => $data['fish_type'],
+                        'total_fish' => (int) $data['total_fish'],
+                        'target_temperature' => (float) $data['target_temperature'],
+                        'fan_speed' => (int) $data['fan_speed'],
+                        'set_duration_minutes' => (int) $data['set_duration_minutes'],
+                    ]);
+                    $session = $active->fresh();
+                    $this->syncEspSessionToFirebase(
+                        $mcId,
+                        'running',
+                        (float) $data['target_temperature'],
+                        (int) $data['fan_speed'],
+                        (string) $data['fish_type'],
+                        (int) $data['total_fish'],
+                        (int) $data['set_duration_minutes']
+                    );
+
                     return response()->json([
-                        'success' => false,
-                        'message' => 'Pause or stop the active session before starting a new one.',
-                    ], 422);
+                        'success' => true,
+                        'session' => $session,
+                        'firebase_command' => 'start',
+                    ]);
                 }
 
                 $session = DryingSession::create([
-                    'session_code' => 'mob-'.Str::uuid()->toString(),
+                    'session_code' => $clientCode !== '' ? $clientCode : ('mob-'.Str::uuid()->toString()),
                     'microcontroller_id' => $mcId,
                     'user_id' => $userId,
                     'fish_type' => $data['fish_type'],
@@ -1412,11 +1478,25 @@ class DryingController extends Controller
             }
 
             if ($action === 'stop') {
-                $session = DryingSession::where('microcontroller_id', $mcId)
-                    ->whereIn('status', ['running', 'paused'])
-                    ->whereNull('ended_at')
-                    ->latest('started_at')
-                    ->first();
+                $session = null;
+                if ($clientCode !== '') {
+                    $session = DryingSession::query()->where('session_code', $clientCode)->first();
+                    if ($session && in_array((string) $session->status, ['stopped', 'completed'], true)) {
+                        return response()->json([
+                            'success' => true,
+                            'session' => $session,
+                            'duplicate' => true,
+                            'firebase_command' => 'stop',
+                        ]);
+                    }
+                }
+                if (! $session) {
+                    $session = DryingSession::where('microcontroller_id', $mcId)
+                        ->whereIn('status', ['running', 'paused'])
+                        ->whereNull('ended_at')
+                        ->latest('started_at')
+                        ->first();
+                }
 
                 if (! $session) {
                     $fishType = trim((string) ($data['fish_type'] ?? ''));
@@ -1425,7 +1505,7 @@ class DryingController extends Controller
                     }
                     $elapsedSeconds = max(0, (int) ($data['drying_time_seconds'] ?? $data['drying_time_minutes'] ?? 0));
                     $session = DryingSession::create([
-                        'session_code' => 'mob-'.Str::uuid()->toString(),
+                        'session_code' => $clientCode !== '' ? $clientCode : ('mob-'.Str::uuid()->toString()),
                         'microcontroller_id' => $mcId,
                         'user_id' => $userId,
                         'fish_type' => $fishType,
@@ -1607,6 +1687,15 @@ class DryingController extends Controller
                     $active = null;
                 }
 
+                if ($offlineId !== '' && DryingSession::onlyTrashed()->where('session_code', $sessionCode)->exists()) {
+                    return response()->json([
+                        'success' => true,
+                        'ignored' => true,
+                        'deleted' => true,
+                        'message' => 'Local session was deleted and will not be recreated.',
+                    ]);
+                }
+
                 // Repeats from the board must not block mobile login: artisan serve is
                 // one request at a time, and Firebase writes here take several seconds.
                 if ($active && strtolower((string) $active->status) === 'running') {
@@ -1708,6 +1797,7 @@ class DryingController extends Controller
 
             $session = null;
             if ($offlineId !== '') {
+                // Same keypad session only. A different app session must stay as it is.
                 $session = DryingSession::query()
                     ->where('session_code', $sessionCode)
                     ->first();
@@ -1720,11 +1810,32 @@ class DryingController extends Controller
             }
 
             if ($session && in_array((string) $session->status, ['stopped', 'completed'], true)) {
+                if ($elapsed > (int) $session->drying_time_minutes) {
+                    $session->update([
+                        'fish_type' => $fishType,
+                        'total_fish' => $totalFish,
+                        'target_temperature' => $targetC,
+                        'fan_speed' => $fan,
+                        'set_duration_minutes' => $setMinutes,
+                        'drying_time_minutes' => $elapsed,
+                    ]);
+                    $session = $session->fresh();
+                }
+
                 return response()->json([
                     'success' => true,
                     'session' => $session,
                     'duplicate' => true,
                     'message' => 'Local HMI session already saved to history.',
+                ]);
+            }
+
+            if ($offlineId !== '' && DryingSession::onlyTrashed()->where('session_code', $sessionCode)->exists()) {
+                return response()->json([
+                    'success' => true,
+                    'ignored' => true,
+                    'deleted' => true,
+                    'message' => 'Local session was deleted and will not be recreated.',
                 ]);
             }
 
@@ -1774,9 +1885,29 @@ class DryingController extends Controller
                 'message' => 'Local HMI session saved to history.',
             ]);
         } catch (\Throwable $e) {
+            $msg = $e->getMessage();
+            if (str_contains($msg, '1062') || str_contains($msg, 'Duplicate')) {
+                if ($action === 'stop' && $offlineId !== '') {
+                    $existing = DryingSession::withTrashed()->where('session_code', $sessionCode)->first();
+                    if ($existing && ! $existing->trashed() && $elapsed > (int) $existing->drying_time_minutes) {
+                        $existing->update([
+                            'drying_time_minutes' => $elapsed,
+                            'status' => 'stopped',
+                            'ended_at' => $existing->ended_at ?? now(),
+                        ]);
+                    }
+                }
+
+                return response()->json([
+                    'success' => true,
+                    'duplicate' => true,
+                    'message' => 'Local session already saved.',
+                ]);
+            }
+
             return response()->json([
                 'success' => false,
-                'message' => $e->getMessage(),
+                'message' => $msg,
             ], 500);
         }
     }
@@ -2373,6 +2504,61 @@ class DryingController extends Controller
                 'recorded_at' => optional($log->recorded_at)->toDateTimeString(),
             ];
         })->values()->all();
+    }
+
+    /**
+     * List payload without loading every sensor log one session at a time.
+     * The old 80-row cap made the next hidden sessions appear after a delete.
+     *
+     * @param  \Illuminate\Support\Collection<int, DryingSession>  $sessions
+     */
+    private function transformSessionsForHistoryList($sessions)
+    {
+        $ids = $sessions->pluck('id')->map(fn ($id) => (int) $id)->filter(fn ($id) => $id > 0)->values();
+        $avgs = collect();
+        if ($ids->isNotEmpty() && Schema::hasTable('sensor_logs')) {
+            $avgs = DB::table('sensor_logs')
+                ->whereIn('drying_session_id', $ids->all())
+                ->groupBy('drying_session_id')
+                ->selectRaw(
+                    'drying_session_id, AVG(temperature) as avg_temperature, AVG(humidity) as avg_humidity, AVG(moisture) as avg_moisture'
+                )
+                ->get()
+                ->keyBy('drying_session_id');
+        }
+
+        return $sessions->map(function (DryingSession $session) use ($avgs) {
+            $avg = $avgs->get($session->id);
+            $totalDryingSeconds = max(0, (int) ($session->drying_time_minutes ?? 0));
+            $totalDryingMinutes = (int) floor($totalDryingSeconds / 60);
+
+            return [
+                'id' => $session->id,
+                'microcontroller_id' => $session->microcontroller_id,
+                'session_code' => $session->session_code,
+                'date' => optional($session->ended_at ?? $session->created_at)->toDateTimeString(),
+                'fish_type' => $session->fish_type ?? 'Unknown',
+                'total_fish' => $session->total_fish !== null ? (int) $session->total_fish : null,
+                'target_temperature' => $session->target_temperature !== null ? (float) $session->target_temperature : null,
+                'status' => $session->status,
+                'duration_minutes' => $totalDryingMinutes,
+                'set_duration_minutes' => $session->set_duration_minutes !== null ? (int) $session->set_duration_minutes : null,
+                'extension_minutes' => (int) ($session->extension_minutes ?? 0),
+                'total_duration_minutes' => (int) ($session->set_duration_minutes ?? 0) + (int) ($session->extension_minutes ?? 0),
+                'drying_time_minutes' => $totalDryingMinutes,
+                'drying_time_seconds' => $totalDryingSeconds,
+                'temperature' => $avg && $avg->avg_temperature !== null ? round((float) $avg->avg_temperature, 2) : null,
+                'humidity' => $avg && $avg->avg_humidity !== null ? round((float) $avg->avg_humidity, 2) : null,
+                'moisture' => $avg && $avg->avg_moisture !== null ? round((float) $avg->avg_moisture, 2) : null,
+                'fan_speed' => $session->fan_speed,
+                'moisture_checks' => [],
+                'moisture_check_count' => 0,
+                'avg_temperature' => $avg && $avg->avg_temperature !== null ? round((float) $avg->avg_temperature, 2) : null,
+                'avg_humidity' => $avg && $avg->avg_humidity !== null ? round((float) $avg->avg_humidity, 2) : null,
+                'avg_moisture' => $avg && $avg->avg_moisture !== null ? round((float) $avg->avg_moisture, 2) : null,
+                'avg_fan_speed' => $session->fan_speed !== null ? (float) $session->fan_speed : null,
+            ];
+        })->values();
     }
 
     private function transformSessionForHistory(DryingSession $session): array

@@ -57,7 +57,7 @@
       "reactCompiler": false
     },
     "extra": {
-      "apiBaseUrl": "http://10.71.41.15:8000/api",
+      "apiBaseUrl": "",
       "firebase": {
         "apiKey": "AIzaSyCO0FjIGLXYJcNepqraUb61jUYLyrk8oAk",
         "authDomain": "capstone-fish-dryer.firebaseapp.com",

@@ -1,5 +1,5 @@
 import * as FileSystem from "expo-file-system/legacy";
-import { API_BASE_URL } from "@/config/api";
+import { getApiBaseUrl } from "@/config/api";
 
 export type ProfileUser = {
   id: number;
@@ -59,7 +59,7 @@ export async function uploadProfilePhotoJson(
     throw new Error("No image to upload.");
   }
 
-  const res = await fetch(`${API_BASE_URL}/mobile/update-profile-photo/${userId}`, {
+  const res = await fetch(`${getApiBaseUrl()}/mobile/update-profile-photo/${userId}`, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -117,7 +117,7 @@ export async function updateProfileFieldsJson(
   const bd = fields.birthdate.trim();
   if (bd) payload.birthdate = bd;
 
-  const res = await fetch(`${API_BASE_URL}/mobile/update-profile/${userId}`, {
+  const res = await fetch(`${getApiBaseUrl()}/mobile/update-profile/${userId}`, {
     method: "POST",
     headers: {
       Accept: "application/json",

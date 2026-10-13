@@ -25,6 +25,11 @@ class FirebaseRealtimeService
         return $this->enabled && $this->databaseUrl;
     }
 
+    public function hasAdminSecret(): bool
+    {
+        return trim((string) $this->databaseSecret) !== '';
+    }
+
     private function rtdbUrl(string $path): string
     {
         $base = rtrim((string) $this->databaseUrl, '/');
@@ -35,10 +40,33 @@ class FirebaseRealtimeService
         $url = "{$base}/{$path}";
         $secret = trim((string) $this->databaseSecret);
         if ($secret !== '') {
-            $url .= (str_contains($url, '?') ? '&' : '?').'auth='.urlencode($secret);
+            return $url.(str_contains($url, '?') ? '&' : '?').'auth='.urlencode($secret);
         }
 
         return $url;
+    }
+
+    /**
+     * Laptop LAN endpoint so phone/ESP32 never need a flashed IPv4.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    public function setLanServer(array $payload): bool
+    {
+        if (! $this->isEnabled()) {
+            return false;
+        }
+
+        try {
+            $res = Http::timeout(4)
+                ->withHeaders(['Content-Type' => 'application/json'])
+                ->withBody(json_encode($payload, JSON_THROW_ON_ERROR), 'application/json')
+                ->put($this->rtdbUrl('lan/server'));
+
+            return $res->successful();
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /**

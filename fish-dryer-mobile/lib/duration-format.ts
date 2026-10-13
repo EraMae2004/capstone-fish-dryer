@@ -93,9 +93,6 @@ export function parseHMSToMinutes(input: string): number | null {
   return mins >= 1 ? mins : null;
 }
 
-const YL69_DRY_ADC = 4095;
-const YL69_WET_ADC = 1200;
-
 export function resolveMoisturePercent(
   readings: Record<string, unknown> | null | undefined
 ): number | null {
@@ -107,13 +104,11 @@ export function resolveMoisturePercent(
   if (typeof r.moisture === "number" && Number.isFinite(r.moisture) && r.moisture <= 100) {
     return Math.round(r.moisture);
   }
-  if (typeof r.moisture_raw === "number" && Number.isFinite(r.moisture_raw)) {
-    const dry = YL69_DRY_ADC;
-    const wet = YL69_WET_ADC;
-    const pct =
-      dry > wet
-        ? ((dry - r.moisture_raw) * 100) / (dry - wet)
-        : ((r.moisture_raw - dry) * 100) / (wet - dry);
+  const raw = typeof r.moisture_raw === "number" ? r.moisture_raw : null;
+  const dry = typeof r.moisture_dry_adc === "number" ? r.moisture_dry_adc : null;
+  const wet = typeof r.moisture_wet_adc === "number" ? r.moisture_wet_adc : null;
+  if (raw != null && dry != null && wet != null && dry > wet + 50) {
+    const pct = ((dry - raw) * 100) / (dry - wet);
     return Math.max(0, Math.min(100, Math.round(pct)));
   }
   return null;

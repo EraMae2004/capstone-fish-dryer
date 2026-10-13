@@ -14,7 +14,7 @@ import {
 import { Ionicons, FontAwesome } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as ImagePicker from "expo-image-picker";
-import { API_BASE_URL, apiStorageUrl } from "@/config/api";
+import { getApiBaseUrl, apiStorageUrl } from "@/config/api";
 import { saveProfileComplete, type ProfileUser } from "@/lib/profile-photo-upload";
 
 type UserProfileProps = {
@@ -68,7 +68,7 @@ export default function UserProfile({ onProfileSaved }: UserProfileProps) {
       setOriginalData(parsed);
 
       try {
-        const response = await fetch(`${API_BASE_URL}/mobile/user/${parsed.id}`);
+        const response = await fetch(`${getApiBaseUrl()}/mobile/user/${parsed.id}`);
         const data = await response.json();
 
         if (data.success) {
@@ -167,7 +167,7 @@ export default function UserProfile({ onProfileSaved }: UserProfileProps) {
       return Alert.alert("Passwords do not match");
     }
 
-    const response = await fetch(`${API_BASE_URL}/mobile/change-password/${user?.id}`, {
+    const response = await fetch(`${getApiBaseUrl()}/mobile/change-password/${user?.id}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -214,12 +214,14 @@ export default function UserProfile({ onProfileSaved }: UserProfileProps) {
 
       <View style={styles.card}>
         <View style={styles.profileSection}>
-          <View style={styles.profileCircle}>
-            {displayUri ? (
-              <Image source={{ uri: displayUri }} style={styles.image} />
-            ) : (
-              <Text style={styles.initialText}>{initials}</Text>
-            )}
+          <View style={styles.profileFrame}>
+            <View style={styles.profileCircle}>
+              {displayUri ? (
+                <Image source={{ uri: displayUri }} style={styles.image} />
+              ) : (
+                <Text style={styles.initialText}>{initials}</Text>
+              )}
+            </View>
           </View>
 
           <View style={styles.imageButtons}>
@@ -378,6 +380,16 @@ const styles = StyleSheet.create({
 
   profileSection: { alignItems: "center", marginBottom: 20 },
 
+  profileFrame: {
+    width: 148,
+    height: 148,
+    borderRadius: 74,
+    borderWidth: 3,
+    borderColor: "#113F67",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+
   profileCircle: {
     width: 140,
     height: 140,
@@ -400,7 +412,7 @@ const styles = StyleSheet.create({
   },
 
   editBtn: {
-    backgroundColor: "#495057",
+    backgroundColor: "#113F67",
     padding: 8,
     borderRadius: 6,
     flexDirection: "row",
