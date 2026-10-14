@@ -71,6 +71,11 @@ class PublishLanDiscovery extends Command
             return $forced;
         }
 
+        $hotspot = $this->phoneHotspotIpv4();
+        if ($hotspot) {
+            return $hotspot;
+        }
+
         if (function_exists('socket_create')) {
             $sock = @socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
             if ($sock !== false) {
@@ -78,7 +83,7 @@ class PublishLanDiscovery extends Command
                 $addr = null;
                 @socket_getsockname($sock, $addr);
                 @socket_close($sock);
-                if (is_string($addr) && $this->isUsableLanIp($addr)) {
+                if (is_string($addr) && $this->isUsableLanIp($addr) && ! $this->isCampusIpv4($addr)) {
                     return $addr;
                 }
             }
@@ -106,10 +111,22 @@ class PublishLanDiscovery extends Command
                         || str_contains($block, 'docker')
                         || str_contains($block, 'loopback')
                         || str_contains($block, 'hyper-v');
-                    $candidates[] = ['ip' => $ip, 'virtual' => $virtual, 'wifi' => str_contains($block, 'wi-fi') || str_contains($block, 'wireless')];
+                    $candidates[] = [
+                        'ip' => $ip,
+                        'virtual' => $virtual,
+                        'wifi' => str_contains($block, 'wi-fi') || str_contains($block, 'wireless'),
+                        'hotspot' => $this->isPhoneHotspotIpv4($ip),
+                        'campus' => $this->isCampusIpv4($ip),
+                    ];
                 }
             }
             usort($candidates, function (array $a, array $b): int {
+                if ($a['hotspot'] !== $b['hotspot']) {
+                    return $a['hotspot'] ? -1 : 1;
+                }
+                if ($a['campus'] !== $b['campus']) {
+                    return $a['campus'] ? 1 : -1;
+                }
                 if ($a['virtual'] !== $b['virtual']) {
                     return $a['virtual'] ? 1 : -1;
                 }
@@ -121,6 +138,35 @@ class PublishLanDiscovery extends Command
             });
             if ($candidates !== []) {
                 return $candidates[0]['ip'];
+            }
+        }
+
+        return null;
+    }
+
+    /** Android 192.168.43.x, Windows 192.168.137.x, iPhone 172.20.10.x. */
+    private function isPhoneHotspotIpv4(string $ip): bool
+    {
+        return str_starts_with($ip, '192.168.43.')
+            || str_starts_with($ip, '192.168.137.')
+            || str_starts_with($ip, '172.20.10.');
+    }
+
+    private function isCampusIpv4(string $ip): bool
+    {
+        return str_starts_with($ip, '10.');
+    }
+
+    private function phoneHotspotIpv4(): ?string
+    {
+        if (PHP_OS_FAMILY !== 'Windows') {
+            return null;
+        }
+        $out = [];
+        exec('ipconfig', $out);
+        foreach ($out as $line) {
+            if (preg_match('/IPv4 Address[^:]*:\s*([0-9.]+)/i', $line, $m) && $this->isPhoneHotspotIpv4($m[1])) {
+                return $m[1];
             }
         }
 

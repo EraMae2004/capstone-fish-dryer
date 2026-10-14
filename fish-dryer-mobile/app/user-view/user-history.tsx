@@ -26,17 +26,48 @@ function fmtPct(value: unknown): string {
 }
 
 /** Actual running time only (pause excluded). Never the planned or extended duration. */
-function fmtSessionDryTime(row: any): string {
+function usedDryingSeconds(row: any): number {
   const sec = Number(row?.drying_time_seconds);
-  if (Number.isFinite(sec) && sec >= 0) {
-    return formatSecondsAsHMS(sec);
-  }
-  return "00:00:00";
+  if (Number.isFinite(sec) && sec >= 0) return Math.floor(sec);
+  return 0;
+}
+
+function fmtSessionDryTime(row: any): string {
+  return formatSecondsAsHMS(usedDryingSeconds(row));
+}
+
+const PHILIPPINE_TIME = "Asia/Manila";
+
+/** API datetimes are UTC. Show them on Philippine time. */
+function parseUtcStamp(value: unknown): Date | null {
+  if (value == null || value === "") return null;
+  const raw = String(value).trim().replace(" ", "T");
+  const iso = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw) ? raw : `${raw}Z`;
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function fmtSessionDate(value: unknown): string {
-  if (value == null || value === "") return "--";
-  return String(value).replace("T", " ").slice(0, 19);
+  const date = parseUtcStamp(value);
+  if (!date) return "--";
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: PHILIPPINE_TIME,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
+/** Clock time of the session in Philippine time, 12-hour (1–12). */
+function fmtSessionClock(value: unknown): string {
+  const date = parseUtcStamp(value);
+  if (!date) return "--";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: PHILIPPINE_TIME,
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date);
 }
 
 function UserHistory({ active = true }: { active?: boolean }) {
@@ -244,6 +275,13 @@ function UserHistory({ active = true }: { active?: boolean }) {
         const detail = data?.data ?? data?.session ?? data;
         if (!detail || typeof detail !== 'object') return;
         const merged = existing ? { ...existing, ...detail } : detail;
+        if (
+          existing &&
+          usedDryingSeconds(detail) === 0 &&
+          usedDryingSeconds(existing) > 0
+        ) {
+          merged.drying_time_seconds = usedDryingSeconds(existing);
+        }
         setSelectedSession(merged);
         setSessions((prev) => {
           const next = prev.map((row) =>
@@ -380,7 +418,6 @@ function UserHistory({ active = true }: { active?: boolean }) {
           <Text style={styles.headerText}>ID</Text>
           <Text style={styles.headerText}>Date</Text>
           <Text style={styles.headerText}>Fish</Text>
-          <Text style={styles.headerText}>Time</Text>
           <Text style={styles.headerText}>Action</Text>
         </View>
 
@@ -398,9 +435,8 @@ function UserHistory({ active = true }: { active?: boolean }) {
               </TouchableOpacity>
 
               <Text style={styles.cell}>#{item.id}</Text>
-              <Text style={styles.cell}>{String(item.date).replace('T', ' ').slice(0, 16)}</Text>
+              <Text style={styles.cell}>{fmtSessionDate(item.date)}</Text>
               <Text style={styles.cell}>{item.fish_type}</Text>
-              <Text style={styles.timeCell}>{fmtSessionDryTime(item)}</Text>
 
               <View style={styles.actions}>
                 <TouchableOpacity onPress={() => handleViewDetails(id)}>
@@ -437,11 +473,14 @@ function UserHistory({ active = true }: { active?: boolean }) {
             <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator>
               <Text style={styles.detailRow}>ID: #{selectedSession?.id}</Text>
               <Text style={styles.detailRow}>Date: {fmtSessionDate(selectedSession?.date ?? selectedSession?.ended_at)}</Text>
+              <Text style={styles.detailRow}>
+                Time: {fmtSessionClock(selectedSession?.date ?? selectedSession?.ended_at)}
+              </Text>
               <Text style={styles.detailRow}>Fish Type: {selectedSession?.fish_type ?? '--'}</Text>
               <Text style={styles.detailRow}>No. of Fish: {selectedSession?.total_fish ?? '--'}</Text>
               <Text style={styles.detailRow}>Target Temp: {selectedSession?.target_temperature ?? '--'} °C</Text>
               <Text style={styles.detailRow}>
-                Total drying time: {fmtSessionDryTime(selectedSession)}
+                Time used: {fmtSessionDryTime(selectedSession)}
               </Text>
               <Text style={styles.detailRow}>
                 Temperature: {selectedSession?.temperature != null ? `${selectedSession.temperature} °C` : '--'}
@@ -542,11 +581,6 @@ const styles = StyleSheet.create({
 
   cell: {
     ...userTypography.tableCell,
-  },
-
-  timeCell: {
-    ...userTypography.tableCell,
-    minWidth: 72,
   },
 
   loader: {

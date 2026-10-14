@@ -186,11 +186,7 @@
       static const unsigned long ASSIGNMENT_POLL_ASSIGNED_MS = 60000UL;
       static const unsigned long SESSION_POLL_MS = 3000UL;
       static const unsigned long SESSION_BODY_POLL_MS = 12000UL;
-      static const unsigned long TEST_COMMAND_POLL_MS = 600UL;
       static const unsigned long RTDB_GET_TIMEOUT_MS = 1200UL;
-      static const unsigned long RTDB_GET_CONNECT_TIMEOUT_MS = 800UL;
-      static const unsigned long RTDB_PUT_TIMEOUT_MS = 2500UL;
-      static const unsigned long RTDB_PUT_CONNECT_TIMEOUT_MS = 1500UL;
 
       // ================= WIFI / API (no hardcoded PC IPv4) =================
       const char* WIFI_SSID = "XuMinghao";
@@ -472,14 +468,23 @@
 
       unsigned long lastHeartbeatMs = 0;
       static unsigned long gLastPresenceOkMs = 0;
-      /** Full sensor snapshot. This write is what keeps the app Online. */
-      const unsigned long HEARTBEAT_INTERVAL_MS = 3000;
+      static unsigned long gLastPresenceAttemptMs = 0;
+      static bool gLastPresenceFailed = false;
+      /** Light Online pulse. Runs even while the keypad screen is open. */
+      const unsigned long PRESENCE_INTERVAL_MS = 2000;
+      /** Full sensor snapshot. Live temp, humidity, and time go out on the pulse. */
+      const unsigned long HEARTBEAT_INTERVAL_MS = 8000;
 
       // DHT22 requires ≥ ~2 s between reads; polling faster returns NaN and makes status flicker.
       static unsigned long lastDhtPollMs = 0;
       static float cachedDhtT = NAN;
       static float cachedDhtH = NAN;
       static bool lastDhtReadOk = false;
+      static unsigned long gLastGoodDhtMs = 0;
+      /** Same numbers the LCD and the app show. */
+      static float gLiveTempC = NAN;
+      static float gLiveHum = NAN;
+      static int gLiveMoisturePct = -1;
 
       static inline void driveLed(int pin, bool on) {
         pinMode(pin, OUTPUT);
@@ -700,6 +705,12 @@
         float h = dht.readHumidity();
         float t = dht.readTemperature();
         bool plausible = dhtReadPlausible(t, h);
+        // One miss keeps the last good reading so the LCD and the app stay on the same number.
+        if (!plausible && gLastGoodDhtMs != 0 && (millis() - gLastGoodDhtMs) < 30000UL) {
+          lastDhtPollMs = millis();
+          lastDhtReadOk = true;
+          return true;
+        }
         if (!plausible) {
           delay(120);
           yield();
@@ -711,13 +722,17 @@
         // Timestamp after the acquisition so the next poll is ≥2 s later (library also enforces).
         lastDhtPollMs = millis();
 
-        lastDhtReadOk = plausible;
         if (plausible) {
           cachedDhtT = t;
           cachedDhtH = h;
+          gLastGoodDhtMs = millis();
+          lastDhtReadOk = true;
+        } else if (gLastGoodDhtMs != 0 && (millis() - gLastGoodDhtMs) < 30000UL) {
+          lastDhtReadOk = true;
         } else {
           cachedDhtT = NAN;
           cachedDhtH = NAN;
+          lastDhtReadOk = false;
         }
         return lastDhtReadOk;
       }
@@ -729,21 +744,21 @@
       }
       String statusUnknown() { return "unknown"; }
 
-      // ===== Moisture (ADC → %) =====
-      // YL-69 on GPIO35: lower ADC = wetter, higher = drier.
-      // 0% is this probe's own dry reading. 100% is this many counts wetter.
-      // Every count between those two points is a different percent.
-      #ifndef MOISTURE_SOAKED_SPAN
-      #define MOISTURE_SOAKED_SPAN 650
+      // ===== Moisture calibration (ADC → %) =====
+      // YL-69 on GPIO35: lower ADC = wetter, higher = drier. Swap if water raises ADC.
+      #ifndef MOISTURE_YL69_DRY_ADC
+      #define MOISTURE_YL69_DRY_ADC 4095
+      #endif
+      #ifndef MOISTURE_YL69_WET_ADC
+      #define MOISTURE_YL69_WET_ADC 1200
+      #endif
+      #ifndef MOISTURE_LEARNED_SPAN_MIN
+      #define MOISTURE_LEARNED_SPAN_MIN 800
       #endif
 
-      static int MOISTURE_DRY_ADC = 0;
-      static int MOISTURE_WET_ADC = 0;
+      static int MOISTURE_DRY_ADC = MOISTURE_YL69_DRY_ADC;
+      static int MOISTURE_WET_ADC = MOISTURE_YL69_WET_ADC;
       static bool moistureBoundsInitialized = false;
-      static int gMoistDryAdc = 0;
-      static uint8_t gMoistDryWarmup = 0;
-      static int gMoistShownPct = -1;
-      static unsigned long gLastMoisturePublishMs = 0;
 
       static int clampInt(int v, int lo, int hi) {
         if (v < lo) return lo;
@@ -751,49 +766,25 @@
         return v;
       }
 
-      /**
-       * Dry point follows the probe in air (the highest stable ADC).
-       * It does not follow the probe down into water.
-       */
-      static void updateMoistureBounds(int adc) {
-        if (adc < 0) adc = 0;
-        if (adc > 4095) adc = 4095;
-        if (gMoistDryWarmup < 4) {
-          gMoistDryWarmup++;
-          gMoistDryAdc = adc;
-        } else if (adc > gMoistDryAdc) {
-          const int step = adc - gMoistDryAdc;
-          gMoistDryAdc += step <= 30 ? step : step / 4;
-        } else if (gMoistDryAdc - adc <= 40) {
-          gMoistDryAdc--;
-        }
-        MOISTURE_DRY_ADC = gMoistDryAdc;
-        MOISTURE_WET_ADC = gMoistDryAdc > MOISTURE_SOAKED_SPAN
-            ? gMoistDryAdc - MOISTURE_SOAKED_SPAN
-            : 0;
-        moistureBoundsInitialized = gMoistDryWarmup >= 4;
-      }
-
-      /** 0% at this probe's dry ADC. 100% when it is MOISTURE_SOAKED_SPAN counts wetter. */
+      /** Fixed scale: dry air = 0%, probe in water = 100%. No learned range. */
       static int moisturePercentFromAdc(int adc) {
-        if (adc < 0) adc = 0;
-        if (adc > 4095) adc = 4095;
-        const int dry = gMoistDryAdc > 0 ? gMoistDryAdc : adc;
-        return clampInt(
-            (int)lroundf((float)(dry - adc) * 100.0f / (float)MOISTURE_SOAKED_SPAN),
-            0, 100);
+        const int dry = MOISTURE_YL69_DRY_ADC;
+        const int wet = MOISTURE_YL69_WET_ADC;
+        if (dry <= wet) return 0;
+        float pct = (float)(dry - adc) * 100.0f / (float)(dry - wet);
+        return clampInt((int)lroundf(pct), 0, 100);
       }
 
       #ifndef MOISTURE_ADC_SAMPLES
-      #define MOISTURE_ADC_SAMPLES 8
+      #define MOISTURE_ADC_SAMPLES 24
       #endif
 
       #ifndef MOISTURE_FLOAT_SPREAD_FAIL
-      #define MOISTURE_FLOAT_SPREAD_FAIL 2200
+      #define MOISTURE_FLOAT_SPREAD_FAIL 1100
       #endif
       #ifndef MOISTURE_FLOAT_LOW_ADC_MAX
-      /** Only a pin stuck at ground is unplugged. A wet probe is a low ADC and is valid. */
-      #define MOISTURE_FLOAT_LOW_ADC_MAX 3
+      /** Unplugged GPIO35: pegged near 0 with very low spread (not wet fish readings). */
+      #define MOISTURE_FLOAT_LOW_ADC_MAX 180
       #endif
       #ifndef MOISTURE_FLOAT_LOW_SPREAD_MAX
       #define MOISTURE_FLOAT_LOW_SPREAD_MAX 150
@@ -815,11 +806,6 @@
       static bool gMoistureConnectedStable = false;
       static uint8_t gMoistureGoodStreak = 0;
       static uint8_t gMoistureBadStreak = 0;
-      static int gMoistureAvgCached = 0;
-      static int gMoistureSpreadCached = 0;
-      static int gMoistureMinCached = 4095;
-      static int gMoistureMaxCached = 0;
-      static unsigned long gLastMoistureSampleMs = 0;
       /** Latched ON after RTDB start until explicit stop (survives flaky GETs). */
       static bool gDryingOutputsLatched = false;
       /** Last processed `machines/{id}/command.seq` (mobile + Laravel write here). */
@@ -837,16 +823,29 @@
       static bool gDryRunAuthorized = false;
 
       /**
-       * YL-69 A0 on GPIO35: wet → low ADC, dry → high (often near 4095).
-       * Unplugged pin: stuck near 0, or a wide sample-to-sample spread.
-       * A stable high reading is a dry probe, not a missing sensor.
+       * YL-69 A0: wet → low ADC, dry → high. Unplugged GPIO35 often hits 0 (min) with
+       * noisy spread 150–400 — must not report fake 60–90% moisture.
        */
       static bool moistureProbeConnected(int avgAdc, int spread, int minAdc, int maxAdc) {
         (void)minAdc;
-        (void)maxAdc;
-        if (spread > MOISTURE_FLOAT_SPREAD_FAIL) return false;
-        if (avgAdc <= MOISTURE_FLOAT_LOW_ADC_MAX && spread < 15) return false;
-        return avgAdc >= 0 && avgAdc <= 4095;
+        if (spread > MOISTURE_FLOAT_SPREAD_FAIL) {
+          return false;
+        }
+        if (maxAdc >= 4040 && minAdc <= 25 && spread < 100) {
+          return false;
+        }
+        if (avgAdc <= 12 && spread < 90) {
+          return false;
+        }
+        if (avgAdc < MOISTURE_FLOAT_LOW_ADC_MAX &&
+            spread < MOISTURE_FLOAT_LOW_SPREAD_MAX) {
+          return false;
+        }
+        if (avgAdc > 3950 && spread < 180) {
+          return false;
+        }
+        /** GPIO35: probe connected if ADC is in a sane range (not pegged floating). */
+        return avgAdc >= 80 && avgAdc <= 4080 && spread <= 900;
       }
 
       /** Stable connect/disconnect for RTDB + buzzer (breadboard noise). */
@@ -860,11 +859,8 @@
 
       static void resetMoistureCalibration() {
         moistureBoundsInitialized = false;
-        gMoistDryAdc = 0;
-        gMoistDryWarmup = 0;
-        gMoistShownPct = -1;
-        MOISTURE_DRY_ADC = 0;
-        MOISTURE_WET_ADC = 0;
+        MOISTURE_DRY_ADC = MOISTURE_YL69_DRY_ADC;
+        MOISTURE_WET_ADC = MOISTURE_YL69_WET_ADC;
       }
 
       /**
@@ -888,19 +884,12 @@
             gMoistureGoodStreak >= MOISTURE_CONNECT_GOOD_SAMPLES) {
           gMoistureConnectedStable = true;
           gMoistureBadStreak = 0;
-          Serial.print("[moisture] connected adc=");
-          Serial.print(avgAdc);
-          Serial.print(" spread=");
-          Serial.println(spread);
         }
         if (gMoistureConnectedStable &&
             gMoistureBadStreak >= MOISTURE_CONNECT_BAD_SAMPLES) {
           gMoistureConnectedStable = false;
           gMoistureGoodStreak = 0;
-          Serial.print("[moisture] not detected adc=");
-          Serial.print(avgAdc);
-          Serial.print(" spread=");
-          Serial.println(spread);
+          resetMoistureCalibration();
         }
         return gMoistureConnectedStable;
       }
@@ -922,7 +911,7 @@
             secondMinV = v;
           }
           if (v > maxV) maxV = v;
-          delay(1);
+          delay(2);
         }
         avgOut = (int)(sum / MOISTURE_ADC_SAMPLES);
         spreadOut = maxV - minV;
@@ -936,28 +925,6 @@
 
       static void readMoistureAdc(int& avgOut, int& spreadOut, int& minOut, int& maxOut) {
         readMoistureAdcOnPin(PIN_MOISTURE, avgOut, spreadOut, minOut, maxOut);
-      }
-
-      /** One ADC sweep every 120 ms so a dip shows up on the next publish. */
-      static void refreshMoistureSample(bool force) {
-        const unsigned long now = millis();
-        if (!force && gLastMoistureSampleMs != 0 &&
-            (now - gLastMoistureSampleMs) < 120UL) {
-          return;
-        }
-        gLastMoistureSampleMs = now;
-        readMoistureAdc(gMoistureAvgCached, gMoistureSpreadCached,
-                        gMoistureMinCached, gMoistureMaxCached);
-        (void)moistureSensorReportOk(gMoistureAvgCached, gMoistureSpreadCached,
-                                     gMoistureMinCached, gMoistureMaxCached);
-        if (gMoistureConnectedStable) {
-          updateMoistureBounds(gMoistureAvgCached);
-          const int instant = moisturePercentFromAdc(gMoistureAvgCached);
-          if (gMoistShownPct < 0) gMoistShownPct = instant;
-          else gMoistShownPct = (int)lroundf(gMoistShownPct * 0.2f + instant * 0.8f);
-        } else {
-          gMoistShownPct = -1;
-        }
       }
 
       static bool ledPinOn(int pin) {
@@ -1873,17 +1840,6 @@
         Serial.println("[wifi] reconnect attempt");
       }
 
-      static unsigned long gLastNetSlotMs = 0;
-      static bool takeNetSlot() {
-        const unsigned long now = millis();
-        const unsigned long gap = 400UL;
-        if (gLastNetSlotMs != 0 && (now - gLastNetSlotMs) < gap) {
-          return false;
-        }
-        gLastNetSlotMs = now;
-        return true;
-      }
-
       static void syncClockOnce() {
         configTime(0, 0, "pool.ntp.org", "time.nist.gov");
         // Best-effort; don't block forever.
@@ -1951,13 +1907,23 @@
 
       static WiFiClientSecure gRtdbTls;
       static bool gRtdbTlsReady = false;
+      static String gRtdbHost;
+      static unsigned long gLastRtdbFailLogMs = 0;
 
       static void rtdbTlsPrepare() {
         if (!gRtdbTlsReady) {
           gRtdbTls.setInsecure();
-          // A dead handshake must not sit in front of app Start.
-          gRtdbTls.setHandshakeTimeout(2);
+          // Handshake only runs when the keep-alive socket is down, not on every poll.
+          gRtdbTls.setHandshakeTimeout(3);
           gRtdbTlsReady = true;
+        }
+        if (gRtdbHost.length() == 0) {
+          String u = FIREBASE_DATABASE_URL;
+          if (u.startsWith("https://")) u = u.substring(8);
+          else if (u.startsWith("http://")) u = u.substring(7);
+          const int slash = u.indexOf('/');
+          if (slash > 0) u = u.substring(0, slash);
+          gRtdbHost = u;
         }
       }
 
@@ -1965,50 +1931,206 @@
         gRtdbTls.stop();
       }
 
-      /** Close TLS only when the socket is already dead. A read timeout (-11) must keep it. */
-      static void rtdbTlsStopIfDead(int code) {
-        if (code == -1 || code == -4 || code == -5) {
-          rtdbTlsStop();
+      static void rtdbLogFail(const char* what, int code, const String& path) {
+        const unsigned long now = millis();
+        if (gLastRtdbFailLogMs != 0 && (now - gLastRtdbFailLogMs) < 8000UL) return;
+        gLastRtdbFailLogMs = now;
+        Serial.print("[RTDB] ");
+        Serial.print(what);
+        Serial.print(" ");
+        Serial.print(code);
+        Serial.print(" ");
+        Serial.println(path);
+      }
+
+      /** Byte from the keep-alive socket, or -1 on deadline / disconnect. */
+      static int rtdbReadByte(unsigned long deadline) {
+        unsigned long lastKeyMs = 0;
+        while ((long)(deadline - millis()) > 0) {
+          if (gRtdbTls.available()) return gRtdbTls.read();
+          if (!gRtdbTls.connected()) return -1;
+          const unsigned long now = millis();
+          if (lastKeyMs == 0 || (now - lastKeyMs) >= 20UL) {
+            lastKeyMs = now;
+            serviceLocalHmiKeys();
+          }
+          delay(1);
         }
+        return -1;
+      }
+
+      static bool rtdbReadLine(String& line, unsigned long deadline) {
+        line = "";
+        while ((long)(deadline - millis()) > 0) {
+          const int c = rtdbReadByte(deadline);
+          if (c < 0) return false;
+          if (c == '\n') return true;
+          if (c != '\r' && line.length() < 220) line += (char)c;
+        }
+        return false;
+      }
+
+      static bool rtdbReadChunked(String& body, unsigned long deadline) {
+        body = "";
+        while (body.length() < 4096 && (long)(deadline - millis()) > 0) {
+          String szLine;
+          if (!rtdbReadLine(szLine, deadline)) return false;
+          szLine.trim();
+          const int semi = szLine.indexOf(';');
+          if (semi >= 0) szLine = szLine.substring(0, semi);
+          const long n = strtol(szLine.c_str(), nullptr, 16);
+          if (n <= 0) {
+            String trailer;
+            (void)rtdbReadLine(trailer, deadline);
+            return true;
+          }
+          if (body.length() + (unsigned)n > 4096) return false;
+          body.reserve(body.length() + (unsigned)n);
+          for (long i = 0; i < n; i++) {
+            const int c = rtdbReadByte(deadline);
+            if (c < 0) return false;
+            body += (char)c;
+          }
+          (void)rtdbReadByte(deadline);
+          (void)rtdbReadByte(deadline);
+        }
+        return body.length() < 4096;
+      }
+
+      /**
+       * One HTTPS request on a reused TLS socket.
+       * A fresh handshake is the slow part (about 1–2 s). Polls after that are one round trip.
+       */
+      static int rtdbHttp(const char* method, const String& pathNoJsonSuffix,
+                          const String* jsonBody, String* respBody, unsigned long timeoutMs) {
+        if (WiFi.status() != WL_CONNECTED) return -1;
+        rtdbTlsPrepare();
+        if (gRtdbHost.length() == 0) return -1;
+
+        const unsigned long budget = timeoutMs > 0 ? timeoutMs : 1200UL;
+        String path = "/";
+        path += pathNoJsonSuffix;
+        if (!path.endsWith(".json")) path += ".json";
+        appendRtdbAuthQuery(path);
+
+        String req;
+        req.reserve(180 + path.length() + (jsonBody ? jsonBody->length() : 0));
+        req += method;
+        req += ' ';
+        req += path;
+        req += " HTTP/1.1\r\nHost: ";
+        req += gRtdbHost;
+        req += "\r\nConnection: keep-alive\r\nUser-Agent: fish-dryer-esp\r\nAccept: application/json\r\n";
+        if (jsonBody) {
+          req += "Content-Type: application/json\r\nContent-Length: ";
+          req += String(jsonBody->length());
+          req += "\r\n";
+        }
+        req += "\r\n";
+        if (jsonBody) req += *jsonBody;
+
+        // One reconnect if the kept socket is dead. Do not handshake twice when Wi-Fi is down.
+        for (int attempt = 0; attempt < 2; attempt++) {
+          if (!gRtdbTls.connected()) {
+            // stop() clears the TLS client on some ESP32 cores — set this every connect.
+            gRtdbTls.setInsecure();
+            gRtdbTls.setHandshakeTimeout(3);
+            if (!gRtdbTls.connect(gRtdbHost.c_str(), 443)) {
+              rtdbTlsStop();
+              return -1;
+            }
+          }
+
+          if (gRtdbTls.print(req) != (int)req.length()) {
+            rtdbTlsStop();
+            if (attempt == 0) continue;
+            return -1;
+          }
+
+          const unsigned long deadline = millis() + budget;
+          String status;
+          if (!rtdbReadLine(status, deadline)) {
+            rtdbTlsStop();
+            if (attempt == 0) continue;
+            return -1;
+          }
+          int code = -1;
+          if (status.startsWith("HTTP/1.")) {
+            const int sp = status.indexOf(' ');
+            if (sp > 0) code = status.substring(sp + 1).toInt();
+          }
+          if (code < 100) {
+            rtdbTlsStop();
+            if (attempt == 0) continue;
+            return -1;
+          }
+
+          int contentLength = -1;
+          bool chunked = false;
+          bool connClose = false;
+          bool headersOk = false;
+          while ((long)(deadline - millis()) > 0) {
+            String h;
+            if (!rtdbReadLine(h, deadline)) break;
+            if (h.length() == 0) {
+              headersOk = true;
+              break;
+            }
+            String hl = h;
+            hl.toLowerCase();
+            if (hl.startsWith("content-length:")) {
+              contentLength = hl.substring(15).toInt();
+            } else if (hl.startsWith("transfer-encoding:") && hl.indexOf("chunked") >= 0) {
+              chunked = true;
+            } else if (hl.startsWith("connection:") && hl.indexOf("close") >= 0) {
+              connClose = true;
+            }
+          }
+          if (!headersOk) {
+            rtdbTlsStop();
+            if (attempt == 0) continue;
+            return -1;
+          }
+
+          String body;
+          bool bodyOk = true;
+          if (chunked) {
+            bodyOk = rtdbReadChunked(body, deadline);
+          } else if (contentLength > 4096) {
+            bodyOk = false;
+          } else if (contentLength > 0) {
+            body.reserve((unsigned)contentLength);
+            for (int i = 0; i < contentLength; i++) {
+              const int c = rtdbReadByte(deadline);
+              if (c < 0) {
+                bodyOk = false;
+                break;
+              }
+              body += (char)c;
+            }
+          }
+          if (!bodyOk) {
+            rtdbTlsStop();
+            if (attempt == 0) continue;
+            return -1;
+          }
+          if (connClose) rtdbTlsStop();
+          if (respBody) *respBody = body;
+          return code;
+        }
+        return -1;
       }
 
       static String rtdbGetText(const String& pathNoJsonSuffix, unsigned long timeoutMs = 0) {
         serviceLocalHmiKeys();
         if (WiFi.status() != WL_CONNECTED) return String();
-        rtdbTlsPrepare();
-        HTTPClient http;
-        http.setReuse(true);
-        const unsigned long readMs = timeoutMs > 0 ? timeoutMs : RTDB_GET_TIMEOUT_MS;
-        const unsigned long connMs =
-            timeoutMs > 0 ? (timeoutMs < 350UL ? timeoutMs : 350UL) : RTDB_GET_CONNECT_TIMEOUT_MS;
-        http.setTimeout(readMs);
-        http.setConnectTimeout(connMs);
-        String url = String(FIREBASE_DATABASE_URL);
-        if (!url.endsWith("/")) url += "/";
-        url += pathNoJsonSuffix;
-        if (!url.endsWith(".json")) url += ".json";
-        appendRtdbAuthQuery(url);
-        if (!http.begin(gRtdbTls, url)) {
-          rtdbTlsStop();
-          return String();
-        }
-        http.addHeader("Connection", "keep-alive");
-        const int code = http.GET();
         String body;
-        if (code >= 200 && code < 300) {
-          body = http.getString();
-        } else {
-          Serial.print("[RTDB] GET ");
-          Serial.print(code);
-          Serial.print(" ");
-          Serial.println(pathNoJsonSuffix);
-        }
-        http.end();
-        if (code <= 0) {
-          rtdbTlsStop();
-        }
+        const unsigned long budget = timeoutMs > 0 ? timeoutMs : RTDB_GET_TIMEOUT_MS;
+        const int code = rtdbHttp("GET", pathNoJsonSuffix, nullptr, &body, budget);
         serviceLocalHmiKeys();
-        return body;
+        if (code >= 200 && code < 300) return body;
+        rtdbLogFail("GET", code, pathNoJsonSuffix);
+        return String();
       }
 
       /** Initialize MAC-based identity; load any persisted assignment from NVS. */
@@ -2448,10 +2570,9 @@
         }
 
       #if ENABLE_RTDB_HARDWARE_TEST
+        // Hardware Status owns the outputs until the app sends stop (Done or X).
         if (hardwareTestActive()) {
-          const bool freshStart = (action == "start" && seq > 0 && seq != gLastCommandSeq);
-          if (!freshStart) return;
-          pauseLocalHardwareTestOnly();
+          return;
         }
       #endif
 
@@ -2966,13 +3087,7 @@
       }
 
       static void tickHardwareTestOutputs() {
-        if (sessionBlocksHardwareTest()) {
-          pauseLocalHardwareTestOnly();
-      #if ENABLE_LOCAL_HMI
-          LocalHmi::endUiSelfTest();
-      #endif
-          return;
-        }
+        // Stay latched until Done or X clears test_command. Do not time out.
       #if ENABLE_LOCAL_HMI
         if (LocalHmi::keypadSelfTestWaiting() || LocalHmi::uiSelfTestActive()) {
           LocalHmi::pollKeypadFast();
@@ -2991,17 +3106,19 @@
           }
           return;
         }
-        if (sessionBlocksHardwareTest()) {
-          pauseLocalHardwareTestOnly();
+        // A drying run blocks a new test. An already-running test stays up until Done or X.
+        if (!hardwareTestActive() && sessionBlocksHardwareTest()) {
           return;
         }
         const String body = rtdbGetText(
-            String("machines/") + String(gAssignedId) + "/test_command", 400);
+            String("machines/") + String(gAssignedId) + "/test_command", 600);
         if (body.length() == 0) {
           // GET failed — do not treat as Done. Keep heater/fan running.
           return;
         }
-        if (body == "null") {
+        String trimmed = body;
+        trimmed.trim();
+        if (trimmed == "null") {
           if (hardwareTestActive()) endHardwareTest();
           return;
         }
@@ -3010,6 +3127,11 @@
         const String component = parseJsonStringAfterKey(body, "component", "");
         const String reqId = parseJsonStringAfterKey(body, "request_id", "");
         (void)parseJsonIntAfterKey(body, "duration_ms", 0);
+
+        if (mode == "stop" || mode == "done" || mode == "off") {
+          if (hardwareTestActive()) endHardwareTest();
+          return;
+        }
 
         if (mode != "all" && mode != "component") {
           if (!hardwareTestActive()) {
@@ -3054,49 +3176,13 @@
       static bool rtdbPutJson(const String& pathNoJsonSuffix, const String& jsonBody) {
         serviceLocalHmiKeys();
         if (WiFi.status() != WL_CONNECTED) return false;
-        rtdbTlsPrepare();
-        HTTPClient http;
-        http.setReuse(true);
-        unsigned long putMs = RTDB_PUT_TIMEOUT_MS;
-        unsigned long putConn = RTDB_PUT_CONNECT_TIMEOUT_MS;
-        const bool idleForTest =
-            !sessionStatusIsRunning() && !sessionStatusIsPaused() && !gDryingOutputsLatched;
-        if (hardwareTestActive() || idleForTest) {
-          putMs = 800UL;
-          putConn = 400UL;
-        }
-        http.setTimeout(putMs);
-        http.setConnectTimeout(putConn);
-
-        String url = String(FIREBASE_DATABASE_URL);
-        if (!url.endsWith("/")) url += "/";
-        url += pathNoJsonSuffix;
-        if (!url.endsWith(".json")) url += ".json";
-        appendRtdbAuthQuery(url);
-
-        if (!http.begin(gRtdbTls, url)) {
-          Serial.println("[RTDB] PUT begin failed");
-          rtdbTlsStop();
+        const int code = rtdbHttp("PUT", pathNoJsonSuffix, &jsonBody, nullptr, 1200UL);
+        serviceLocalHmiKeys();
+        if (code < 200 || code >= 300) {
+          rtdbLogFail("PUT", code, pathNoJsonSuffix);
           return false;
         }
-        http.addHeader("Content-Type", "application/json");
-        const int code = http.PUT(jsonBody);
-        const String resp = http.getString();
-        http.end();
-        if (code <= 0) {
-          rtdbTlsStop();
-        }
-        serviceLocalHmiKeys();
-
-        Serial.print("RTDB PUT ");
-        Serial.print(code);
-        Serial.print(" ");
-        Serial.println(pathNoJsonSuffix);
-        if (code < 200 || code >= 300) {
-          Serial.println(resp);
-        }
-
-        return code >= 200 && code < 300;
+        return true;
       }
 
       /** Same timeouts as a full PUT. A 600 ms handshake abort was dropping the board Offline. */
@@ -3104,85 +3190,75 @@
         return rtdbPutJson(pathNoJsonSuffix, jsonBody);
       }
 
-      /** Merge a few fields. Short timeout so a moisture update cannot hold Start. */
+      /** Merge keys only. A PUT here would wipe readings and component status. */
       static bool rtdbPatchJson(const String& pathNoJsonSuffix, const String& jsonBody) {
         serviceLocalHmiKeys();
         if (WiFi.status() != WL_CONNECTED) return false;
-        rtdbTlsPrepare();
-        HTTPClient http;
-        http.setReuse(true);
-        http.setTimeout(700);
-        http.setConnectTimeout(400);
-
-        String url = String(FIREBASE_DATABASE_URL);
-        if (!url.endsWith("/")) url += "/";
-        url += pathNoJsonSuffix;
-        if (!url.endsWith(".json")) url += ".json";
-        appendRtdbAuthQuery(url);
-
-        if (!http.begin(gRtdbTls, url)) {
-          rtdbTlsStop();
-          return false;
-        }
-        http.addHeader("Content-Type", "application/json");
-        const int code = http.sendRequest("PATCH", jsonBody);
-        http.end();
-        if (code <= 0) rtdbTlsStop();
+        const int code = rtdbHttp("PATCH", pathNoJsonSuffix, &jsonBody, nullptr, 800UL);
         serviceLocalHmiKeys();
         if (code < 200 || code >= 300) {
-          Serial.print("[RTDB] moisture PATCH ");
-          Serial.println(code);
+          rtdbLogFail("PATCH", code, pathNoJsonSuffix);
+          return false;
         }
-        return code >= 200 && code < 300;
+        return true;
       }
 
-      /** Push only the moisture fields so the app updates about once a second. */
-      static bool publishLiveMoisture() {
-        refreshMoistureSample(false);
+      /**
+       * Online pulse. One shallow update so Start/Pause/Stop and hardware tests
+       * are not stuck behind a full sensor upload. Never skipped for the keypad screen.
+       */
+      static bool sendPresencePulse() {
         const int publishId = gAssignedId > 0 ? gAssignedId : effectiveSessionMachineId();
-        if (publishId <= 0 || WiFi.status() != WL_CONNECTED) return false;
-        gLastMoisturePublishMs = millis();
+        if (publishId <= 0) return false;
+        String st = gSessionStatus.length() ? gSessionStatus : String("stopped");
+        st.toLowerCase();
+        st.trim();
+        if (st != "running" && st != "paused") st = "stopped";
 
-        const bool ok = gMoistureConnectedStable && gMoistShownPct >= 0;
         String body;
-        body.reserve(280);
-        body += "{\"updated_at\":{\".sv\":\"timestamp\"}";
-        body += ",\"readings/moisture_connected\":";
-        body += ok ? "true" : "false";
-        body += ",\"readings/moisture_raw\":";
-        body += gMoistureAvgCached;
-        body += ",\"readings/moisture_spread\":";
-        body += gMoistureSpreadCached;
-        if (ok) {
-          body += ",\"readings/moisture_percent\":";
-          body += gMoistShownPct;
-          body += ",\"readings/moisture\":";
-          body += gMoistShownPct;
-          body += ",\"readings/moisture_dry_adc\":";
-          body += MOISTURE_DRY_ADC;
-          body += ",\"readings/moisture_wet_adc\":";
-          body += MOISTURE_WET_ADC;
-          body += ",\"readings/moisture_span\":";
-          body += MOISTURE_SOAKED_SPAN;
-          body += ",\"readings/moisture_calibrated\":true";
+        body.reserve(480);
+        body += "{\"hardware_status/updated_at\":{\".sv\":\"timestamp\"}";
+        body += ",\"hardware_status/microcontroller_id\":";
+        body += publishId;
+        body += ",\"hardware_status/session_status\":\"";
+        body += st;
+        body += "\",\"hardware_status/components/esp32\":\"working\"";
+        {
+          long rem = 0;
+          if (sessionStatusIsRunning() || sessionStatusIsPaused()) {
+            rem = hmiRemainingDurationSec();
+            if (rem < 0) rem = 0;
+          }
+          body += ",\"hardware_status/remaining_sec\":";
+          body += rem;
         }
+        if (lastDhtReadOk && !isnan(gLiveTempC)) {
+          body += ",\"hardware_status/readings/temperature\":";
+          body += String(gLiveTempC, 1);
+        }
+        if (lastDhtReadOk && !isnan(gLiveHum)) {
+          body += ",\"hardware_status/readings/humidity\":";
+          body += String(gLiveHum, 1);
+        }
+        if (gLiveMoisturePct >= 0 && gLiveMoisturePct <= 100) {
+          body += ",\"hardware_status/readings/moisture_percent\":";
+          body += gLiveMoisturePct;
+          body += ",\"hardware_status/readings/moisture\":";
+          body += gLiveMoisturePct;
+        }
+      #if ENABLE_LOCAL_HMI
+        if (LocalHmi::uiSelfTestActive()) {
+          body += ",\"hardware_status/readings/keypad_keys_pressed\":";
+          body += String((unsigned)LocalHmi::keypadSelfTestCount());
+          body += ",\"hardware_status/readings/keypad_keys_total\":16";
+          body += ",\"hardware_status/readings/ui_self_test\":true";
+        }
+      #endif
         body += "}";
 
-        static int sLastLoggedPct = -999;
-        if (gMoistShownPct != sLastLoggedPct) {
-          sLastLoggedPct = gMoistShownPct;
-          Serial.print("[moisture] adc=");
-          Serial.print(gMoistureAvgCached);
-          Serial.print(" pct=");
-          Serial.print(gMoistShownPct);
-          Serial.print(" dry=");
-          Serial.println(MOISTURE_DRY_ADC);
-        }
-
-        const bool patched = rtdbPatchJson(
-            String("machines/") + String(publishId) + "/hardware_status", body);
-        if (patched) gLastPresenceOkMs = millis();
-        return patched;
+        const bool ok = rtdbPatchJson(String("machines/") + String(publishId), body);
+        if (ok) gLastPresenceOkMs = millis();
+        return ok;
       }
 
       static unsigned long gLastLaravelFailLogMs = 0;
@@ -3272,11 +3348,16 @@
         const float t = cachedDhtT;
         const float h = cachedDhtH;
 
-        refreshMoistureSample(false);
-        const int moistureRaw = gMoistureAvgCached;
-        const int spread = gMoistureSpreadCached;
-        const bool moistureOkReport = gMoistureConnectedStable;
-        const int moisturePct = moistureOkReport ? gMoistShownPct : -1;
+        int moistureRaw = 0;
+        int spread = 0;
+        int moistureMin = 0;
+        int moistureMax = 0;
+        bool moistureOkReport = false;
+        readMoistureAdc(moistureRaw, spread, moistureMin, moistureMax);
+        moistureOkReport =
+            moistureSensorReportOk(moistureRaw, spread, moistureMin, moistureMax);
+        const int moisturePct =
+            moistureOkReport ? moisturePercentFromAdc(moistureRaw) : -1;
 
         int doorHighs = 0;
         int doorLows = 0;
@@ -3289,8 +3370,16 @@
         const bool doorOkAlert = doorOkReport;
         const bool doorOpen = doorIsOpenFromSample(doorHighs, doorLows);
 
-        const int moistureSpanLearned = MOISTURE_SOAKED_SPAN;
-        const bool moistureCalibrated = moistureOkReport && moistureBoundsInitialized;
+        // Calibration health: needs both initialized bounds and enough span to map ADC → %.
+        // Span < 500 means we've only seen narrow values, so percentages will be wildly biased
+        // until the user wets/dries the probe to widen the learned range.
+        const int moistureSpanLearned = (MOISTURE_DRY_ADC > MOISTURE_WET_ADC)
+            ? (MOISTURE_DRY_ADC - MOISTURE_WET_ADC)
+            : (MOISTURE_WET_ADC - MOISTURE_DRY_ADC);
+        const bool moistureCalibrated =
+            moistureOkReport &&
+            (moistureSpanLearned >= MOISTURE_LEARNED_SPAN_MIN ||
+             moistureBoundsInitialized);
 
         {
           static unsigned long lastHbLogMs = 0;
@@ -3442,7 +3531,7 @@
             root += ",\"offline_id\":\"";
             root += gLocalOfflineId;
             root += "\",\"source\":\"";
-            root += (gKeypadOwnsHistory || gHistPending) ? "local_hmi" : "app";
+            root += gKeypadOwnsHistory ? "local_hmi" : "app";
             root += "\"";
           }
           if (gStopReason[0]) {
@@ -3547,7 +3636,6 @@
           presenceOk = rtdbOk;
           if (rtdbOk) {
             gLastPresenceOkMs = millis();
-            gLastMoisturePublishMs = millis();
             if (!gLastBeatOk || gNeedStatePublish) {
               const char* st = sessionStatusIsRunning() ? "running"
                   : (sessionStatusIsPaused() ? "paused" : "stopped");
@@ -3699,20 +3787,35 @@
       }
       #endif
 
+      static int gMoistureAvgCached = 0;
+      static int gMoistureSpreadCached = 0;
+      static int gMoistureMinCached = 4095;
+      static int gMoistureMaxCached = 0;
+      static unsigned long gLastMoistureSampleMs = 0;
       static unsigned long gLastAssignmentPollMs = 0;
 
       static void readSensorsOnce(bool& dhtOk, bool& moistureOk, bool& doorOk, bool& doorOpen) {
-        // Typing must not wait on an ADC sweep or a door scan.
+        // Typing must not wait on a 24-sample ADC sweep or a 32-read door scan.
         if (LocalHmi::isTypingParams()) {
           dhtOk = lastDhtReadOk;
-          moistureOk = gMoistureConnectedStable;
+          moistureOk = moistureSensorReportOk(
+              gMoistureAvgCached, gMoistureSpreadCached, gMoistureMinCached, gMoistureMaxCached);
           doorOk = false;
           doorOpen = false;
           return;
         }
         dhtOk = pollDhtIfDue();
-        refreshMoistureSample(false);
-        moistureOk = gMoistureConnectedStable;
+
+        if (millis() - gLastMoistureSampleMs >= 250UL) {
+          gLastMoistureSampleMs = millis();
+          int minV = 0;
+          int maxV = 0;
+          readMoistureAdc(gMoistureAvgCached, gMoistureSpreadCached, minV, maxV);
+          gMoistureMinCached = minV;
+          gMoistureMaxCached = maxV;
+        }
+        moistureOk = moistureSensorReportOk(
+            gMoistureAvgCached, gMoistureSpreadCached, gMoistureMinCached, gMoistureMaxCached);
 
       #if HAVE_DOOR_SENSOR
         int doorHighs = 0;
@@ -4657,38 +4760,6 @@
 
         connectWifiNonBlocking();
 
-        // App Start is read before sensors and before heartbeat/test.
-        // Those other calls each open TLS and were still holding Start for several seconds.
-        const bool sessionLiveEarly = sessionStatusIsRunning() || sessionStatusIsPaused();
-        if (hardwareTestActive()) {
-          refreshTestCommandFromCloud();
-          gLastTestCmdPollMs = millis();
-        } else if (!gDryingOutputsLatched && !sessionLiveEarly) {
-          // Alternate Start and Test. Heartbeat must not take the Start turn.
-          static uint8_t sIdleTurn = 0;
-          sIdleTurn++;
-          const bool hbDue = lastHeartbeatMs == 0 || (millis() - lastHeartbeatMs) >= 8000UL;
-          if ((sIdleTurn & 1U) == 0U) {
-            applyCloudCommandFromRtdb(sessionMachineId(), 350);
-            gLastSessionPollMs = millis();
-          } else if (hbDue) {
-            gLastBeatOk = sendHeartbeat(false, false, false);
-            lastHeartbeatMs = millis();
-          } else if (gLastMoisturePublishMs == 0 ||
-                     (millis() - gLastMoisturePublishMs) >= 800UL) {
-            if (!publishLiveMoisture()) {
-              refreshTestCommandFromCloud();
-              gLastTestCmdPollMs = millis();
-            }
-          } else {
-            refreshTestCommandFromCloud();
-            gLastTestCmdPollMs = millis();
-          }
-        } else if (gLastSessionPollMs == 0 || (millis() - gLastSessionPollMs) >= 250UL) {
-          applyCloudCommandFromRtdb(sessionMachineId(), 400);
-          gLastSessionPollMs = millis();
-        }
-
         bool dhtOk = false, moistureOk = false, doorOk = false, doorOpen = false;
         readSensorsOnce(dhtOk, moistureOk, doorOk, doorOpen);
         applySessionLedsOnly();
@@ -4709,91 +4780,170 @@
             persistActiveSession();
           }
         }
-        const bool sessionLive = sessionStatusIsRunning() || sessionStatusIsPaused();
-        const bool idleWaiting =
-            !hardwareTestActive() && !gDryingOutputsLatched && !sessionLive;
+        if (sessionStatusIsRunning()) remainCatchUp();
+        gLiveTempC = cachedDhtT;
+        gLiveHum = cachedDhtH;
+        gLiveMoisturePct = moistureOk
+            ? moisturePercentFromAdc(gMoistureAvgCached)
+            : -1;
 
-        // Keypad entry must not wait on HTTPS — a blocked scan hides the character
-        // until the next key. Drying still heartbeats; this only pauses the network
-        // while a key was just pressed or parameters are being typed.
-        const bool keyBlock = LocalHmi::blockNetworkForKey();
-        const bool screenQuiet = LocalHmi::isEnteringParams();
-        // Typing must paint on the next loop. Hardware self-test still polls RTDB.
-        const bool typingQuiet =
+        const bool sessionLive = sessionStatusIsRunning() || sessionStatusIsPaused();
+
+        // A key that was just pressed gets one short turn so the character paints.
+        // Heartbeat, Start/Pause/Stop, and hardware tests keep running on every
+        // other screen — including STOP/PAUSE and parameter entry.
+        const bool keyBurst =
             !LocalHmi::uiSelfTestActive() &&
-            (LocalHmi::wantsNetworkQuiet() || LocalHmi::keyQueued());
-        const bool allowHb = true;
-        const unsigned long bodyPollMs = sessionLive ? 4000UL : SESSION_BODY_POLL_MS;
+            (LocalHmi::blockNetworkForKey() || LocalHmi::keyQueued());
+        const bool screenQuiet =
+            LocalHmi::isEnteringParams() && !LocalHmi::uiSelfTestActive();
+        const unsigned long bodyPollMs = sessionLive ? 8000UL : SESSION_BODY_POLL_MS;
         const bool syncDue =
             (gDeferredRtdbStatus.length() || gDeferredApiAction.length()) &&
             LocalHmi::keySettledForSync();
-        if (!idleWaiting && !typingQuiet && !keyBlock && takeNetSlot()) {
-          bool used = false;
+
+        // One Firebase request per loop, on a kept TLS socket.
+        if (WiFi.status() == WL_CONNECTED) {
+          const unsigned long now = millis();
+          const unsigned long cmdAge =
+              (gLastSessionPollMs == 0) ? 60000UL : (now - gLastSessionPollMs);
+          const unsigned long testAge =
+              (gLastTestCmdPollMs == 0) ? 60000UL : (now - gLastTestCmdPollMs);
+          const unsigned long presenceAge =
+              (gLastPresenceOkMs == 0) ? 60000UL : (now - gLastPresenceOkMs);
+          const bool dryingNow = gDryingOutputsLatched || sessionStatusIsRunning();
+          const bool canTest =
+          #if ENABLE_RTDB_HARDWARE_TEST
+              !dryingNow && !sessionStatusIsPaused();
+          #else
+              false;
+          #endif
+          const bool cmdDue = cmdAge >= 150UL;
+          const bool testDue = canTest && testAge >= 150UL;
+          const bool presenceDue = presenceAge >= PRESENCE_INTERVAL_MS;
+          const bool presenceAttemptOk =
+              gLastPresenceAttemptMs == 0 || (now - gLastPresenceAttemptMs) >= 250UL;
+          const bool fullDue =
+              lastHeartbeatMs == 0 || (now - lastHeartbeatMs) >= HEARTBEAT_INTERVAL_MS;
+          const bool bodyDue = !hardwareTestActive() && !screenQuiet &&
+              (gLastSessionBodyPollMs == 0 || (now - gLastSessionBodyPollMs) >= bodyPollMs);
+          const bool lanDue = !screenQuiet && gLastBeatOk &&
+              (gLaravelApiBase.length() == 0 || !sessionLive) &&
+              (gLastLanPollMs == 0 || (now - gLastLanPollMs) > 60000UL);
+          const unsigned long assignmentPollMs =
+              gAssignedId > 0 ? ASSIGNMENT_POLL_ASSIGNED_MS : ASSIGNMENT_POLL_UNASSIGNED_MS;
+          const bool assignDue = !screenQuiet && !sessionLive && gLastBeatOk &&
+              (gLastAssignmentPollMs == 0 || (now - gLastAssignmentPollMs) >= assignmentPollMs);
+          // Commands and tests stay fresh, so a slow session upload cannot sit in front of them.
+          const bool interactiveFresh = cmdAge < 400UL && (!canTest || testAge < 400UL);
+          // A failed pulse must not sit in a retry loop and hide Start/Pause/Stop or Test.
+          const bool yieldAfterFailedPulse =
+              gLastPresenceFailed && !keyBurst && (cmdDue || testDue);
+
+          bool pickCommand = false;
+          bool pickTest = false;
+          bool pickPulse = false;
+          bool pickHb = false;
+          bool pickState = false;
+          bool pickSync = false;
+          bool pickBody = false;
+          bool pickLan = false;
+          bool pickAssign = false;
+
+          // A late Online pulse still goes out. Otherwise Start/Pause/Stop is next,
+          // so the button is not stuck behind a sensor upload.
+          const bool presenceUrgent = presenceAge >= 3500UL;
+          const bool cmdUrgent = cmdAge >= 400UL;
+          if (hardwareTestActive() && testDue && !keyBurst) {
+            pickTest = true;
+          } else if (presenceUrgent && presenceAttemptOk && !yieldAfterFailedPulse) {
+            if (!keyBurst && fullDue) {
+              pickHb = true;
+            } else {
+              pickPulse = true;
+            }
+          } else if (!keyBurst && cmdUrgent) {
+            pickCommand = true;
+          } else if (presenceDue && presenceAttemptOk && !yieldAfterFailedPulse) {
+            pickPulse = true;
+          } else if (!keyBurst && cmdDue) {
+            pickCommand = true;
+          } else if (!keyBurst && testDue) {
+            pickTest = true;
+          } else if (!keyBurst && fullDue) {
+            pickHb = true;
+          } else if (interactiveFresh && !hardwareTestActive() && gNeedStatePublish) {
+            pickState = true;
+          } else if (interactiveFresh && !hardwareTestActive() && syncDue) {
+            pickSync = true;
+          } else if (interactiveFresh && bodyDue) {
+            pickBody = true;
+          } else if (interactiveFresh && lanDue) {
+            pickLan = true;
+          } else if (interactiveFresh && assignDue) {
+            pickAssign = true;
+          }
+
           auto doHeartbeat = [&]() {
+            gLastPresenceAttemptMs = millis();
             gLastBeatOk = sendHeartbeat(dhtOk, moistureOk, doorOk);
             lastHeartbeatMs = millis();
+            gLastPresenceFailed = !gLastBeatOk;
+            if (gLastBeatOk) gLastPresenceOkMs = millis();
             commitLoadRelays(pollDhtIfDue(), cachedDhtT);
             safetyCutLoadsUnlessRunning();
           #if ENABLE_RTDB_HARDWARE_TEST
             holdHardwareTestActuators();
           #endif
           };
-          if (hardwareTestActive()) {
-            if ((millis() - lastHeartbeatMs) >= 1000UL) {
-              doHeartbeat();
-              used = true;
-            }
-          }
-          if (hardwareTestActive()) {
-            // Done is the fast poll above. Do not open another TLS call behind it.
-          } else if (gNeedStatePublish && allowHb) {
+
+          if (pickPulse) {
+            gLastPresenceAttemptMs = millis();
+            const bool pulseOk = sendPresencePulse();
+            gLastPresenceFailed = !pulseOk;
+            if (pulseOk) gLastBeatOk = true;
+            serviceLocalHmiKeys();
+          } else if (pickCommand) {
+            applyCloudCommandFromRtdb(sessionMachineId(), 600);
+            gLastSessionPollMs = millis();
+            serviceLocalHmiKeys();
+          } else if (pickTest) {
+            refreshTestCommandFromCloud();
+            gLastTestCmdPollMs = millis();
+            serviceLocalHmiKeys();
+          } else if (pickHb) {
+            doHeartbeat();
+            serviceLocalHmiKeys();
+          } else if (pickState) {
             const char* st = sessionStatusIsRunning() ? "running"
                 : (sessionStatusIsPaused() ? "paused" : "stopped");
             (void)publishLocalSessionToRtdb(st);
-            doHeartbeat();
             gNeedStatePublish = false;
-            used = true;
-          } else if (allowHb && (millis() - lastHeartbeatMs) >= HEARTBEAT_INTERVAL_MS) {
-            doHeartbeat();
-            used = true;
-          } else if (allowHb &&
-                     (gLastMoisturePublishMs == 0 ||
-                      (millis() - gLastMoisturePublishMs) >= 800UL)) {
-            publishLiveMoisture();
-            used = true;
-          } else if (syncDue) {
+            serviceLocalHmiKeys();
+          } else if (pickSync) {
             flushHmiNetworkSync();
-            used = true;
-          } else if (allowHb && millis() - gLastSessionBodyPollMs >= bodyPollMs) {
+            serviceLocalHmiKeys();
+          } else if (pickBody) {
             gLastSessionBodyPollMs = millis();
             refreshSessionFromCloud(false);
-            used = true;
-          } else if (gLastBeatOk &&
-                     (gLaravelApiBase.length() == 0 || !sessionLive) &&
-                     (gLastLanPollMs == 0 || (millis() - gLastLanPollMs) > 60000UL)) {
+            gLastSessionBodyPollMs = millis();
+            serviceLocalHmiKeys();
+          } else if (pickLan) {
             gLastLanPollMs = millis();
             refreshLaravelBaseFromRtdb();
-            used = true;
-          } else if (!screenQuiet && !sessionLive && gLastBeatOk) {
-            const unsigned long assignmentPollMs =
-                gAssignedId > 0 ? ASSIGNMENT_POLL_ASSIGNED_MS : ASSIGNMENT_POLL_UNASSIGNED_MS;
-            if (millis() - gLastAssignmentPollMs >= assignmentPollMs) {
-              gLastAssignmentPollMs = millis();
-              if (refreshAssignmentFromCloud()) {
-                Serial.print("[assignment] active id=");
-                Serial.println(gAssignedId);
-              }
-              used = true;
+            serviceLocalHmiKeys();
+          } else if (pickAssign) {
+            gLastAssignmentPollMs = millis();
+            if (refreshAssignmentFromCloud()) {
+              Serial.print("[assignment] active id=");
+              Serial.println(gAssignedId);
             }
+            serviceLocalHmiKeys();
           }
-          if (!used) {
-            gLastNetSlotMs = 0;
-          }
-          serviceLocalHmiKeys();
         }
 
       #if ENABLE_LOCAL_HMI
-        if (!typingQuiet && !keyBlock && LocalHmi::canFlushOfflineHistory() && LocalHmi::keySettledForSync()) {
+        if (!keyBurst && !screenQuiet && LocalHmi::canFlushOfflineHistory() && LocalHmi::keySettledForSync()) {
           flushQueuedLocalHistory();
         }
         serviceLocalHmiKeys();

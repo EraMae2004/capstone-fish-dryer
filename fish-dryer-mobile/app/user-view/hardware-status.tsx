@@ -300,6 +300,8 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
   const [testingAll, setTestingAll] = useState(false);
   const [testingComponent, setTestingComponent] = useState<string | null>(null);
   const testPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Machine the open test is driving, so Done/X still stops it if selection changes. */
+  const testMachineIdRef = useRef<number | null>(null);
   /** User closed the diagnostic modal — do not reopen until the next test starts. */
   const testDismissedRef = useRef(false);
   /** Yes/No answers for fan, heater, LEDs, and buzzer. Survives Done. */
@@ -909,31 +911,17 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
         };
       }
       const pct = resolveMoisturePercent(r as Record<string, unknown>);
-      const calibrated = r.moisture_calibrated === true;
-      const span = typeof r.moisture_span === "number" ? r.moisture_span : null;
-
-      const lines: string[] = [];
-      if (pct != null) {
-        lines.push(`Moisture: ${Math.round(pct)}%`);
-      } else {
-        lines.push("Waiting for moisture reading from the board…");
-      }
-      if (!calibrated && span != null && span < 800) {
-        lines.push("");
-        lines.push(
-          "Tip: touch the probe with a wet finger or dip in water briefly — readings will track 0% (dry) to 100% (wet)."
-        );
-      }
+      const shown = pct != null ? `${Math.round(pct)}%` : null;
 
       return {
         key,
         label: "Moisture Sensor",
         ok: pct != null,
-        headline:
-          pct != null
-            ? `Connected · ${Math.round(pct)}% moisture`
-            : "Connected · waiting for %",
-        details: lines.join("\n") || "Connected.",
+        headline: shown != null ? shown : "Connected · waiting for %",
+        details:
+          shown != null
+            ? `Moisture: ${shown}`
+            : "Waiting for a moisture percent from the board.",
       };
     }
 
@@ -1003,7 +991,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
         headline: verdict === true ? "Working" : verdict === false ? "Not working" : prompt,
         details:
           verdict == null
-            ? "It stays on until you tap Done. Tap Yes if it works, or No if it does not."
+            ? "It stays on until you tap Done or X. Tap Yes if it works, or No if it does not."
             : verdict
               ? "Marked working."
               : "Marked not working.",
@@ -1017,7 +1005,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
         ok: connected,
         headline: connected ? "Check the display" : "Not responding",
         details: connected
-          ? 'The board should show "LCD IS WORKING!" until you tap Done.'
+          ? 'The board should show "LCD IS WORKING!" until you tap Done or X.'
           : "LCD did not report as working. Check I2C wiring (SDA/SCL) and power.",
       };
     }
@@ -1090,9 +1078,12 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     setKeypadTestProgress(null);
     setDiagIncludesKeypad(false);
     setDiagIncludesLcd(false);
-    const mid = selectedMachineIdRef.current;
+    const mid = testMachineIdRef.current ?? selectedMachineIdRef.current;
+    testMachineIdRef.current = null;
     if (mid != null && firebaseDb) {
-      void clearHardwareTestCommand(firebaseDb, mid).catch(() => {});
+      void clearHardwareTestCommand(firebaseDb, mid).catch((err) => {
+        console.log("stop hardware test:", err);
+      });
     }
   }, []);
 
@@ -1252,6 +1243,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       return;
     }
     const machineId = selectedMachine!.id;
+    testMachineIdRef.current = machineId;
     try {
       await publishHardwareTestCommand(firebaseDb!, machineId, {
         mode: "all",
@@ -1307,6 +1299,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     }
 
     const machineId = selectedMachine!.id;
+    testMachineIdRef.current = machineId;
     const waitForKeypad = key === "keypad";
     try {
       await publishHardwareTestCommand(firebaseDb!, machineId, {
@@ -1960,7 +1953,10 @@ function DiagnosticResultsModal({
       {/* Outer wrapper centers the card; pointerEvents:'box-none' so taps on the dim
           area pass through to the absolute-positioned backdrop Pressable behind. */}
       <View style={diagStyles.root} pointerEvents="box-none">
-        <Pressable style={diagStyles.backdrop} onPress={onClose} />
+        <Pressable
+          style={diagStyles.backdrop}
+          onPress={testInProgress ? undefined : onClose}
+        />
 
         {/* Card is a plain View — NOT a Pressable — so the inner ScrollView keeps
             ownership of vertical drag gestures and actually scrolls. */}
@@ -2213,7 +2209,7 @@ function DiagnosticResultsModal({
                     <View style={diagStyles.detailsBlock}>
                       <Text style={diagStyles.detailLine}>
                         {r.details ||
-                          'Look at the machine display for "LCD IS WORKING!" Tap Done to stop.'}
+                          'Look at the machine display for "LCD IS WORKING!" Tap Done or X to stop.'}
                       </Text>
                     </View>
                   </View>

@@ -21,5 +21,5 @@ Start-Process powershell -WorkingDirectory $here -ArgumentList @(
 )
 
 Write-Host ""
-Write-Host "Leave both windows open. On the phone: Expo Go, same Wi-Fi as this PC and the dryer."
-Write-Host "If you switch from hotspot to school Wi-Fi, wait a few seconds — discovery updates by itself."
+Write-Host "Connect this PC to the phone hotspot first. Leave both windows open."
+Write-Host "Open Expo Go on that phone. Do not type an address."

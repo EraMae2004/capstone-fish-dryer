@@ -48,7 +48,7 @@ export default function Login() {
         clearTimeout(timer);
         Alert.alert(
           "Server not found",
-          "This PC must run start-presentation.ps1 (Laravel + firebase:publish-lan --watch). Phone, laptop, and dryer stay on the same Wi‑Fi — the app learns the address from Firebase, not a typed IPv4."
+          "Connect this PC to the phone hotspot, then run start-presentation.ps1 and leave it open. Open the app on that same phone. Do not type an address."
         );
         return;
       }

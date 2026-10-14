@@ -71,6 +71,13 @@ export async function publishHardwareTestCommand(
   return cmd;
 }
 
+/** Done / X. An explicit stop is what the board waits for — a deleted node can look like a failed read. */
 export async function clearHardwareTestCommand(db: Database, machineId: number): Promise<void> {
-  await dbSet(dbRef(db, `machines/${machineId}/test_command`), null);
+  await dbSet(dbRef(db, `machines/${machineId}/test_command`), {
+    mode: "stop",
+    component: "",
+    request_id: `stop-${machineId}-${Date.now()}`,
+    issued_at: new Date().toISOString(),
+    stop_on: "done",
+  });
 }

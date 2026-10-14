@@ -456,7 +456,7 @@ export default function UserOverview({
       }
       const offlineId = String(hw.offline_id ?? "").replace(/[^A-Za-z0-9_-]/g, "");
       const source = String(hw.source ?? "");
-      if (offlineId && source === "local_hmi") {
+      if (source === "local_hmi" && offlineId) {
         localOfflineIdRef.current = offlineId;
         localSessionSnapRef.current = {
           fishType: String(hw.fish_type ?? ""),
@@ -464,6 +464,8 @@ export default function UserOverview({
           targetTemperature: Number(hw.target_temperature ?? 60),
           setDurationMinutes: Number(hw.set_duration_minutes ?? 1),
         };
+      } else if (source === "app") {
+        localOfflineIdRef.current = "";
       }
       if (boardSt === "running") {
         shownDurationStopRef.current = "";
@@ -475,9 +477,8 @@ export default function UserOverview({
         shownDurationStopRef.current = offlineId || "duration";
         setDryingCompleteModalVisible(true);
       }
-      if (boardSt === "stopped") {
-        const stopId =
-          localOfflineIdRef.current || (source === "local_hmi" ? offlineId : "");
+      if (boardSt === "stopped" && source === "local_hmi") {
+        const stopId = offlineId || localOfflineIdRef.current;
         if (stopId && enqueuedLocalStopRef.current !== stopId) {
           enqueuedLocalStopRef.current = stopId;
           const snap = localSessionSnapRef.current;
@@ -526,7 +527,13 @@ export default function UserOverview({
         setTemperature((prev) => (prev === targetText ? prev : targetText));
       }
       const remRaw = Number(hw.remaining_sec);
-      if (Number.isFinite(remRaw) && remRaw > 1) {
+      const sentRemain = holdSentRemainRef.current;
+      const holdingTime =
+        Date.now() < holdLocalCmdUntilRef.current && holdLocalCmdRef.current != null;
+      const boardHasThisCommand =
+        sentRemain == null ||
+        (Number.isFinite(remRaw) && Math.abs(Math.floor(remRaw) - sentRemain) <= 5);
+      if (Number.isFinite(remRaw) && remRaw > 1 && (!holdingTime || boardHasThisCommand)) {
         sawPositiveBoardRemainRef.current = true;
         const rem = Math.floor(remRaw);
         const digits = remainingSecToDurationDigits(rem);
@@ -692,6 +699,8 @@ export default function UserOverview({
   const sessionSyncLockRef = useRef(false);
   const holdLocalCmdRef = useRef<"start" | "pause" | "stop" | null>(null);
   const holdLocalCmdUntilRef = useRef(0);
+  /** Remaining seconds sent with the button, so an old board time cannot replace it. */
+  const holdSentRemainRef = useRef<number | null>(null);
   const pauseIntentRef = useRef<"pause" | "resume" | null>(null);
   const pauseRemainingSnapshotRef = useRef<number | null>(null);
 
@@ -793,12 +802,14 @@ export default function UserOverview({
           payload.command = "pause";
           payload.session_active = false;
         }
-        // Command first so ESP sees start/stop before session status changes.
-        await dbSet(
-          dbRef(firebaseDb, `machines/${microcontrollerId}/command`),
-          commandPayload
-        );
-        await dbSet(dbRef(firebaseDb, `machines/${microcontrollerId}/session`), payload);
+        // Both writes leave together. The board polls `command`; session is the app copy.
+        await Promise.all([
+          dbSet(
+            dbRef(firebaseDb, `machines/${microcontrollerId}/command`),
+            commandPayload
+          ),
+          dbSet(dbRef(firebaseDb, `machines/${microcontrollerId}/session`), payload),
+        ]);
       } catch (e) {
         console.log("session RTDB write:", e);
       }
@@ -1328,6 +1339,10 @@ export default function UserOverview({
         const startTt = Number.parseFloat(String(tempValEarly).trim());
         const startRem = durationDigitsToSeconds(String(durValEarly).trim());
         const startDm = digitsToMinutes(String(durValEarly).trim());
+        holdLocalCmdRef.current = "start";
+        holdLocalCmdUntilRef.current = Date.now() + 15000;
+        holdSentRemainRef.current = startRem ?? null;
+        setUiSessionStatusOverride("running");
         await writeMachineSessionToRtdb(microcontrollerIdEarly, "running", {
           fan_speed: SESSION_FAN_SPEED,
           target_temperature: Number.isFinite(startTt) ? startTt : 60,
@@ -1336,20 +1351,22 @@ export default function UserOverview({
           set_duration_minutes: startDm ?? undefined,
           remaining_sec: startRem ?? undefined,
         });
-        holdLocalCmdRef.current = "start";
-        holdLocalCmdUntilRef.current = Date.now() + 15000;
-        setUiSessionStatusOverride("running");
       } else if (action === "stop") {
-        await writeMachineSessionToRtdb(microcontrollerIdEarly, "stopped");
         holdLocalCmdRef.current = "stop";
         holdLocalCmdUntilRef.current = Date.now() + 15000;
+        holdSentRemainRef.current = null;
         setUiSessionStatusOverride("stopped");
+        await writeMachineSessionToRtdb(microcontrollerIdEarly, "stopped");
       } else if (
         action === "pause" &&
         (pauseIntentRef.current === "resume" || sessionStatusBeforeControl === "paused")
       ) {
         const newRemSec = durationDigitsToSeconds(String(durValEarly).trim());
         const pauseTt = Number.parseFloat(String(tempValEarly).trim());
+        holdLocalCmdRef.current = "start";
+        holdLocalCmdUntilRef.current = Date.now() + 15000;
+        holdSentRemainRef.current = newRemSec ?? null;
+        setUiSessionStatusOverride("running");
         await writeMachineSessionToRtdb(microcontrollerIdEarly, "running", {
           fan_speed: SESSION_FAN_SPEED,
           target_temperature: Number.isFinite(pauseTt) ? pauseTt : 60,
@@ -1357,18 +1374,17 @@ export default function UserOverview({
           total_fish: Number.parseInt(String(totalFish).trim(), 10) || undefined,
           remaining_sec: newRemSec ?? undefined,
         });
-        holdLocalCmdRef.current = "start";
-        holdLocalCmdUntilRef.current = Date.now() + 15000;
-        setUiSessionStatusOverride("running");
       } else if (action === "pause") {
         const rem = freezeCountdownAtPause(session);
+        holdLocalCmdRef.current = "pause";
+        holdLocalCmdUntilRef.current = Date.now() + 15000;
+        holdSentRemainRef.current =
+          rem ?? durationDigitsToSeconds(String(durValEarly).trim()) ?? null;
+        setUiSessionStatusOverride("paused");
         await writeMachineSessionToRtdb(microcontrollerIdEarly, "paused", {
           target_temperature: pauseTargetTemperature(overrides?.temperature),
           remaining_sec: rem ?? durationDigitsToSeconds(String(durValEarly).trim()) ?? undefined,
         });
-        holdLocalCmdRef.current = "pause";
-        holdLocalCmdUntilRef.current = Date.now() + 15000;
-        setUiSessionStatusOverride("paused");
       }
     }
 

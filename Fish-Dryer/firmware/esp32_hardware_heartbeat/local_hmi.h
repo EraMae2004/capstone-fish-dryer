@@ -649,7 +649,7 @@ inline bool isEnteringParams() {
   // A hardware test must leave the parameter screen. Quiet mode would block it.
   if (gUiSelfTestActive) return false;
   // Quiet while typing OR on STOP|PAUSE / short messages — keeps keys snappy.
-  // Running sessions still heartbeats so the app stays Online.
+  // The firmware still sends the Online pulse and still polls phone commands.
   return gReady && (gScreen == Screen::EditParams || gScreen == Screen::ConfirmStart ||
                     gScreen == Screen::DoorWarn || gScreen == Screen::ContinueDoor ||
                     gScreen == Screen::StopOrPause || gScreen == Screen::Message);
@@ -657,8 +657,9 @@ inline bool isEnteringParams() {
 
 inline bool blockNetworkForKey() {
   // Hardware tests must still see RTDB (Done / heartbeat). Do not freeze HTTPS.
+  // Only the instant after a press — a long quiet window delays phone commands.
   if (gUiSelfTestActive) return false;
-  return gLastKeypressMs != 0 && (millis() - gLastKeypressMs) < 1200UL;
+  return gLastKeypressMs != 0 && (millis() - gLastKeypressMs) < 160UL;
 }
 
 inline bool wantsNetworkQuiet() {

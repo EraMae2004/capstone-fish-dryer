@@ -1237,6 +1237,51 @@ class DryingController extends Controller
     }
 
     /**
+     * One history row per drying run. The app uses mob-* and the keypad uses loc-*,
+     * so a stop must attach to the row already opened or just closed for this machine.
+     */
+    private function sessionRowForThisStop(int $mcId, string $sessionCode): ?DryingSession
+    {
+        if ($sessionCode !== '') {
+            $owned = DryingSession::query()->where('session_code', $sessionCode)->first();
+            if ($owned) {
+                return $owned;
+            }
+        }
+
+        $open = DryingSession::query()
+            ->where('microcontroller_id', $mcId)
+            ->whereIn('status', ['running', 'paused'])
+            ->whereNull('ended_at')
+            ->latest('started_at')
+            ->first();
+        if ($open) {
+            return $open;
+        }
+
+        $recent = DryingSession::query()
+            ->where('microcontroller_id', $mcId)
+            ->whereIn('status', ['stopped', 'completed'])
+            ->where('ended_at', '>=', now()->subSeconds(20))
+            ->latest('ended_at')
+            ->first();
+        if (! $recent) {
+            return null;
+        }
+
+        $recentCode = (string) ($recent->session_code ?? '');
+        $differentKeypadRun = $sessionCode !== ''
+            && str_starts_with($sessionCode, 'loc-')
+            && str_starts_with($recentCode, 'loc-')
+            && $recentCode !== $sessionCode;
+        if ($differentKeypadRun) {
+            return null;
+        }
+
+        return $recent;
+    }
+
+    /**
      * Start / pause / stop drying session from mobile control panel.
      */
     public function sessionControl(Request $request)
@@ -1478,24 +1523,20 @@ class DryingController extends Controller
             }
 
             if ($action === 'stop') {
-                $session = null;
-                if ($clientCode !== '') {
-                    $session = DryingSession::query()->where('session_code', $clientCode)->first();
-                    if ($session && in_array((string) $session->status, ['stopped', 'completed'], true)) {
-                        return response()->json([
-                            'success' => true,
-                            'session' => $session,
-                            'duplicate' => true,
-                            'firebase_command' => 'stop',
-                        ]);
+                $session = $this->sessionRowForThisStop($mcId, $clientCode);
+                if ($session && in_array((string) $session->status, ['stopped', 'completed'], true)) {
+                    $elapsedSeconds = max(0, (int) ($data['drying_time_seconds'] ?? $data['drying_time_minutes'] ?? 0));
+                    if ($elapsedSeconds > (int) $session->drying_time_minutes) {
+                        $session->update(['drying_time_minutes' => $elapsedSeconds]);
+                        $session = $session->fresh();
                     }
-                }
-                if (! $session) {
-                    $session = DryingSession::where('microcontroller_id', $mcId)
-                        ->whereIn('status', ['running', 'paused'])
-                        ->whereNull('ended_at')
-                        ->latest('started_at')
-                        ->first();
+
+                    return response()->json([
+                        'success' => true,
+                        'session' => $session,
+                        'duplicate' => true,
+                        'firebase_command' => 'stop',
+                    ]);
                 }
 
                 if (! $session) {
@@ -1795,19 +1836,7 @@ class DryingController extends Controller
 
             $startedAt = $elapsed > 0 ? now()->subSeconds($elapsed) : now();
 
-            $session = null;
-            if ($offlineId !== '') {
-                // Same keypad session only. A different app session must stay as it is.
-                $session = DryingSession::query()
-                    ->where('session_code', $sessionCode)
-                    ->first();
-            } else {
-                $session = DryingSession::where('microcontroller_id', $mcId)
-                    ->whereIn('status', ['running', 'paused'])
-                    ->whereNull('ended_at')
-                    ->latest('started_at')
-                    ->first();
-            }
+            $session = $this->sessionRowForThisStop($mcId, $offlineId !== '' ? $sessionCode : '');
 
             if ($session && in_array((string) $session->status, ['stopped', 'completed'], true)) {
                 if ($elapsed > (int) $session->drying_time_minutes) {

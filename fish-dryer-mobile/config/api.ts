@@ -4,49 +4,27 @@ type ExpoExtra = {
   apiBaseUrl?: string;
 };
 
-function lanHostFromExpo(): string | null {
-  const extra = Constants.expoConfig?.extra as { expoGo?: { debuggerHost?: string } } | undefined;
-  const candidates = [
-    Constants.expoConfig?.hostUri,
-    extra?.expoGo?.debuggerHost,
-    Constants.linkingUri,
-  ];
-  for (const raw of candidates) {
-    const host = String(raw ?? "")
-      .replace(/^exp:\/\//, "")
-      .replace(/^https?:\/\//, "")
-      .split("/")[0]
-      .split(":")[0]
-      .trim();
-    if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) && host !== "127.0.0.1") {
-      return host;
-    }
-  }
-  return null;
-}
-
 function normalizeApiBase(url: string): string {
   return url.trim().replace(/\/+$/, "");
 }
 
-function readInitialApiBaseUrl(): string {
-  const fromEnv = (process.env.EXPO_PUBLIC_API_BASE_URL ?? "").trim();
-  if (fromEnv) return normalizeApiBase(fromEnv);
+function isIpv4Host(host: string): boolean {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host);
+}
 
-  const expoHost = lanHostFromExpo();
-  if (expoHost) return `http://${expoHost}:8000/api`;
+function readInitialApiBaseUrl(): string {
+  // No saved address. Firebase lan/server supplies the PC on the phone hotspot.
+  const fromEnv = (process.env.EXPO_PUBLIC_API_BASE_URL ?? "").trim();
+  if (fromEnv) {
+    const host = fromEnv.replace(/^https?:\/\//, "").split("/")[0].split(":")[0];
+    if (!isIpv4Host(host)) return normalizeApiBase(fromEnv);
+  }
 
   const extra = (Constants.expoConfig?.extra ?? {}) as ExpoExtra;
   const fromExtra = String(extra.apiBaseUrl ?? "").trim();
-  if (fromExtra && !/^\d{1,3}(?:\.\d{1,3}){3}/.test(fromExtra.replace(/^https?:\/\//, ""))) {
-    return normalizeApiBase(fromExtra);
-  }
   if (fromExtra.startsWith("http://") || fromExtra.startsWith("https://")) {
-    // Ignore leftover hardcoded LAN IPs in app.json — discovery replaces them.
     const host = fromExtra.replace(/^https?:\/\//, "").split("/")[0].split(":")[0];
-    if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) {
-      return normalizeApiBase(fromExtra);
-    }
+    if (!isIpv4Host(host)) return normalizeApiBase(fromExtra);
   }
 
   return "";

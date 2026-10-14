@@ -130,10 +130,11 @@ export default function OverviewStatus({
             "Current Temp",
             showSessionDetails &&
               liveTemp != null &&
-              String(liveTemp).trim() !== ""
-              ? String(liveTemp) + "°C"
+              String(liveTemp).trim() !== "" &&
+              Number.isFinite(Number(liveTemp))
+              ? `${Number(liveTemp).toFixed(1)}°C`
               : showSessionDetails && latestLog?.temperature
-                ? latestLog.temperature + "°C"
+                ? Number(latestLog.temperature).toFixed(1) + "°C"
                 : null
           )}
 
@@ -148,10 +149,11 @@ export default function OverviewStatus({
             "Humidity",
             showSessionDetails &&
               liveHum != null &&
-              String(liveHum).trim() !== ""
-              ? String(liveHum) + "%"
+              String(liveHum).trim() !== "" &&
+              Number.isFinite(Number(liveHum))
+              ? `${Number(liveHum).toFixed(1)}%`
               : showSessionDetails && latestLog?.humidity
-                ? latestLog.humidity + "%"
+                ? Number(latestLog.humidity).toFixed(1) + "%"
                 : null
           )}
 

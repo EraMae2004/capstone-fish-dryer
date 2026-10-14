@@ -18,27 +18,16 @@ function normalizeApiBase(raw: string): string | null {
   return null;
 }
 
-async function adoptIfHealthy(url: string, persist: boolean): Promise<boolean> {
-  const ok = await probeApiHealth(url);
+async function adoptIfHealthy(url: string): Promise<boolean> {
+  const ok = await probeApiHealth(url, 8000);
   if (!ok) return false;
   applyDiscoveredApiBaseUrl(url);
-  if (persist) {
-    await AsyncStorage.setItem(CACHE_KEY, url);
-  }
   return true;
 }
 
-/** Restore last working LAN API, then follow Firebase `lan/server` when the PC IP changes. */
+/** Follow Firebase `lan/server`. Never reuse an address from another network. */
 export async function startLanApiDiscovery(): Promise<void> {
-  const cached = String((await AsyncStorage.getItem(CACHE_KEY)) ?? "").trim();
-  if (cached) {
-    await adoptIfHealthy(cached, false);
-  }
-
-  const current = getApiBaseUrl();
-  if (current) {
-    await adoptIfHealthy(current, true);
-  }
+  await AsyncStorage.removeItem(CACHE_KEY);
 
   if (!firebaseDb) return;
 
@@ -50,16 +39,12 @@ export async function startLanApiDiscovery(): Promise<void> {
       normalizeApiBase(String(rec.api_base_url ?? "")) ||
       normalizeApiBase(String(rec.origin ?? "")) ||
       normalizeApiBase(String(rec.host ?? ""));
-    if (!candidate) return;
-    if (candidate === getApiBaseUrl()) {
-      const still = await probeApiHealth(candidate);
-      if (still) return;
-    }
-    await adoptIfHealthy(candidate, true);
+    if (!candidate || candidate === getApiBaseUrl()) return;
+    await adoptIfHealthy(candidate);
   });
 }
 
-export async function ensureApiBaseUrl(timeoutMs = 8000): Promise<string> {
+export async function ensureApiBaseUrl(timeoutMs = 15000): Promise<string> {
   const started = Date.now();
   if (await probeApiHealth(getApiBaseUrl())) {
     return getApiBaseUrl();
