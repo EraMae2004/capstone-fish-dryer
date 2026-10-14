@@ -54,7 +54,8 @@ class DryingController extends Controller
         ?int $fanSpeed = null,
         ?string $fishType = null,
         ?int $totalFish = null,
-        ?int $setDurationMinutes = null
+        ?int $setDurationMinutes = null,
+        ?int $remainingSec = null
     ): void {
         try {
             $firebase = app(FirebaseRealtimeService::class);
@@ -86,12 +87,10 @@ class DryingController extends Controller
                 default => $st,
             };
 
-            // ESP parses seq as float32 (exact only below 2^24). Unix-ms overflows and
-            // then blocks the app's small counters.
-            $seq = (((int) round(microtime(true) * 1000)) % 15000000) + random_int(1, 999);
-            if ($seq < 1) {
-                $seq = 1;
-            }
+            // Same command node as the app and the keypad.
+            // App seq is 9000000–15000000. Keypad seq is 1–8999999.
+            // Laravel stays at 16000000+ so a pause is never dropped as a duplicate seq.
+            $seq = 16000000 + (((int) round(microtime(true) * 1000)) % 5000000);
 
             $commandPayload = [
                 'action' => $command,
@@ -109,9 +108,9 @@ class DryingController extends Controller
             }
             if ($setDurationMinutes !== null && $setDurationMinutes > 0) {
                 $commandPayload['set_duration_minutes'] = $setDurationMinutes;
-                if ($running || $paused) {
-                    $commandPayload['remaining_sec'] = $setDurationMinutes * 60;
-                }
+            }
+            if ($remainingSec !== null && $remainingSec >= 0 && ($running || $paused)) {
+                $commandPayload['remaining_sec'] = $remainingSec;
             }
 
             $firebase->setMachineCommand($microcontrollerId, $commandPayload);
@@ -134,6 +133,9 @@ class DryingController extends Controller
             }
             if ($setDurationMinutes !== null && $setDurationMinutes > 0) {
                 $sessionPayload['set_duration_minutes'] = $setDurationMinutes;
+            }
+            if ($remainingSec !== null && $remainingSec >= 0 && ($running || $paused)) {
+                $sessionPayload['remaining_sec'] = $remainingSec;
             }
 
             $firebase->setMachineSession($microcontrollerId, $sessionPayload);
@@ -1299,6 +1301,7 @@ class DryingController extends Controller
             'add_extension_minutes' => 'nullable|integer|min:0',
             'drying_time_minutes' => 'nullable|integer|min:0',
             'drying_time_seconds' => 'nullable|integer|min:0',
+            'remaining_sec' => 'nullable|integer|min:0',
             'client_ref' => 'nullable|string|max:40',
             'temperature' => 'nullable|numeric',
             'humidity' => 'nullable|numeric',
@@ -1314,6 +1317,9 @@ class DryingController extends Controller
         $mcId = (int) $data['microcontroller_id'];
         $userId = (int) $data['user_id'];
         $action = $data['action'];
+        $remainingSec = array_key_exists('remaining_sec', $data) && $data['remaining_sec'] !== null
+            ? (int) $data['remaining_sec']
+            : null;
         $clientRef = (string) preg_replace('/[^A-Za-z0-9_\-]/', '', (string) ($data['client_ref'] ?? ''));
         $clientCode = $clientRef !== '' ? ('mob-'.$clientRef) : '';
 
@@ -1375,7 +1381,8 @@ class DryingController extends Controller
                         (int) $data['fan_speed'],
                         (string) $data['fish_type'],
                         (int) $data['total_fish'],
-                        (int) $data['set_duration_minutes']
+                        (int) $data['set_duration_minutes'],
+                        $remainingSec
                     );
 
                     return response()->json([
@@ -1408,7 +1415,8 @@ class DryingController extends Controller
                     (int) $data['fan_speed'],
                     (string) $data['fish_type'],
                     (int) $data['total_fish'],
-                    (int) $data['set_duration_minutes']
+                    (int) $data['set_duration_minutes'],
+                    $remainingSec
                 );
 
                 return response()->json([
@@ -1453,7 +1461,8 @@ class DryingController extends Controller
                         (int) $paused->fan_speed,
                         (string) ($paused->fish_type ?? ''),
                         (int) ($paused->total_fish ?? 0),
-                        (int) ($paused->set_duration_minutes ?? 0)
+                        (int) ($paused->set_duration_minutes ?? 0),
+                        $remainingSec
                     );
 
                     return response()->json([
@@ -1512,7 +1521,8 @@ class DryingController extends Controller
                     (int) $session->fan_speed,
                     (string) ($session->fish_type ?? ''),
                     (int) ($session->total_fish ?? 0),
-                    (int) ($session->set_duration_minutes ?? 0)
+                    (int) ($session->set_duration_minutes ?? 0),
+                    $remainingSec
                 );
 
                 return response()->json([

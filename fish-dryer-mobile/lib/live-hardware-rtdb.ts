@@ -1,8 +1,8 @@
 import { onValue, ref as dbRef, type Database, type Unsubscribe } from "firebase/database";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
 
-/** ESP writes ~5s; drying can delay one write. Older than this is not a live board. */
-export const LIVE_HEARTBEAT_MS = 25_000;
+/** ESP pulses about every 1s while idle. Stay online through a short Wi-Fi gap. */
+export const LIVE_HEARTBEAT_MS = 90_000;
 
 function isServerTimestampPlaceholder(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && ".sv" in (value as object));

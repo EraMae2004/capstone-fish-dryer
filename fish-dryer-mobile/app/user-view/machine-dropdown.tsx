@@ -76,6 +76,7 @@ export default function MachineDropdown({
 
     const watch = machineIds;
     const updatedAtById: Record<number, number> = {};
+    const receiveAtById: Record<number, number> = {};
     const unsubs = watch.map((id) =>
       subscribeLiveHardwareStatus(
         firebaseDb,
@@ -83,14 +84,20 @@ export default function MachineDropdown({
         (hw) => {
           const t = firebaseUpdatedAtMs(hw.updated_at);
           if (t != null) updatedAtById[id] = t;
+          receiveAtById[id] = Date.now();
           setStableOnlineById((prev) => {
-            const online = isFirebaseHeartbeatLive(t ?? updatedAtById[id], Date.now());
+            const online = isFirebaseHeartbeatLive(
+              t ?? updatedAtById[id],
+              Date.now(),
+              receiveAtById[id]
+            );
             if (prev[id] === online) return prev;
             return { ...prev, [id]: online };
           });
         },
         () => {
           delete updatedAtById[id];
+          delete receiveAtById[id];
           setStableOnlineById((prev) => {
             if (prev[id] === false) return prev;
             return { ...prev, [id]: false };
@@ -102,7 +109,11 @@ export default function MachineDropdown({
       const next: Record<number, boolean> = {};
       let changed = false;
       for (const id of watch) {
-        next[id] = isFirebaseHeartbeatLive(updatedAtById[id], Date.now());
+        next[id] = isFirebaseHeartbeatLive(
+          updatedAtById[id],
+          Date.now(),
+          receiveAtById[id] ?? null
+        );
       }
       setStableOnlineById((prev) => {
         for (const id of watch) {

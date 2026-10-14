@@ -143,7 +143,6 @@ export function recordMachineRtdbDelivery(
 } {
   const hadAccepted = seenCallbackById[machineId] ?? false;
   const payloadMs = parsePresenceMs(updatedAtRaw);
-  const prevPayload = prevPayloadById[machineId] ?? 0;
 
   if (!hadAccepted) {
     seenCallbackById[machineId] = true;
@@ -159,17 +158,11 @@ export function recordMachineRtdbDelivery(
         accepted: false,
       };
     }
-  } else {
-    const newerWrite = payloadMs != null && payloadMs > prevPayload;
-    if (!newerWrite && !isRtdbPayloadFresh(payloadMs, nowMs)) {
-      return {
-        receiveById: prevReceiveById,
-        payloadById: prevPayloadById,
-        accepted: false,
-      };
-    }
   }
 
+  // Later snapshots always count as a delivery. onValue only runs again when
+  // the board writes, so a timestamp that does not move must not freeze the
+  // machine Offline between those writes.
   const receiveById = { ...prevReceiveById, [machineId]: nowMs };
   const payloadById = {
     ...prevPayloadById,

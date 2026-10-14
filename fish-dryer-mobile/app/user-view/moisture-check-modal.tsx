@@ -10,7 +10,7 @@ import {
   Alert,
 } from "react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { resolveMoisturePercent, formatMoisturePercent } from "@/lib/duration-format";
+import { resolveMoisturePercent, formatMoistureReading } from "@/lib/duration-format";
 import { isMoistureProbeWorking } from "@/lib/hardware-status-rtdb";
 import {
   newMoistureBatchLabel,
@@ -70,7 +70,7 @@ export default function MoistureCheckModal({
   const probeWorking = isMoistureProbeWorking(liveReadings, moistureSensorStatus);
   const liveMoisture = probeWorking ? resolveMoisturePercent(liveReadings) : null;
   const liveMoistureLabel = probeWorking
-    ? formatMoisturePercent(liveMoisture) ?? "--"
+    ? formatMoistureReading(liveReadings as Record<string, unknown> | null) ?? "--"
     : "Sensor is not working";
 
   useEffect(() => {

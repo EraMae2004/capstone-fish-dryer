@@ -192,7 +192,7 @@
       const char* WIFI_SSID = "XuMinghao";
       const char* WIFI_PASS = "Connecthere";
 
-      static       const char* FIRMWARE_BUILD_TAG = "sync-v116";
+      static       const char* FIRMWARE_BUILD_TAG = "sync-v120";
 
       // Laravel heartbeat: keeps `last_seen` + hardware rows in MySQL and mirrors RTDB when enabled.
       // Set to 0 only while debugging (e.g. API returns 500). If the app shows "offline" but RTDB
@@ -485,6 +485,11 @@
       static float gLiveTempC = NAN;
       static float gLiveHum = NAN;
       static int gLiveMoisturePct = -1;
+      static int gMoistureAvgCached = 0;
+      static int gMoistureSpreadCached = 0;
+      static int gMoistureMinCached = 4095;
+      static int gMoistureMaxCached = 0;
+      static unsigned long gLastMoistureSampleMs = 0;
 
       static inline void driveLed(int pin, bool on) {
         pinMode(pin, OUTPUT);
@@ -738,74 +743,52 @@
       }
 
       String statusWord(bool ok) { return ok ? "working" : "not_working"; }
-      /** YL-69: idle until probe touches fish — standby, not a fault. */
-      String moistureStatusWord(bool probeConnected) {
-        return probeConnected ? "working" : "standby";
+      /** A moisture percent is a real reading. Standby is only before the first sample. */
+      String moistureStatusWord(bool havePercent) {
+        return havePercent ? "working" : "standby";
       }
       String statusUnknown() { return "unknown"; }
 
-      // ===== Moisture calibration (ADC → %) =====
-      // YL-69 on GPIO35: lower ADC = wetter, higher = drier. Swap if water raises ADC.
-      #ifndef MOISTURE_YL69_DRY_ADC
-      #define MOISTURE_YL69_DRY_ADC 4095
-      #endif
-      #ifndef MOISTURE_YL69_WET_ADC
-      #define MOISTURE_YL69_WET_ADC 1200
-      #endif
-      #ifndef MOISTURE_LEARNED_SPAN_MIN
-      #define MOISTURE_LEARNED_SPAN_MIN 800
-      #endif
-
-      static int MOISTURE_DRY_ADC = MOISTURE_YL69_DRY_ADC;
-      static int MOISTURE_WET_ADC = MOISTURE_YL69_WET_ADC;
-      static bool moistureBoundsInitialized = false;
-
+      // YL-69 on GPIO35. On this board AO rises as the fish gets wetter:
+      // dry sits low, water sits high. Percent is that voltage on the full
+      // 0–4095 scale. Nothing is dropped for sitting outside a dry/wet window.
       static int clampInt(int v, int lo, int hi) {
         if (v < lo) return lo;
         if (v > hi) return hi;
         return v;
       }
 
-      /** Fixed scale: dry air = 0%, probe in water = 100%. No learned range. */
+      /** ADC 0 = dry (0%). ADC 4095 = water (100%). A damp surface is in between. */
       static int moisturePercentFromAdc(int adc) {
-        const int dry = MOISTURE_YL69_DRY_ADC;
-        const int wet = MOISTURE_YL69_WET_ADC;
-        if (dry <= wet) return 0;
-        float pct = (float)(dry - adc) * 100.0f / (float)(dry - wet);
-        return clampInt((int)lroundf(pct), 0, 100);
+        adc = clampInt(adc, 0, 4095);
+        return (int)lroundf((float)adc * 100.0f / 4095.0f);
+      }
+
+      /** Name the surface from the percent. Not an ADC window. */
+      static const char* moistureSurfaceWord(int pct) {
+        if (pct >= 67) return "wet";
+        if (pct >= 34) return "damp";
+        return "dry";
+      }
+
+      static int gMoisturePctSmooth = -1;
+      static bool gMoistureHaveSample = false;
+
+      /** Follow the probe. A wet or dry touch shows up on the next sample. */
+      static int smoothMoisturePercent(int pct) {
+        pct = clampInt(pct, 0, 100);
+        if (gMoisturePctSmooth < 0) {
+          gMoisturePctSmooth = pct;
+        } else {
+          gMoisturePctSmooth = (gMoisturePctSmooth + pct * 3) / 4;
+        }
+        return clampInt(gMoisturePctSmooth, 0, 100);
       }
 
       #ifndef MOISTURE_ADC_SAMPLES
-      #define MOISTURE_ADC_SAMPLES 24
+      #define MOISTURE_ADC_SAMPLES 16
       #endif
 
-      #ifndef MOISTURE_FLOAT_SPREAD_FAIL
-      #define MOISTURE_FLOAT_SPREAD_FAIL 1100
-      #endif
-      #ifndef MOISTURE_FLOAT_LOW_ADC_MAX
-      /** Unplugged GPIO35: pegged near 0 with very low spread (not wet fish readings). */
-      #define MOISTURE_FLOAT_LOW_ADC_MAX 180
-      #endif
-      #ifndef MOISTURE_FLOAT_LOW_SPREAD_MAX
-      #define MOISTURE_FLOAT_LOW_SPREAD_MAX 150
-      #endif
-      #ifndef MOISTURE_CONNECT_GOOD_SAMPLES
-      #define MOISTURE_CONNECT_GOOD_SAMPLES 2
-      #endif
-      #ifndef MOISTURE_CONNECT_BAD_SAMPLES
-      #define MOISTURE_CONNECT_BAD_SAMPLES 4
-      #endif
-      #ifndef MOISTURE_DISCONNECT_GOOD_RESET_SAMPLES
-      #define MOISTURE_DISCONNECT_GOOD_RESET_SAMPLES 2
-      #endif
-      /** 0 = moisture faults do not drive buzzer (avoids false alarms from YL-69 thresholds). */
-      #ifndef MOISTURE_FAULT_BUZZER
-      #define MOISTURE_FAULT_BUZZER 0
-      #endif
-
-      static bool gMoistureConnectedStable = false;
-      static uint8_t gMoistureGoodStreak = 0;
-      static uint8_t gMoistureBadStreak = 0;
       /** Latched ON after RTDB start until explicit stop (survives flaky GETs). */
       static bool gDryingOutputsLatched = false;
       /** Last processed `machines/{id}/command.seq` (mobile + Laravel write here). */
@@ -822,109 +805,38 @@
       /** Fan/heat ONLY after app Start (command seq) — not stale RTDB status=running. */
       static bool gDryRunAuthorized = false;
 
-      /**
-       * YL-69 A0: wet → low ADC, dry → high. Unplugged GPIO35 often hits 0 (min) with
-       * noisy spread 150–400 — must not report fake 60–90% moisture.
-       */
-      static bool moistureProbeConnected(int avgAdc, int spread, int minAdc, int maxAdc) {
-        (void)minAdc;
-        if (spread > MOISTURE_FLOAT_SPREAD_FAIL) {
-          return false;
-        }
-        if (maxAdc >= 4040 && minAdc <= 25 && spread < 100) {
-          return false;
-        }
-        if (avgAdc <= 12 && spread < 90) {
-          return false;
-        }
-        if (avgAdc < MOISTURE_FLOAT_LOW_ADC_MAX &&
-            spread < MOISTURE_FLOAT_LOW_SPREAD_MAX) {
-          return false;
-        }
-        if (avgAdc > 3950 && spread < 180) {
-          return false;
-        }
-        /** GPIO35: probe connected if ADC is in a sane range (not pegged floating). */
-        return avgAdc >= 80 && avgAdc <= 4080 && spread <= 900;
-      }
-
-      /** Stable connect/disconnect for RTDB + buzzer (breadboard noise). */
-      static bool moistureSensorReportOk(int avgAdc, int spread, int minAdc, int maxAdc) {
-        return moistureConnectedDebounced(avgAdc, spread, minAdc, maxAdc);
-      }
-
-      static bool moistureHealthOk(int avgAdc, int spread, int minAdc, int maxAdc) {
-        return moistureProbeConnected(avgAdc, spread, minAdc, maxAdc);
-      }
-
-      static void resetMoistureCalibration() {
-        moistureBoundsInitialized = false;
-        MOISTURE_DRY_ADC = MOISTURE_YL69_DRY_ADC;
-        MOISTURE_WET_ADC = MOISTURE_YL69_WET_ADC;
-      }
-
-      /**
-       * Debounce connect/disconnect. While connected, a single noisy "good" sample must not
-       * reset the disconnect counter (floating GPIO35 causes false "working" for minutes).
-       */
-      static bool moistureConnectedDebounced(int avgAdc, int spread, int minAdc, int maxAdc) {
-        const bool sampleOk = moistureProbeConnected(avgAdc, spread, minAdc, maxAdc);
-        if (sampleOk) {
-          if (gMoistureGoodStreak < 255) gMoistureGoodStreak++;
-          if (!gMoistureConnectedStable) {
-            gMoistureBadStreak = 0;
-          } else if (gMoistureGoodStreak >= MOISTURE_DISCONNECT_GOOD_RESET_SAMPLES) {
-            gMoistureBadStreak = 0;
-          }
-        } else {
-          gMoistureGoodStreak = 0;
-          if (gMoistureBadStreak < 255) gMoistureBadStreak++;
-        }
-        if (!gMoistureConnectedStable &&
-            gMoistureGoodStreak >= MOISTURE_CONNECT_GOOD_SAMPLES) {
-          gMoistureConnectedStable = true;
-          gMoistureBadStreak = 0;
-        }
-        if (gMoistureConnectedStable &&
-            gMoistureBadStreak >= MOISTURE_CONNECT_BAD_SAMPLES) {
-          gMoistureConnectedStable = false;
-          gMoistureGoodStreak = 0;
-          resetMoistureCalibration();
-        }
-        return gMoistureConnectedStable;
-      }
-
       static void readMoistureAdcOnPin(int pin, int& avgOut, int& spreadOut, int& minOut, int& maxOut) {
+        int samples[MOISTURE_ADC_SAMPLES];
         (void)analogRead(pin);
         delay(1);
-        long sum = 0;
         int minV = 4095;
         int maxV = 0;
-        int secondMinV = 4095;
         for (int i = 0; i < MOISTURE_ADC_SAMPLES; i++) {
           const int v = analogRead(pin);
-          sum += v;
-          if (v < minV) {
-            secondMinV = minV;
-            minV = v;
-          } else if (v < secondMinV) {
-            secondMinV = v;
-          }
+          samples[i] = v;
+          if (v < minV) minV = v;
           if (v > maxV) maxV = v;
-          delay(2);
+          delayMicroseconds(200);
         }
-        avgOut = (int)(sum / MOISTURE_ADC_SAMPLES);
+        for (int i = 1; i < MOISTURE_ADC_SAMPLES; i++) {
+          const int key = samples[i];
+          int j = i - 1;
+          while (j >= 0 && samples[j] > key) {
+            samples[j + 1] = samples[j];
+            j--;
+          }
+          samples[j + 1] = key;
+        }
+        avgOut = samples[MOISTURE_ADC_SAMPLES / 2];
         spreadOut = maxV - minV;
         minOut = minV;
         maxOut = maxV;
-        if (minV <= 15 && secondMinV < 4095 && secondMinV > minV + 8) {
-          minOut = secondMinV;
-          spreadOut = maxV - minOut;
-        }
       }
 
       static void readMoistureAdc(int& avgOut, int& spreadOut, int& minOut, int& maxOut) {
         readMoistureAdcOnPin(PIN_MOISTURE, avgOut, spreadOut, minOut, maxOut);
+        gMoistureHaveSample = true;
+        gLiveMoisturePct = smoothMoisturePercent(moisturePercentFromAdc(avgOut));
       }
 
       static bool ledPinOn(int pin) {
@@ -1917,6 +1829,8 @@
           gRtdbTls.setHandshakeTimeout(3);
           gRtdbTlsReady = true;
         }
+        // Default TCP connect can sit for a minute. That gap is what flipped Offline.
+        gRtdbTls.setTimeout(3);
         if (gRtdbHost.length() == 0) {
           String u = FIREBASE_DATABASE_URL;
           if (u.startsWith("https://")) u = u.substring(8);
@@ -2938,10 +2852,9 @@
         gTestCombinedUiStarted = false;
         gTestFanLevel = 3;
         buzzerForceSilent();
-        if (!gDryingOutputsLatched) {
-          loadsHardwareAllOff();
-        }
-        applyLedsForSession(gSessionStatus);
+        driveFanLoad(false);
+        driveHeaterLoad(false);
+        applyLedsForSession(gSessionStatus.length() ? gSessionStatus : String("stopped"));
       #if ENABLE_LOCAL_HMI
         LocalHmi::endUiSelfTest();
       #endif
@@ -3129,7 +3042,7 @@
         (void)parseJsonIntAfterKey(body, "duration_ms", 0);
 
         if (mode == "stop" || mode == "done" || mode == "off") {
-          if (hardwareTestActive()) endHardwareTest();
+          endHardwareTest();
           return;
         }
 
@@ -3194,7 +3107,7 @@
       static bool rtdbPatchJson(const String& pathNoJsonSuffix, const String& jsonBody) {
         serviceLocalHmiKeys();
         if (WiFi.status() != WL_CONNECTED) return false;
-        const int code = rtdbHttp("PATCH", pathNoJsonSuffix, &jsonBody, nullptr, 800UL);
+        const int code = rtdbHttp("PATCH", pathNoJsonSuffix, &jsonBody, nullptr, 2000UL);
         serviceLocalHmiKeys();
         if (code < 200 || code >= 300) {
           rtdbLogFail("PATCH", code, pathNoJsonSuffix);
@@ -3216,47 +3129,57 @@
         if (st != "running" && st != "paused") st = "stopped";
 
         String body;
-        body.reserve(480);
-        body += "{\"hardware_status/updated_at\":{\".sv\":\"timestamp\"}";
-        body += ",\"hardware_status/microcontroller_id\":";
+        body.reserve(640);
+        // Patch the node the app listens on. Leaf paths keep temp/door intact.
+        body += "{\"updated_at\":{\".sv\":\"timestamp\"}";
+        body += ",\"microcontroller_id\":";
         body += publishId;
-        body += ",\"hardware_status/session_status\":\"";
+        body += ",\"session_status\":\"";
         body += st;
-        body += "\",\"hardware_status/components/esp32\":\"working\"";
+        body += "\",\"components/esp32\":\"working\"";
+        body += ",\"components/moisture_sensor\":\"";
+        body += moistureStatusWord(gMoistureHaveSample && gLiveMoisturePct >= 0);
+        body += "\"";
         {
           long rem = 0;
           if (sessionStatusIsRunning() || sessionStatusIsPaused()) {
             rem = hmiRemainingDurationSec();
             if (rem < 0) rem = 0;
           }
-          body += ",\"hardware_status/remaining_sec\":";
+          body += ",\"remaining_sec\":";
           body += rem;
         }
         if (lastDhtReadOk && !isnan(gLiveTempC)) {
-          body += ",\"hardware_status/readings/temperature\":";
+          body += ",\"readings/temperature\":";
           body += String(gLiveTempC, 1);
         }
         if (lastDhtReadOk && !isnan(gLiveHum)) {
-          body += ",\"hardware_status/readings/humidity\":";
+          body += ",\"readings/humidity\":";
           body += String(gLiveHum, 1);
         }
         if (gLiveMoisturePct >= 0 && gLiveMoisturePct <= 100) {
-          body += ",\"hardware_status/readings/moisture_percent\":";
+          body += ",\"readings/moisture_percent\":";
           body += gLiveMoisturePct;
-          body += ",\"hardware_status/readings/moisture\":";
+          body += ",\"readings/moisture\":";
           body += gLiveMoisturePct;
+          body += ",\"readings/moisture_raw\":";
+          body += gMoistureAvgCached;
+          body += ",\"readings/moisture_surface\":\"";
+          body += moistureSurfaceWord(gLiveMoisturePct);
+          body += "\"";
         }
       #if ENABLE_LOCAL_HMI
         if (LocalHmi::uiSelfTestActive()) {
-          body += ",\"hardware_status/readings/keypad_keys_pressed\":";
+          body += ",\"readings/keypad_keys_pressed\":";
           body += String((unsigned)LocalHmi::keypadSelfTestCount());
-          body += ",\"hardware_status/readings/keypad_keys_total\":16";
-          body += ",\"hardware_status/readings/ui_self_test\":true";
+          body += ",\"readings/keypad_keys_total\":16";
+          body += ",\"readings/ui_self_test\":true";
         }
       #endif
         body += "}";
 
-        const bool ok = rtdbPatchJson(String("machines/") + String(publishId), body);
+        const bool ok = rtdbPatchJson(
+            String("machines/") + String(publishId) + "/hardware_status", body);
         if (ok) gLastPresenceOkMs = millis();
         return ok;
       }
@@ -3348,16 +3271,10 @@
         const float t = cachedDhtT;
         const float h = cachedDhtH;
 
-        int moistureRaw = 0;
-        int spread = 0;
-        int moistureMin = 0;
-        int moistureMax = 0;
-        bool moistureOkReport = false;
-        readMoistureAdc(moistureRaw, spread, moistureMin, moistureMax);
-        moistureOkReport =
-            moistureSensorReportOk(moistureRaw, spread, moistureMin, moistureMax);
-        const int moisturePct =
-            moistureOkReport ? moisturePercentFromAdc(moistureRaw) : -1;
+        const int moistureRaw = gMoistureAvgCached;
+        const int spread = gMoistureSpreadCached;
+        const bool moistureOkReport = gMoistureHaveSample && gLiveMoisturePct >= 0;
+        const int moisturePct = moistureOkReport ? gLiveMoisturePct : -1;
 
         int doorHighs = 0;
         int doorLows = 0;
@@ -3370,17 +3287,6 @@
         const bool doorOkAlert = doorOkReport;
         const bool doorOpen = doorIsOpenFromSample(doorHighs, doorLows);
 
-        // Calibration health: needs both initialized bounds and enough span to map ADC → %.
-        // Span < 500 means we've only seen narrow values, so percentages will be wildly biased
-        // until the user wets/dries the probe to widen the learned range.
-        const int moistureSpanLearned = (MOISTURE_DRY_ADC > MOISTURE_WET_ADC)
-            ? (MOISTURE_DRY_ADC - MOISTURE_WET_ADC)
-            : (MOISTURE_WET_ADC - MOISTURE_DRY_ADC);
-        const bool moistureCalibrated =
-            moistureOkReport &&
-            (moistureSpanLearned >= MOISTURE_LEARNED_SPAN_MIN ||
-             moistureBoundsInitialized);
-
         {
           static unsigned long lastHbLogMs = 0;
           if (lastHbLogMs == 0 || (millis() - lastHbLogMs) > 15000UL) {
@@ -3389,6 +3295,10 @@
             Serial.print(moistureRaw);
             Serial.print(" pct=");
             Serial.print(moistureOkReport ? moisturePct : -1);
+            if (moistureOkReport && moisturePct >= 0) {
+              Serial.print(" ");
+              Serial.print(moistureSurfaceWord(moisturePct));
+            }
             Serial.print(" DHT=");
             Serial.print(dhtOkReport ? "OK" : "FAIL");
             Serial.print(" sess=");
@@ -3467,17 +3377,9 @@
             payload += "\"moisture\":";
             payload += moisturePct;
             laravelReadingsComma();
-            payload += "\"moisture_dry_adc\":";
-            payload += MOISTURE_DRY_ADC;
-            laravelReadingsComma();
-            payload += "\"moisture_wet_adc\":";
-            payload += MOISTURE_WET_ADC;
-            laravelReadingsComma();
-            payload += "\"moisture_span\":";
-            payload += moistureSpanLearned;
-            laravelReadingsComma();
-            payload += "\"moisture_calibrated\":";
-            payload += moistureCalibrated ? "true" : "false";
+            payload += "\"moisture_surface\":\"";
+            payload += moistureSurfaceWord(moisturePct);
+            payload += "\"";
           }
         }
         payload += "}";
@@ -3585,17 +3487,9 @@
             root += ",\"moisture_percent\":";
             root += moisturePct;
             readingsComma();
-            root += "\"moisture_dry_adc\":";
-            root += MOISTURE_DRY_ADC;
-            readingsComma();
-            root += "\"moisture_wet_adc\":";
-            root += MOISTURE_WET_ADC;
-            readingsComma();
-            root += "\"moisture_span\":";
-            root += moistureSpanLearned;
-            readingsComma();
-            root += "\"moisture_calibrated\":";
-            root += moistureCalibrated ? "true" : "false";
+            root += "\"moisture_surface\":\"";
+            root += moistureSurfaceWord(moisturePct);
+            root += "\"";
           }
           if (doorOkReport) {
             readingsComma();
@@ -3787,19 +3681,13 @@
       }
       #endif
 
-      static int gMoistureAvgCached = 0;
-      static int gMoistureSpreadCached = 0;
-      static int gMoistureMinCached = 4095;
-      static int gMoistureMaxCached = 0;
-      static unsigned long gLastMoistureSampleMs = 0;
       static unsigned long gLastAssignmentPollMs = 0;
 
       static void readSensorsOnce(bool& dhtOk, bool& moistureOk, bool& doorOk, bool& doorOpen) {
         // Typing must not wait on a 24-sample ADC sweep or a 32-read door scan.
         if (LocalHmi::isTypingParams()) {
           dhtOk = lastDhtReadOk;
-          moistureOk = moistureSensorReportOk(
-              gMoistureAvgCached, gMoistureSpreadCached, gMoistureMinCached, gMoistureMaxCached);
+          moistureOk = gMoistureHaveSample;
           doorOk = false;
           doorOpen = false;
           return;
@@ -3814,8 +3702,7 @@
           gMoistureMinCached = minV;
           gMoistureMaxCached = maxV;
         }
-        moistureOk = moistureSensorReportOk(
-            gMoistureAvgCached, gMoistureSpreadCached, gMoistureMinCached, gMoistureMaxCached);
+        moistureOk = gMoistureHaveSample && gLiveMoisturePct >= 0;
 
       #if HAVE_DOOR_SENSOR
         int doorHighs = 0;
@@ -4285,6 +4172,7 @@
         }
         cmdJson += ",\"seq\":";
         cmdJson += seq;
+        cmdJson += ",\"source\":\"local_hmi\"";
         cmdJson += ",\"updated_at\":\"";
         cmdJson += String(seq);
         cmdJson += "\"}";
@@ -4783,9 +4671,6 @@
         if (sessionStatusIsRunning()) remainCatchUp();
         gLiveTempC = cachedDhtT;
         gLiveHum = cachedDhtH;
-        gLiveMoisturePct = moistureOk
-            ? moisturePercentFromAdc(gMoistureAvgCached)
-            : -1;
 
         const bool sessionLive = sessionStatusIsRunning() || sessionStatusIsPaused();
 
@@ -4812,33 +4697,36 @@
           const unsigned long presenceAge =
               (gLastPresenceOkMs == 0) ? 60000UL : (now - gLastPresenceOkMs);
           const bool dryingNow = gDryingOutputsLatched || sessionStatusIsRunning();
+          const bool idle = !sessionLive && !dryingNow;
           const bool canTest =
           #if ENABLE_RTDB_HARDWARE_TEST
               !dryingNow && !sessionStatusIsPaused();
           #else
               false;
           #endif
-          const bool cmdDue = cmdAge >= 150UL;
-          const bool testDue = canTest && testAge >= 150UL;
+          // Idle still pulses on the same 2s cadence as a drying run. A tighter
+          // idle pulse was starving Start/Pause and the hardware-test Done read.
+          const unsigned long testPollMs = hardwareTestActive() ? 200UL : (idle ? 5000UL : 800UL);
+          const unsigned long cmdInterval = idle ? 2500UL : 400UL;
+          const bool cmdDue = cmdAge >= cmdInterval;
+          const bool testDue = canTest && testAge >= testPollMs;
           const bool presenceDue = presenceAge >= PRESENCE_INTERVAL_MS;
           const bool presenceAttemptOk =
-              gLastPresenceAttemptMs == 0 || (now - gLastPresenceAttemptMs) >= 250UL;
+              gLastPresenceAttemptMs == 0 || (now - gLastPresenceAttemptMs) >= 400UL;
           const bool fullDue =
               lastHeartbeatMs == 0 || (now - lastHeartbeatMs) >= HEARTBEAT_INTERVAL_MS;
-          const bool bodyDue = !hardwareTestActive() && !screenQuiet &&
+          const bool presenceLate = presenceAge >= 2500UL;
+          const bool bodyDue = !presenceLate && !hardwareTestActive() && !screenQuiet &&
               (gLastSessionBodyPollMs == 0 || (now - gLastSessionBodyPollMs) >= bodyPollMs);
-          const bool lanDue = !screenQuiet && gLastBeatOk &&
+          const bool lanDue = !presenceLate && !screenQuiet && gLastBeatOk &&
               (gLaravelApiBase.length() == 0 || !sessionLive) &&
               (gLastLanPollMs == 0 || (now - gLastLanPollMs) > 60000UL);
           const unsigned long assignmentPollMs =
               gAssignedId > 0 ? ASSIGNMENT_POLL_ASSIGNED_MS : ASSIGNMENT_POLL_UNASSIGNED_MS;
-          const bool assignDue = !screenQuiet && !sessionLive && gLastBeatOk &&
+          const bool assignDue = !presenceLate && !screenQuiet && !sessionLive && gLastBeatOk &&
               (gLastAssignmentPollMs == 0 || (now - gLastAssignmentPollMs) >= assignmentPollMs);
-          // Commands and tests stay fresh, so a slow session upload cannot sit in front of them.
-          const bool interactiveFresh = cmdAge < 400UL && (!canTest || testAge < 400UL);
-          // A failed pulse must not sit in a retry loop and hide Start/Pause/Stop or Test.
-          const bool yieldAfterFailedPulse =
-              gLastPresenceFailed && !keyBurst && (cmdDue || testDue);
+          const bool interactiveFresh = !presenceDue && !presenceLate &&
+              (idle || (cmdAge < 800UL && (!canTest || testAge < 800UL)));
 
           bool pickCommand = false;
           bool pickTest = false;
@@ -4850,28 +4738,23 @@
           bool pickLan = false;
           bool pickAssign = false;
 
-          // A late Online pulse still goes out. Otherwise Start/Pause/Stop is next,
-          // so the button is not stuck behind a sensor upload.
-          const bool presenceUrgent = presenceAge >= 3500UL;
-          const bool cmdUrgent = cmdAge >= 400UL;
-          if (hardwareTestActive() && testDue && !keyBurst) {
+          // Done/X and a keypad Pause/Resume must not wait behind the online pulse.
+          const bool testStopDue =
+              hardwareTestActive() && testDue && !keyBurst && testAge >= 700UL;
+          if (testStopDue) {
             pickTest = true;
-          } else if (presenceUrgent && presenceAttemptOk && !yieldAfterFailedPulse) {
-            if (!keyBurst && fullDue) {
-              pickHb = true;
-            } else {
-              pickPulse = true;
-            }
-          } else if (!keyBurst && cmdUrgent) {
-            pickCommand = true;
-          } else if (presenceDue && presenceAttemptOk && !yieldAfterFailedPulse) {
+          } else if (!keyBurst && !presenceLate && syncDue && gDeferredRtdbStatus.length()) {
+            pickSync = true;
+          } else if (presenceDue && presenceAttemptOk && !keyBurst) {
             pickPulse = true;
-          } else if (!keyBurst && cmdDue) {
-            pickCommand = true;
-          } else if (!keyBurst && testDue) {
+          } else if (hardwareTestActive() && testDue && !keyBurst) {
             pickTest = true;
-          } else if (!keyBurst && fullDue) {
+          } else if (!keyBurst && !presenceLate && fullDue) {
             pickHb = true;
+          } else if (!keyBurst && !presenceLate && cmdDue) {
+            pickCommand = true;
+          } else if (!keyBurst && !presenceLate && testDue) {
+            pickTest = true;
           } else if (interactiveFresh && !hardwareTestActive() && gNeedStatePublish) {
             pickState = true;
           } else if (interactiveFresh && !hardwareTestActive() && syncDue) {

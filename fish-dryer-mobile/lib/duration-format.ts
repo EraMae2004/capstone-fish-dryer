@@ -99,21 +99,35 @@ export function resolveMoisturePercent(
   if (!readings || typeof readings !== "object") return null;
   const r = readings;
   if (typeof r.moisture_percent === "number" && Number.isFinite(r.moisture_percent)) {
-    return Math.round(r.moisture_percent);
+    return Math.max(0, Math.min(100, Math.round(r.moisture_percent)));
   }
-  if (typeof r.moisture === "number" && Number.isFinite(r.moisture) && r.moisture <= 100) {
+  if (typeof r.moisture === "number" && Number.isFinite(r.moisture) && r.moisture >= 0 && r.moisture <= 100) {
     return Math.round(r.moisture);
-  }
-  const raw = typeof r.moisture_raw === "number" ? r.moisture_raw : null;
-  const dry = typeof r.moisture_dry_adc === "number" ? r.moisture_dry_adc : null;
-  const wet = typeof r.moisture_wet_adc === "number" ? r.moisture_wet_adc : null;
-  if (raw != null && dry != null && wet != null && dry > wet + 50) {
-    const pct = ((dry - raw) * 100) / (dry - wet);
-    return Math.max(0, Math.min(100, Math.round(pct)));
   }
   return null;
 }
 
 export function formatMoisturePercent(pct: number | null): string | null {
   return pct != null && Number.isFinite(pct) ? `${pct}%` : null;
+}
+
+/** Wet / damp / dry from the fish moisture percent. Not an ADC window. */
+export function moistureSurfaceFromPercent(pct: number): "Wet" | "Damp" | "Dry" {
+  if (pct >= 67) return "Wet";
+  if (pct >= 34) return "Damp";
+  return "Dry";
+}
+
+export function formatMoistureReading(
+  readings: Record<string, unknown> | null | undefined
+): string | null {
+  const pct = resolveMoisturePercent(readings);
+  if (pct == null) return null;
+  const raw = readings?.moisture_surface;
+  const word = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  const surface =
+    word === "wet" || word === "damp" || word === "dry"
+      ? word.charAt(0).toUpperCase() + word.slice(1)
+      : moistureSurfaceFromPercent(pct);
+  return `${pct}% ${surface}`;
 }

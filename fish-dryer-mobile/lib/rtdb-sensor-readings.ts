@@ -6,6 +6,7 @@ export type RtdbSensorReadings = {
   humidity?: number;
   moisture?: number;
   moisture_percent?: number;
+  moisture_surface?: string;
   moisture_raw?: number;
   moisture_dry_adc?: number;
   moisture_wet_adc?: number;
@@ -59,6 +60,9 @@ export function parseRtdbSensorReadings(raw: unknown): RtdbSensorReadings | null
   }
   const spread = readNum(r.moisture_spread);
   if (spread != null) out.moisture_spread = spread;
+  if (typeof r.moisture_surface === "string" && r.moisture_surface.trim()) {
+    out.moisture_surface = r.moisture_surface.trim().toLowerCase();
+  }
   if (typeof r.door === "string") out.door = r.door;
   return Object.keys(out).length > 0 ? out : null;
 }

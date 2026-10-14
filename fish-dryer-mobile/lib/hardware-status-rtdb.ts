@@ -258,16 +258,18 @@ export function moistureSensorDisplayColor(status: unknown): string {
   return "#ef4444";
 }
 
-/** True when the YL-69 is actually returning a moisture reading. */
+/** True when the board is publishing a fish moisture percent (0 = dry, 100 = wet). */
 export function isMoistureProbeWorking(
   liveReadings: Record<string, unknown> | null | undefined,
   componentStatus?: unknown
 ): boolean {
   if (liveReadings && typeof liveReadings === "object") {
-    const pct = liveReadings.moisture_percent;
-    if (typeof pct === "number" && Number.isFinite(pct) && pct >= 0) return true;
-    if (liveReadings.moisture_connected === false) return false;
-    if (liveReadings.moisture_connected === true) return true;
+    const pct = liveReadings.moisture_percent ?? liveReadings.moisture;
+    if (typeof pct === "number" && Number.isFinite(pct) && pct >= 0 && pct <= 100) return true;
+    if (typeof pct === "string" && pct.trim() !== "") {
+      const n = Number(pct);
+      if (Number.isFinite(n) && n >= 0 && n <= 100) return true;
+    }
   }
   return coerceHardwareStatus(componentStatus) === "working";
 }

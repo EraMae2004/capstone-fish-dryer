@@ -9,6 +9,7 @@ import {
   moistureSensorDisplayColor,
   moistureSensorDisplayLabel,
 } from "@/lib/hardware-status-rtdb";
+import { formatMoistureReading, resolveMoisturePercent } from "@/lib/duration-format";
 import { type MoistureBatchDraft } from "@/lib/moisture-checks";
 import { userTypography } from "@/lib/user-typography";
 
@@ -66,7 +67,13 @@ export default function OverviewStatus({
   const useRealDoorSensor =
     !sessionSt || sessionSt === "stopped" || sessionSt === "paused";
 
-  const moistureRowValue = showSessionDetails ? "Tap here" : null;
+  const liveMoistureLabel =
+    hardwareStreamFresh !== false
+      ? formatMoistureReading(lr as Record<string, unknown> | null)
+      : null;
+  const moistureRowValue = showSessionDetails
+    ? liveMoistureLabel ?? "Tap here"
+    : liveMoistureLabel;
 
   /** ESP32 + real sensors only (matches Firebase `components` + firmware). */
   const hardwareComponents = [
@@ -200,9 +207,18 @@ export default function OverviewStatus({
                   })
                 : null;
 
+            const moisturePct =
+              component.key === "moisture_sensor" && streamLive
+                ? resolveMoisturePercent(lr as Record<string, unknown> | null)
+                : null;
+            const moistureShown =
+              component.key === "moisture_sensor" && streamLive
+                ? formatMoistureReading(lr as Record<string, unknown> | null)
+                : null;
             const moistureLabel =
               component.key === "moisture_sensor" && !doorLabel
-                ? moistureSensorDisplayLabel(rawStatus)
+                ? moistureShown ??
+                  (moisturePct != null ? `${moisturePct}%` : moistureSensorDisplayLabel(rawStatus))
                 : null;
 
             const displayText = doorLabel
@@ -210,7 +226,9 @@ export default function OverviewStatus({
                 ? "not_working"
                 : doorLabel
               : moistureLabel
-                ? moistureLabel.toLowerCase()
+                ? moisturePct != null
+                  ? moistureLabel
+                  : moistureLabel.toLowerCase()
                 : statusValue === "working"
                   ? "working"
                   : statusValue === "standby"
@@ -222,7 +240,9 @@ export default function OverviewStatus({
             const color = doorLabel
               ? doorSensorDisplayColor(doorLabel)
               : moistureLabel
-                ? moistureSensorDisplayColor(rawStatus)
+                ? moisturePct != null
+                  ? "#2ecc71"
+                  : moistureSensorDisplayColor(rawStatus)
                 : statusValue === "working"
                   ? "#2ecc71"
                   : statusValue === "standby"

@@ -19,7 +19,7 @@ import { onValue, ref as dbRef, get as dbGet, type DataSnapshot } from "firebase
 import { firebaseDb } from "@/config/firebase";
 import { isFirebaseHeartbeatLive, subscribeLiveHardwareStatus } from "@/lib/live-hardware-rtdb";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
-import { resolveMoisturePercent } from "@/lib/duration-format";
+import { formatMoistureReading, resolveMoisturePercent } from "@/lib/duration-format";
 import { ensureEspAssignment } from "@/lib/ensure-esp-assignment";
 import {
   computeStableOnlineByMachineId,
@@ -771,6 +771,11 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     }
     // Offline MCU → every row is not_working; moisture must not read as Standby.
     if (name === "Moisture Sensor") {
+      if (!hardwareStreamFresh) {
+        return moistureSensorDisplayLabel(getComponentStatus(name));
+      }
+      const shown = formatMoistureReading(liveReadings as Record<string, unknown> | null);
+      if (shown != null) return shown;
       return moistureSensorDisplayLabel(getComponentStatus(name));
     }
     const s = normalizeStatusWord(getComponentStatus(name));
@@ -784,6 +789,10 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
 
   const statusColorForComponent = (name: string, status: string) => {
     if (name === "Moisture Sensor") {
+      if (hardwareStreamFresh) {
+        const shown = formatMoistureReading(liveReadings as Record<string, unknown> | null);
+        if (shown != null) return "#22c55e";
+      }
       return moistureSensorDisplayColor(getComponentStatus(name));
     }
     if (isDoorSensorUiLabel(name)) {
@@ -901,7 +910,9 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     }
 
     if (key === "moisture_sensor") {
-      if (!connected) {
+      const shown = formatMoistureReading(r as Record<string, unknown>);
+      const pct = resolveMoisturePercent(r as Record<string, unknown>);
+      if (pct == null && !connected) {
         return {
           key,
           label: "Moisture Sensor",
@@ -910,17 +921,15 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
           details: "Probe is not responding on GPIO35. Check probe leads and ADC supply.",
         };
       }
-      const pct = resolveMoisturePercent(r as Record<string, unknown>);
-      const shown = pct != null ? `${Math.round(pct)}%` : null;
 
       return {
         key,
         label: "Moisture Sensor",
         ok: pct != null,
-        headline: shown != null ? shown : "Connected · waiting for %",
+        headline: shown != null ? shown : "Waiting for %",
         details:
           shown != null
-            ? `Moisture: ${shown}`
+            ? `Moisture in the fish: ${shown}`
             : "Waiting for a moisture percent from the board.",
       };
     }

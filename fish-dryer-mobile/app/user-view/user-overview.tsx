@@ -41,7 +41,7 @@ import {
 import { formatRecommendationParams } from "@/lib/format-recommendation";
 import { readRealDoorIsOpen } from "@/lib/door-sensor-display";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
-import { isMachineLive, isMachineOnlineForUi, RTDB_STAY_ONLINE_MS, useStableMachineOnline } from "@/lib/machine-presence";
+import { isMachineLive, isMachineOnlineForUi, useStableMachineOnline } from "@/lib/machine-presence";
 import {
   canonicalHardwareSensorKey,
   coerceHardwareStatus,
@@ -205,6 +205,8 @@ export default function UserOverview({
   const sessionRef = useRef<any>(null);
   sessionRef.current = session;
   const lastHwRef = useRef<Record<string, unknown> | null>(null);
+  /** True after one live hardware_status write. Later writes keep the machine Online. */
+  const overviewHwSeenLiveRef = useRef(false);
   const isActiveRef = useRef(true);
   isActiveRef.current = isActive;
   /** Instant button/tab state while API catches up — cleared in postSessionControl finally. */
@@ -252,10 +254,7 @@ export default function UserOverview({
     overviewRtdbLastReceiveMs,
     presenceTick,
     activeMachineId,
-    String(session?.status ?? "").trim().toLowerCase() === "running" ||
-      String(session?.status ?? "").trim().toLowerCase() === "paused"
-      ? 120_000
-      : RTDB_STAY_ONLINE_MS
+    120_000
   );
 
   // PARAMETERS STATE
@@ -413,6 +412,7 @@ export default function UserOverview({
 
     const boundMachineId = activeMachineId;
     lastHwRef.current = null;
+    overviewHwSeenLiveRef.current = false;
 
     const applyHw = (hw: Record<string, unknown>) => {
       if (machineIdRef.current !== boundMachineId) return;
@@ -420,9 +420,11 @@ export default function UserOverview({
       if (!isActiveRef.current) return;
       const payloadMs = firebaseUpdatedAtMs(hw.updated_at);
       setOverviewRtdbPayloadAtMs(payloadMs);
-      // Only a fresh heartbeat extends Online. A stale or empty snapshot must not
-      // clear the last good beat — that was flipping the machine Offline mid-session.
-      if (isFirebaseHeartbeatLive(hw.updated_at, Date.now())) {
+      // First snapshot can be a leftover row. After one live write, every later
+      // callback is the board publishing — including while no session is running.
+      const payloadLive = isFirebaseHeartbeatLive(hw.updated_at, Date.now());
+      if (payloadLive) overviewHwSeenLiveRef.current = true;
+      if (payloadLive || overviewHwSeenLiveRef.current) {
         setOverviewRtdbLastReceiveMs(Date.now());
       }
       const parsed = parseHardwareStatusFromRtdb(hw);
@@ -443,10 +445,12 @@ export default function UserOverview({
       if (holding && holdCmd === "stop" && (boardSt === "running" || boardSt === "paused")) {
         return;
       }
-      if (holding && holdCmd === "pause" && boardSt === "running") {
+      // Keypad resume/pause is a new shared command. Do not keep the app pause.
+      const keypadOwns = String(hw.source ?? "") === "local_hmi";
+      if (!keypadOwns && holding && holdCmd === "pause" && boardSt === "running") {
         return;
       }
-      if (holding && holdCmd === "start" && boardSt === "paused") {
+      if (!keypadOwns && holding && holdCmd === "start" && boardSt === "paused") {
         return;
       }
       const prevBoard = boardStatusEdgeRef.current;
@@ -699,6 +703,8 @@ export default function UserOverview({
   const sessionSyncLockRef = useRef(false);
   const holdLocalCmdRef = useRef<"start" | "pause" | "stop" | null>(null);
   const holdLocalCmdUntilRef = useRef(0);
+  /** Seq this phone just wrote. A keypad seq is a different command and must win. */
+  const lastAppCommandSeqRef = useRef<number | null>(null);
   /** Remaining seconds sent with the button, so an old board time cannot replace it. */
   const holdSentRemainRef = useRef<number | null>(null);
   const pauseIntentRef = useRef<"pause" | "resume" | null>(null);
@@ -747,6 +753,7 @@ export default function UserOverview({
       const tt =
         Number.isFinite(ttRaw) && ttRaw > 1 ? ttRaw : 60;
       const seq = nextRtdbCommandSeq();
+      lastAppCommandSeqRef.current = seq;
       const fish =
         (opts?.fish_type ?? fishType ?? "").trim() || undefined;
       const totalFishRaw =
@@ -780,8 +787,11 @@ export default function UserOverview({
         if (durVal != null) payload.set_duration_minutes = durVal;
         if (remSec != null && (running || paused)) payload.remaining_sec = remSec;
 
+        const commandWord =
+          status === "running" ? "start" : status === "paused" ? "pause" : "stop";
         const commandPayload: Record<string, unknown> = {
-          action: status === "running" ? "start" : status === "paused" ? "pause" : "stop",
+          action: commandWord,
+          command: commandWord,
           fan_speed: fs,
           target_temperature: running || paused ? tt : 0,
           seq,
@@ -891,12 +901,8 @@ export default function UserOverview({
       const tf = Number.parseInt(String(totalFish ?? "").trim(), 10);
       const remSec = durationDigitsToSeconds(String(duration ?? "").trim());
       const patch: Record<string, unknown> = {
-        status: "paused",
-        command: "pause",
-        session_active: false,
         fan_speed: SESSION_FAN_SPEED,
         target_temperature: Number.isFinite(tt) && tt > 1 ? tt : 60,
-        updated_at: new Date().toISOString(),
       };
       const fish = String(fishType ?? "").trim();
       if (fish) patch.fish_type = fish;
@@ -1173,9 +1179,14 @@ export default function UserOverview({
         const holdCmd = holdLocalCmdRef.current;
         const holding =
           Date.now() < holdLocalCmdUntilRef.current && holdCmd != null;
-        if (holding && holdCmd === "pause" && status === "running") status = "paused";
-        if (holding && holdCmd === "stop" && status !== "stopped") status = "stopped";
-        if (holding && holdCmd === "start" && status === "stopped") status = "running";
+        const keypadOwns = String(payload.source ?? "") === "local_hmi";
+        if (keypadOwns) {
+          holdLocalCmdRef.current = null;
+          holdLocalCmdUntilRef.current = 0;
+        }
+        if (!keypadOwns && holding && holdCmd === "pause" && status === "running") status = "paused";
+        if (!keypadOwns && holding && holdCmd === "stop" && status !== "stopped") status = "stopped";
+        if (!keypadOwns && holding && holdCmd === "start" && status === "stopped") status = "running";
 
         rtdbSessionStatusRef.current = status;
         setUiSessionStatusOverride(status as "running" | "paused" | "stopped");
@@ -1292,6 +1303,67 @@ export default function UserOverview({
       }
     );
 
+    return () => unsub();
+  }, [activeMachineId, firebaseDb, firebaseAuthReady]);
+
+  /** Keypad Start/Pause/Stop writes the same `command` node as the app. */
+  useEffect(() => {
+    if (!firebaseDb || !firebaseAuthReady || !activeMachineId) return;
+    const boundMachineId = activeMachineId;
+    const unsub = onValue(
+      dbRef(firebaseDb, `machines/${boundMachineId}/command`),
+      (snap: DataSnapshot) => {
+        const val = snap.val();
+        if (!val || typeof val !== "object") return;
+        const payload = val as Record<string, unknown>;
+        if (String(payload.source ?? "") !== "local_hmi") return;
+        const seq = Number(payload.seq);
+        if (!Number.isFinite(seq) || seq <= 0) return;
+        if (seq === lastAppCommandSeqRef.current) return;
+        const action = String(payload.action ?? payload.command ?? "")
+          .trim()
+          .toLowerCase();
+        const status =
+          action === "start"
+            ? "running"
+            : action === "pause"
+              ? "paused"
+              : action === "stop"
+                ? "stopped"
+                : "";
+        if (!status) return;
+        holdLocalCmdRef.current = null;
+        holdLocalCmdUntilRef.current = 0;
+        lastAppCommandSeqRef.current = seq;
+        rtdbSessionStatusRef.current = status;
+        setUiSessionStatusOverride(status as "running" | "paused" | "stopped");
+        const rem = Number(payload.remaining_sec);
+        if ((status === "running" || status === "paused") && Number.isFinite(rem) && rem > 0) {
+          const digits = remainingSecToDurationDigits(Math.floor(rem));
+          setDuration((prev) => (prev === digits ? prev : digits));
+          if (status === "paused") {
+            pausedRemainingSecRef.current = Math.floor(rem);
+            pausedRemainingAtPauseRef.current = Math.floor(rem);
+            setPausedRemainingSec(Math.floor(rem));
+            countdownEndMsRef.current = null;
+          } else {
+            countdownEndMsRef.current = Date.now() + Math.floor(rem) * 1000;
+            countdownArmedRef.current = true;
+          }
+        }
+        setSession((prev: any) => {
+          if (machineIdRef.current !== boundMachineId) return prev;
+          if (status === "stopped") {
+            return prev ? { ...prev, status: "stopped" } : null;
+          }
+          return {
+            ...(prev ?? {}),
+            microcontroller_id: boundMachineId,
+            status,
+          };
+        });
+      }
+    );
     return () => unsub();
   }, [activeMachineId, firebaseDb, firebaseAuthReady]);
 
@@ -1490,6 +1562,7 @@ export default function UserOverview({
           startActiveDryingClock();
           body.drying_time_seconds = getUsedDryingSeconds();
           body.drying_time_minutes = getUsedDryingMinutes();
+          body.remaining_sec = newRemSec;
           const addExt = Number(overrides?.addExtensionMinutes);
           if (Number.isFinite(addExt) && addExt > 0) {
             body.add_extension_minutes = Math.floor(addExt);
@@ -1514,6 +1587,8 @@ export default function UserOverview({
           }
           body.drying_time_seconds = getUsedDryingSeconds();
           body.drying_time_minutes = getUsedDryingMinutes();
+          const snap = pauseRemainingSnapshotRef.current;
+          if (snap != null && snap >= 0) body.remaining_sec = snap;
           appendSessionMetaToBody(body);
         }
       }
