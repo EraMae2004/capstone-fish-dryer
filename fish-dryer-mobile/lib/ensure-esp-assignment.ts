@@ -1,4 +1,4 @@
-import { ref as dbRef, remove as dbRemove, set as dbSet, update as dbUpdate } from "firebase/database";
+import { ref as dbRef, set as dbSet, update as dbUpdate } from "firebase/database";
 import type { Database } from "firebase/database";
 
 /** Same key the ESP uses: `assignments/{AABBCCDDEEFF}` (no colons, uppercase). */
@@ -46,10 +46,4 @@ export async function ensureEspAssignment(
     mac: macFormatted,
     updated_at: now,
   });
-
-  try {
-    await dbRemove(dbRef(db, `discovery/${macSafe}`));
-  } catch {
-    // Board may never have advertised in discovery/.
-  }
 }

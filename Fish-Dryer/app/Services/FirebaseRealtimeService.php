@@ -58,7 +58,7 @@ class FirebaseRealtimeService
         }
 
         try {
-            $res = Http::timeout(4)
+            $res = Http::timeout(45)
                 ->withHeaders(['Content-Type' => 'application/json'])
                 ->withBody(json_encode($payload, JSON_THROW_ON_ERROR), 'application/json')
                 ->put($this->rtdbUrl('lan/server'));
@@ -136,6 +136,16 @@ class FirebaseRealtimeService
     public function getMachineHardwareStatus(int $microcontrollerId): ?array
     {
         return $this->getJson("machines/{$microcontrollerId}/hardware_status");
+    }
+
+    /**
+     * Every powered board, saved or not. Keyed by 12-hex MAC.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function getDiscovery(): ?array
+    {
+        return $this->getJson('discovery');
     }
 
     /**

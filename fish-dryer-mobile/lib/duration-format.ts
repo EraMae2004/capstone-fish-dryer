@@ -107,27 +107,31 @@ export function resolveMoisturePercent(
   return null;
 }
 
+/**
+ * A percent is real when the board says the probe is connected. Wet contact
+ * makes the ADC noisier than dry air; that noise is still a moisture reading.
+ * Only a pin wandering across most of the ADC scale is rejected.
+ */
+export function moistureReadingIsReal(readings: object | null | undefined): boolean {
+  if (!readings || typeof readings !== "object") return false;
+  const rec = readings as Record<string, unknown>;
+  const connected = rec.moisture_connected;
+  const connectedYes = connected === true || connected === "true" || connected === 1;
+  if (!connectedYes) return false;
+  if (resolveMoisturePercent(rec) == null) return false;
+  const spread = Number(rec.moisture_spread);
+  if (Number.isFinite(spread) && spread >= 2000) return false;
+  return true;
+}
+
 export function formatMoisturePercent(pct: number | null): string | null {
   return pct != null && Number.isFinite(pct) ? `${pct}%` : null;
 }
 
-/** Wet / damp / dry from the fish moisture percent. Not an ADC window. */
-export function moistureSurfaceFromPercent(pct: number): "Wet" | "Damp" | "Dry" {
-  if (pct >= 67) return "Wet";
-  if (pct >= 34) return "Damp";
-  return "Dry";
-}
-
+/** Live probe output: the percent only. No wet/dry label. */
 export function formatMoistureReading(
   readings: Record<string, unknown> | null | undefined
 ): string | null {
-  const pct = resolveMoisturePercent(readings);
-  if (pct == null) return null;
-  const raw = readings?.moisture_surface;
-  const word = typeof raw === "string" ? raw.trim().toLowerCase() : "";
-  const surface =
-    word === "wet" || word === "damp" || word === "dry"
-      ? word.charAt(0).toUpperCase() + word.slice(1)
-      : moistureSurfaceFromPercent(pct);
-  return `${pct}% ${surface}`;
+  if (!moistureReadingIsReal(readings)) return null;
+  return formatMoisturePercent(resolveMoisturePercent(readings));
 }

@@ -48,7 +48,7 @@ export default function Login() {
         clearTimeout(timer);
         Alert.alert(
           "Server not found",
-          "Connect this PC to the phone hotspot, then run start-presentation.ps1 and leave it open. Open the app on that same phone. Do not type an address."
+          "This PC is on the phone hotspot, but the app could not open Laravel. Leave the Laravel window open, then try again."
         );
         return;
       }

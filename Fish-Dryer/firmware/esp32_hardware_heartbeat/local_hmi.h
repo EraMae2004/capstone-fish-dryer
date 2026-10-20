@@ -76,6 +76,12 @@ bool hmiDht22NotWorking();
 bool hmiDoorIsOpen();
 bool hmiLocalDurationExpired();
 long hmiRemainingDurationSec();
+bool hmiMoistureProbeReady();
+int hmiMoistureLivePercent();
+int hmiNextMoistureBatchNo();
+int hmiBeginMoistureBatch();
+void hmiRememberMoistureSpot(int batchNo, int fishNo, int pct);
+void hmiCancelEmptyMoistureBatch(int batchNo);
 
 namespace LocalHmi {
 
@@ -195,6 +201,9 @@ enum class Screen : uint8_t {
   Running,
   StopOrPause,  // STOP left / PAUSE right — Enter=Pause, Stop=Stop+save
   ResumePrompt,  // power returned — GO continues, STOP saves
+  AskMoisture,   // pause / stop / timer done — Enter=check, Stop=no
+  WaitMoisture,  // probe in the fish — Enter records only a real reading
+  AskAgain,      // Enter=another fish in this batch, Stop=done with this batch
   Message,
   LcdSelfTest,
   KeypadSelfTest,
@@ -236,6 +245,15 @@ static uint8_t gParamIdx = 0;
 static String gParams[PARAM_COUNT];
 static unsigned long gMessageUntilMs = 0;
 static Screen gMessageReturn = Screen::Start;
+
+/** Where NO on the moisture prompt returns. */
+enum class MoistureAfter : uint8_t { PauseEdit, StopSave, DurationSave };
+static MoistureAfter gMoistureAfter = MoistureAfter::PauseEdit;
+static int gMoistureBatchNo = 0;
+static int gMoistureFishNo = 0;
+static int gMoistureLastPct = -1;
+static bool gMoistureBatchOpen = false;
+static unsigned long gMoisturePaintMs = 0;
 
 static char gTapKey = 0;
 static uint8_t gTapPos = 0;
@@ -506,6 +524,80 @@ static void renderResumePrompt() {
   lcdLine(1, "GO(E)     STOP(S)");
 }
 
+static bool moistureScreenNow() {
+  return gScreen == Screen::AskMoisture || gScreen == Screen::WaitMoisture ||
+         gScreen == Screen::AskAgain;
+}
+
+static void renderAskMoisture() {
+  if (!gLcdOk) return;
+  lcdLine(0, "Check moisture?");
+  lcdLine(1, "NO(S)      YES(E)");
+}
+
+static void renderWaitMoisture() {
+  if (!gLcdOk) return;
+  const int pct = hmiMoistureLivePercent();
+  const bool ready = hmiMoistureProbeReady() && pct >= 0 && pct <= 100;
+  if (!ready) {
+    lcdLine(0, "Put sensor in");
+    lcdLine(1, "fish, then ENTER");
+    return;
+  }
+  char top[17];
+  snprintf(top, sizeof(top), "B%d F%d %d%%",
+           gMoistureBatchNo > 0 ? gMoistureBatchNo : 1,
+           gMoistureFishNo + 1, pct);
+  lcdLine(0, top);
+  lcdLine(1, "ENTER=SAVE");
+}
+
+static void renderAskAgain() {
+  if (!gLcdOk) return;
+  lcdLine(0, "Check again?");
+  lcdLine(1, "NO(S)      YES(E)");
+}
+
+static void finishMoistureFlow() {
+  if (gMoistureBatchOpen) {
+    hmiCancelEmptyMoistureBatch(gMoistureBatchNo);
+    gMoistureBatchOpen = false;
+  }
+  if (gMoistureAfter == MoistureAfter::PauseEdit) {
+    enterPausedEdit();
+    return;
+  }
+  const bool duration = gMoistureAfter == MoistureAfter::DurationSave;
+  hmiOnStopDrying();
+  resetParams();
+  showMessage(duration ? "Finished/Saved" : "Stopped/Saved", "", 1600, Screen::Start);
+}
+
+static void enterAskMoisture(MoistureAfter after) {
+  clearTap();
+  gMoistureAfter = after;
+  // Stop and timer-done still ask about moisture, with fan and heater already off.
+  if (after != MoistureAfter::PauseEdit && hmiSessionIsRunning()) {
+    hmiOnPauseDrying();
+  }
+  gScreen = Screen::AskMoisture;
+  gMoisturePaintMs = millis();
+  renderAskMoisture();
+  Serial.println("[hmi] moisture? YES=Enter NO=Stop");
+}
+
+static void enterWaitMoisture() {
+  if (!gMoistureBatchOpen) {
+    gMoistureBatchNo = hmiBeginMoistureBatch();
+    gMoistureFishNo = 0;
+    gMoistureBatchOpen = true;
+  }
+  gScreen = Screen::WaitMoisture;
+  gMoisturePaintMs = millis();
+  renderWaitMoisture();
+  Serial.printf("[hmi] moisture batch %d — insert probe\n", gMoistureBatchNo);
+}
+
 static void beginRunningUi() {
   gScreen = Screen::Running;
   gRunPage = 0;
@@ -635,6 +727,9 @@ static void redraw() {
   else if (gScreen == Screen::Running) renderRunning();
   else if (gScreen == Screen::StopOrPause) renderStopOrPause();
   else if (gScreen == Screen::ResumePrompt) renderResumePrompt();
+  else if (gScreen == Screen::AskMoisture) renderAskMoisture();
+  else if (gScreen == Screen::WaitMoisture) renderWaitMoisture();
+  else if (gScreen == Screen::AskAgain) renderAskAgain();
   else if (gScreen == Screen::LcdSelfTest) renderLcdSelfTest();
   else if (gScreen == Screen::KeypadSelfTest) renderKeypadSelfTest();
 }
@@ -652,7 +747,8 @@ inline bool isEnteringParams() {
   // The firmware still sends the Online pulse and still polls phone commands.
   return gReady && (gScreen == Screen::EditParams || gScreen == Screen::ConfirmStart ||
                     gScreen == Screen::DoorWarn || gScreen == Screen::ContinueDoor ||
-                    gScreen == Screen::StopOrPause || gScreen == Screen::Message);
+                    gScreen == Screen::StopOrPause || gScreen == Screen::Message ||
+                    moistureScreenNow());
 }
 
 inline bool blockNetworkForKey() {
@@ -675,7 +771,7 @@ inline bool keySettledForSync() {
 /** History upload is OK on Message/Start; never during typing or STOP|PAUSE. */
 inline bool canFlushOfflineHistory() {
   return !(gReady && (gScreen == Screen::ConfirmStart ||
-                      gScreen == Screen::StopOrPause));
+                      gScreen == Screen::StopOrPause || moistureScreenNow()));
 }
 
 inline bool uiSelfTestActive() { return gUiSelfTestActive; }
@@ -1069,9 +1165,33 @@ static void handleEnter() {
     handlePauseYes();
     return;
   }
+  if (gScreen == Screen::AskMoisture || gScreen == Screen::AskAgain) {
+    if (gScreen == Screen::AskAgain) {
+      gScreen = Screen::WaitMoisture;
+      gMoisturePaintMs = millis();
+      renderWaitMoisture();
+      return;
+    }
+    enterWaitMoisture();
+    return;
+  }
+  if (gScreen == Screen::WaitMoisture) {
+    const int pct = hmiMoistureLivePercent();
+    if (!hmiMoistureProbeReady() || pct < 0 || pct > 100) {
+      showMessage("Sensor not", "detected", 1200, Screen::WaitMoisture);
+      return;
+    }
+    gMoistureFishNo++;
+    gMoistureLastPct = pct;
+    hmiRememberMoistureSpot(gMoistureBatchNo, gMoistureFishNo, pct);
+    gScreen = Screen::AskAgain;
+    renderAskAgain();
+    Serial.printf("[hmi] saved batch %d fish %d = %d%%\n", gMoistureBatchNo, gMoistureFishNo, pct);
+    return;
+  }
   if (gScreen == Screen::DoorWarn) return;
   if (gScreen == Screen::Running) {
-    if (hmiSessionIsPaused()) enterPausedEdit();
+    if (hmiSessionIsPaused()) enterAskMoisture(MoistureAfter::PauseEdit);
     return;
   }
   if (gScreen != Screen::EditParams) return;
@@ -1100,6 +1220,13 @@ static void handleEnter() {
 
 static void handleStopOrNo() {
   clearTap();
+  if (gScreen == Screen::Message &&
+      (gMessageReturn == Screen::AskMoisture || gMessageReturn == Screen::WaitMoisture ||
+       gMessageReturn == Screen::AskAgain)) {
+    gScreen = gMessageReturn;
+    redraw();
+    return;
+  }
   // NO(S) on confirm / continue / door — do not start
   if (gScreen == Screen::ConfirmStart || gScreen == Screen::ContinueDoor ||
       gScreen == Screen::DoorWarn) {
@@ -1110,11 +1237,22 @@ static void handleStopOrNo() {
     Serial.println("[hmi] NO — cancelled start");
     return;
   }
-  // Stop/Pause prompt: NO(S) = STOP and save history / queue if offline
+  // Stop/Pause prompt: NO(S) = stop, then the same moisture question as a pause.
   if (gScreen == Screen::StopOrPause) {
-    hmiOnStopDrying();
-    resetParams();
-    showMessage("Stopped/Saved", "", 1500, Screen::Start);
+    enterAskMoisture(MoistureAfter::StopSave);
+    return;
+  }
+  if (gScreen == Screen::AskMoisture || gScreen == Screen::AskAgain) {
+    finishMoistureFlow();
+    return;
+  }
+  if (gScreen == Screen::WaitMoisture) {
+    if (gMoistureFishNo > 0) {
+      gScreen = Screen::AskAgain;
+      renderAskAgain();
+      return;
+    }
+    finishMoistureFlow();
     return;
   }
   // During drying (local or app): ask STOP vs PAUSE
@@ -1144,13 +1282,13 @@ static void handlePauseYes() {
   clearTap();
   if (gScreen != Screen::StopOrPause) return;
   hmiOnPauseDrying();
+  enterAskMoisture(MoistureAfter::PauseEdit);
 }
 
 static void handleFinished() {
   clearTap();
   hmiOnDurationComplete();
-  resetParams();
-  showMessage("Finished/Saved", "", 2000, Screen::Start);
+  enterAskMoisture(MoistureAfter::DurationSave);
 }
 
 static void handleKey(char key) {
@@ -1176,9 +1314,7 @@ static void handleKey(char key) {
       return;
     }
     if (key == 'D') {
-      hmiOnStopDrying();
-      resetParams();
-      showMessage("Stopped/Saved", "", 1500, Screen::Start);
+      enterAskMoisture(MoistureAfter::StopSave);
       return;
     }
     return;
@@ -1235,7 +1371,8 @@ static void handleKey(char key) {
   }
   if (gScreen == Screen::ConfirmStart || gScreen == Screen::ContinueDoor ||
       gScreen == Screen::DoorWarn || gScreen == Screen::Running ||
-      gScreen == Screen::StopOrPause || gScreen == Screen::Message) {
+      gScreen == Screen::StopOrPause || gScreen == Screen::Message ||
+      moistureScreenNow()) {
     return;
   }
   if (gScreen != Screen::EditParams) return;
@@ -1282,13 +1419,16 @@ inline void begin() {
     if (lcd.ping(a) && nFound < 8) found[nFound++] = a;
   }
   if (nFound == 0) {
-    Serial.println("[hmi] I2C scan empty — still trying 0x27 and 0x3F");
-    found[nFound++] = 0x27;
-    found[nFound++] = 0x3F;
+    Serial.println("[hmi] LCD not found on I2C — not_working");
   }
   for (uint8_t i = 0; i < nFound; i++) {
+    if (!lcd.ping(found[i])) continue;
     Serial.printf("[hmi] LCD init @0x%02X SDA=%d SCL=%d\n", found[i], PIN_LCD_SDA, PIN_LCD_SCL);
     lcd.begin(found[i]);
+    if (!lcd.ping(found[i])) {
+      Serial.printf("[hmi] LCD @0x%02X did not ACK after init\n", found[i]);
+      continue;
+    }
     gLcdOk = true;
     lcd.clear();
     lcdCentered(0, "START DRYING");
@@ -1307,7 +1447,7 @@ inline void begin() {
     xTaskCreatePinnedToCore(keypadSampleTask, "keypad", 2048, nullptr, 3, &gKeyTask, 0);
   }
 
-  gKeypadOk = true;
+  gKeypadOk = false;
   gReady = true;
   gScreen = Screen::Start;
   resetParams();
@@ -1321,6 +1461,16 @@ inline void begin() {
 }
 
 inline bool lcdWorking() { return gLcdOk; }
+/** Re-check the address found at boot. A missing ACK is not_working. */
+inline bool confirmLcdPresent() {
+  if (!gLcdOk) return false;
+  if (!lcd.ping(lcd.addr)) {
+    gLcdOk = false;
+    Serial.println("[hmi] LCD ping failed — not_working");
+    return false;
+  }
+  return true;
+}
 inline bool keypadWorking() { return gKeypadOk; }
 
 inline void poll() {
@@ -1328,7 +1478,10 @@ inline void poll() {
   commitTapIfNeeded();
 
   if (gScreen == Screen::Message && (long)(millis() - gMessageUntilMs) >= 0) {
-    if (hmiSessionIsRunning()) {
+    const bool backToMoisture =
+        gMessageReturn == Screen::AskMoisture || gMessageReturn == Screen::WaitMoisture ||
+        gMessageReturn == Screen::AskAgain;
+    if (hmiSessionIsRunning() && !backToMoisture) {
       beginRunningUi();
     } else {
       gScreen = gMessageReturn;
@@ -1390,6 +1543,11 @@ inline void poll() {
     }
   }
 
+  if (gScreen == Screen::WaitMoisture && (millis() - gMoisturePaintMs) >= 400UL) {
+    gMoisturePaintMs = millis();
+    renderWaitMoisture();
+  }
+
   // Fish/Qty → Temp/Left → Current/Humidity → Problem (if any) → DHT22 warning (if sensor is dead).
   if (gScreen == Screen::Running && (hmiSessionIsRunning() || hmiSessionIsPaused())) {
     if (hmiSessionIsRunning() && hmiLocalDurationExpired()) {
@@ -1441,9 +1599,14 @@ inline bool serviceKeypadSelfTestSlice() {
 }
 
 /** App or keypad session is running — remember details and show them on the LCD. */
+inline bool moisturePromptActive() {
+  return gReady && moistureScreenNow();
+}
+
 inline void adoptCloudSession(const String& fishType, int totalFish, float targetC,
                               int durationSec) {
   if (!gReady) return;
+  if (moisturePromptActive()) return;
   if (gScreen == Screen::LcdSelfTest || gScreen == Screen::KeypadSelfTest) return;
   if (fishType.length() > 0) gParams[0] = fishType;
   if (totalFish >= 0) gParams[1] = String(totalFish);
@@ -1475,8 +1638,13 @@ inline void adoptCloudPaused() {
   if (!gReady) return;
   if (gScreen == Screen::LcdSelfTest || gScreen == Screen::KeypadSelfTest) return;
   if (gScreen == Screen::ResumePrompt) return;
+  if (moisturePromptActive()) return;
   if (gScreen == Screen::EditParams || gScreen == Screen::ConfirmStart ||
       gScreen == Screen::DoorWarn || gScreen == Screen::ContinueDoor) {
+    return;
+  }
+  if (gScreen == Screen::Running || gScreen == Screen::StopOrPause) {
+    enterAskMoisture(MoistureAfter::PauseEdit);
     return;
   }
   enterPausedEdit();
@@ -1509,6 +1677,7 @@ inline void enterPausedEditUi() {
 
 inline void adoptCloudStopped() {
   if (!gReady) return;
+  if (moisturePromptActive()) return;
   if (gScreen == Screen::LcdSelfTest || gScreen == Screen::KeypadSelfTest) return;
   if (gScreen == Screen::Message) return;
   if (gScreen == Screen::EditParams || gScreen == Screen::ConfirmStart) return;
@@ -1528,6 +1697,7 @@ namespace LocalHmi {
 inline void begin() {}
 inline void poll() {}
 inline bool lcdWorking() { return false; }
+inline bool confirmLcdPresent() { return false; }
 inline bool keypadWorking() { return false; }
 inline bool keyQueued() { return false; }
 inline bool isTypingParams() { return false; }
@@ -1552,6 +1722,7 @@ inline bool serviceKeypadSelfTestSlice() { return false; }
 inline void adoptCloudSession(const String&, int, float, int) {}
 inline void adoptCloudPaused() {}
 inline void adoptCloudStopped() {}
+inline bool moisturePromptActive() { return false; }
 inline void enterPausedEditUi() {}
 inline void showInterruptedSession(const String&, int, float, long) {}
 }

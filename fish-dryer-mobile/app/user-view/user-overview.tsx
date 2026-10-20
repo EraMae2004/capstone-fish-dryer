@@ -30,7 +30,7 @@ import {
   formatSecondsAsHMS,
   minutesToDigits,
 } from "@/lib/duration-format";
-import { resolveMoisturePercent } from "@/lib/duration-format";
+import { moistureReadingIsReal, resolveMoisturePercent } from "@/lib/duration-format";
 import { lastMoistureFromDraft, type MoistureBatchDraft } from "@/lib/moisture-checks";
 import {
   clearMoistureDraft,
@@ -41,7 +41,7 @@ import {
 import { formatRecommendationParams } from "@/lib/format-recommendation";
 import { readRealDoorIsOpen } from "@/lib/door-sensor-display";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
-import { isMachineLive, isMachineOnlineForUi, useStableMachineOnline } from "@/lib/machine-presence";
+import { isMachineLive, isMachineOnlineForUi, liveHardwareIsForMachine, recordMachineRtdbDelivery, useStableMachineOnline } from "@/lib/machine-presence";
 import {
   canonicalHardwareSensorKey,
   coerceHardwareStatus,
@@ -199,6 +199,8 @@ export default function UserOverview({
     selectMachine,
     loading: machinesLoading,
   } = useSelectedMachine();
+  const userMachinesRef = useRef(userMachines);
+  userMachinesRef.current = userMachines;
 
   const [machine, setMachine] = useState<any>(null);
   const [session, setSession] = useState<any>(null);
@@ -207,6 +209,9 @@ export default function UserOverview({
   const lastHwRef = useRef<Record<string, unknown> | null>(null);
   /** True after one live hardware_status write. Later writes keep the machine Online. */
   const overviewHwSeenLiveRef = useRef(false);
+  const overviewReceiveRef = useRef<Record<number, number>>({});
+  const overviewPayloadRef = useRef<Record<number, number>>({});
+  const overviewSeenCallbackRef = useRef<Record<number, boolean>>({});
   const isActiveRef = useRef(true);
   isActiveRef.current = isActive;
   /** Instant button/tab state while API catches up — cleared in postSessionControl finally. */
@@ -254,7 +259,7 @@ export default function UserOverview({
     overviewRtdbLastReceiveMs,
     presenceTick,
     activeMachineId,
-    120_000
+    180_000
   );
 
   // PARAMETERS STATE
@@ -269,6 +274,14 @@ export default function UserOverview({
   const [doorModalVisible, setDoorModalVisible] = useState(false);
   const [doorModalVariant, setDoorModalVariant] = useState<"start" | "resume">("start");
   const [moistureModalOpen, setMoistureModalOpen] = useState(false);
+
+  useEffect(() => {
+    const mcId = activeMachineId;
+    if (!firebaseDb || mcId == null || mcId <= 0) return;
+    void dbUpdate(dbRef(firebaseDb, `machines/${mcId}/session`), {
+      moisture_check_armed: moistureModalOpen,
+    }).catch((e) => console.log("moisture_check_armed:", e));
+  }, [moistureModalOpen, activeMachineId]);
   const [dryingCompleteModalVisible, setDryingCompleteModalVisible] = useState(false);
   const dryingCompleteFromTimerRef = useRef(false);
   /** Board has reported time left for this run. A 0 before that is not "finished". */
@@ -413,19 +426,35 @@ export default function UserOverview({
     const boundMachineId = activeMachineId;
     lastHwRef.current = null;
     overviewHwSeenLiveRef.current = false;
+    overviewReceiveRef.current = {};
+    overviewPayloadRef.current = {};
+    overviewSeenCallbackRef.current = {};
 
     const applyHw = (hw: Record<string, unknown>) => {
       if (machineIdRef.current !== boundMachineId) return;
+      if (!liveHardwareIsForMachine(boundMachineId, hw, userMachinesRef.current)) {
+        return;
+      }
       lastHwRef.current = hw;
       if (!isActiveRef.current) return;
       const payloadMs = firebaseUpdatedAtMs(hw.updated_at);
       setOverviewRtdbPayloadAtMs(payloadMs);
-      // First snapshot can be a leftover row. After one live write, every later
-      // callback is the board publishing — including while no session is running.
-      const payloadLive = isFirebaseHeartbeatLive(hw.updated_at, Date.now());
-      if (payloadLive) overviewHwSeenLiveRef.current = true;
-      if (payloadLive || overviewHwSeenLiveRef.current) {
-        setOverviewRtdbLastReceiveMs(Date.now());
+      const nowMs = Date.now();
+      const delivered = recordMachineRtdbDelivery(
+        overviewReceiveRef.current,
+        overviewPayloadRef.current,
+        boundMachineId,
+        hw.updated_at,
+        overviewSeenCallbackRef.current,
+        nowMs
+      );
+      overviewReceiveRef.current = delivered.receiveById;
+      overviewPayloadRef.current = delivered.payloadById;
+      // Same rule as Hardware Status and the machine menu: a stale leftover
+      // row stays Offline, and every later write counts even if the clocks differ.
+      if (delivered.accepted) {
+        overviewHwSeenLiveRef.current = true;
+        setOverviewRtdbLastReceiveMs(nowMs);
       }
       const parsed = parseHardwareStatusFromRtdb(hw);
       setHardwareStatuses(parsed.components);
@@ -745,7 +774,7 @@ export default function UserOverview({
       if (!firebaseDb || microcontrollerId <= 0) return;
       const running = status === "running";
       const paused = status === "paused";
-      const moistureCheckArmed = opts?.moisture_check_armed ?? paused;
+      const moistureCheckArmed = opts?.moisture_check_armed ?? false;
       const fs = SESSION_FAN_SPEED;
       const ttRaw =
         opts?.target_temperature ??
@@ -1073,7 +1102,9 @@ export default function UserOverview({
           lr?.temperature ?? lr?.temp ?? temperature ?? activeSession?.target_temperature;
         const humVal = lr?.humidity ?? lr?.hum;
         const draftMoist = lastMoistureFromDraft(moistureDraftBatchesRef.current);
-        const liveMoist = lr?.moisture_percent ?? lr?.moisture;
+        const liveMoist = moistureReadingIsReal(lr as Record<string, unknown> | null)
+          ? (lr?.moisture_percent ?? lr?.moisture)
+          : null;
         const moistVal = draftMoist ?? liveMoist;
 
         if (tempVal != null && String(tempVal).trim() !== "") {

@@ -8,6 +8,7 @@ export type UserMachine = {
   id: number;
   name: string;
   status?: string;
+  mac?: string | null;
 };
 
 type SelectedMachineStore = {
@@ -87,10 +88,12 @@ export async function fetchUserMachines(force = false): Promise<UserMachine[]> {
           const id = Number(row.id);
           const name = String(row.name ?? row.display_name ?? row.device_id ?? "").trim();
           if (!Number.isFinite(id) || id <= 0) return null;
+          const macRaw = String(row.mac ?? "").trim();
           return {
             id,
             name: name || `Machine #${id}`,
             status: row.status != null ? String(row.status) : undefined,
+            mac: macRaw || null,
           } satisfies UserMachine;
         })
         .filter((m): m is UserMachine => m != null);

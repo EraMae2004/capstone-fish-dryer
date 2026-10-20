@@ -734,12 +734,21 @@ class DryingController extends Controller
         // the user "saved", even if device_id strings drift across sketches.
         $machine = null;
         $mcId = $request->input('microcontroller_id', $request->input('mc_id', $request->input('machine_id')));
+        if ($mcId === null || $mcId === '') {
+            $mcId = $decodedRoot['microcontroller_id'] ?? $decodedRoot['mc_id'] ?? $decodedRoot['machine_id'] ?? null;
+        }
         if ($mcId !== null && $mcId !== '' && is_numeric($mcId) && (int) $mcId > 0) {
             $candidate = Microcontroller::find((int) $mcId);
-            // Explicit numeric id always wins — do not require device_id to match (sketches
-            // often send a friendly label while DB still has a hardware id string).
             if ($candidate) {
-                $machine = $candidate;
+                $candidateMac = $this->microcontrollersHasMacColumn()
+                    ? $this->normalizeHardwareMac($candidate->mac ?? null)
+                    : null;
+                // A copied numeric id must not write this board's sensors onto another machine.
+                if ($wifiMacNorm && $candidateMac && $wifiMacNorm !== $candidateMac) {
+                    $machine = null;
+                } else {
+                    $machine = $candidate;
+                }
             }
         }
 
@@ -751,12 +760,18 @@ class DryingController extends Controller
             $machine = Microcontroller::where('device_id', $deviceId)->first();
         }
 
-        // Recovery fallback: if one board already exists and user renamed device_id,
-        // still treat incoming heartbeat as that board so online status keeps working.
-        if (!$machine) {
+        // One saved row may absorb a heartbeat only when that row has no MAC yet.
+        // A second physical board must not inherit the first machine's components.
+        if (!$machine && ! $wifiMacNorm) {
             $count = Microcontroller::count();
             if ($count === 1) {
-                $machine = Microcontroller::first();
+                $only = Microcontroller::first();
+                $onlyMac = $only && $this->microcontrollersHasMacColumn()
+                    ? $this->normalizeHardwareMac($only->mac ?? null)
+                    : null;
+                if ($only && ! $onlyMac) {
+                    $machine = $only;
+                }
             }
         }
 
@@ -765,7 +780,13 @@ class DryingController extends Controller
         if (! $machine) {
             $fallbackId = (int) (env('HEARTBEAT_FALLBACK_MICROCONTROLLER_ID') ?: 0);
             if ($fallbackId > 0) {
-                $machine = Microcontroller::find($fallbackId);
+                $fallback = Microcontroller::find($fallbackId);
+                $fallbackMac = $fallback && $this->microcontrollersHasMacColumn()
+                    ? $this->normalizeHardwareMac($fallback->mac ?? null)
+                    : null;
+                if ($fallback && ! ($wifiMacNorm && $fallbackMac && $wifiMacNorm !== $fallbackMac)) {
+                    $machine = $fallback;
+                }
             }
         }
 
@@ -1646,6 +1667,12 @@ class DryingController extends Controller
             'temperature' => 'nullable|numeric',
             'humidity' => 'nullable|numeric',
             'moisture' => 'nullable|numeric',
+            'moisture_checks' => 'nullable|array|max:40',
+            'moisture_checks.*.check_label' => 'nullable|string|max:64',
+            'moisture_checks.*.moisture' => 'required_with:moisture_checks|numeric|min:0|max:100',
+            'moisture_checks.*.temperature' => 'nullable|numeric',
+            'moisture_checks.*.humidity' => 'nullable|numeric',
+            'moisture_checks.*.recorded_at' => 'nullable|string',
         ]);
 
         $action = strtolower((string) $data['action']);
@@ -1861,9 +1888,11 @@ class DryingController extends Controller
                     $session = $session->fresh();
                 }
 
+                $this->persistMoistureChecksOnStop($session, $data);
+
                 return response()->json([
                     'success' => true,
-                    'session' => $session,
+                    'session' => $session->fresh()->load('sensorLogs'),
                     'duplicate' => true,
                     'message' => 'Local HMI session already saved to history.',
                 ]);
@@ -1914,8 +1943,11 @@ class DryingController extends Controller
                 ]);
             }
 
-            if (array_key_exists('temperature', $data) || array_key_exists('humidity', $data) || array_key_exists('moisture', $data)) {
-                $this->appendFinalSensorLogFromRequest($session, $data);
+            $this->persistMoistureChecksOnStop($session, $data);
+            if (empty($data['moisture_checks']) || ! is_array($data['moisture_checks'])) {
+                if (array_key_exists('temperature', $data) || array_key_exists('humidity', $data) || array_key_exists('moisture', $data)) {
+                    $this->appendFinalSensorLogFromRequest($session, $data);
+                }
             }
 
             return response()->json([
@@ -2233,6 +2265,17 @@ class DryingController extends Controller
                 }
             }
 
+            $label = isset($check['check_label']) ? trim((string) $check['check_label']) : '';
+            if ($label !== '' && Schema::hasColumn('sensor_logs', 'check_label')) {
+                $already = SensorLog::query()
+                    ->where('drying_session_id', $session->id)
+                    ->where('check_label', $label)
+                    ->exists();
+                if ($already) {
+                    continue;
+                }
+            }
+
             $payload = [
                 'drying_session_id' => $session->id,
                 'temperature' => (float) ($check['temperature'] ?? $session->target_temperature ?? 0),
@@ -2241,7 +2284,7 @@ class DryingController extends Controller
                 'fan_speed' => (int) ($session->fan_speed ?? 1),
                 'recorded_at' => $recordedAt,
             ];
-            $this->applySensorLogMeta($payload, 'moisture_check', $check['check_label'] ?? null);
+            $this->applySensorLogMeta($payload, 'moisture_check', $label !== '' ? $label : null);
 
             try {
                 SensorLog::create($payload);
@@ -3235,37 +3278,198 @@ class DryingController extends Controller
     }
 
     /**
-     * Detect available microcontrollers
+     * Epoch ms from a discovery/{MAC} `updated_at` (Firebase server timestamp or ISO).
+     */
+    private function discoveryUpdatedAtMs(mixed $updated): ?int
+    {
+        if (is_array($updated)) {
+            return null;
+        }
+        if (is_numeric($updated)) {
+            $ms = (int) $updated;
+            if ($ms > 0 && $ms < 1_000_000_000_000) {
+                $ms *= 1000;
+            }
+
+            return $ms > 0 ? $ms : null;
+        }
+        if (is_string($updated) && trim($updated) !== '') {
+            try {
+                return (int) Carbon::parse($updated)->valueOf();
+            } catch (\Throwable) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * A stored `{".sv":"timestamp"}` object is not a heartbeat. Treating it as
+     * "now" listed boards that were not actually powered on.
+     */
+    private function discoveryNodeIsLive(array $node): bool
+    {
+        $updated = $node['updated_at'] ?? null;
+        $ms = is_array($updated) ? null : $this->discoveryUpdatedAtMs($updated);
+        if ($ms === null && isset($node['epoch_ms']) && ! is_array($node['epoch_ms'])) {
+            $ms = $this->discoveryUpdatedAtMs($node['epoch_ms']);
+        }
+        if ($ms === null) {
+            return false;
+        }
+        $age = (int) round(microtime(true) * 1000) - $ms;
+
+        // Same window the mobile Online card uses. Older beacons stay hidden.
+        return $age >= -120_000 && $age <= 180_000;
+    }
+
+    private function savedMachineForDiscoveryNode(array $node, string $macNorm, array $byMac, array $byDevice, array $byId): ?Microcontroller
+    {
+        $saved = $byMac[$macNorm] ?? null;
+        if ($saved instanceof Microcontroller) {
+            return $saved;
+        }
+
+        $dev = strtolower(trim((string) ($node['device_id'] ?? '')));
+        if ($dev !== '' && isset($byDevice[$dev]) && $byDevice[$dev] instanceof Microcontroller) {
+            $candidate = $byDevice[$dev];
+            $candMac = $this->microcontrollersHasMacColumn()
+                ? $this->normalizeHardwareMac($candidate->mac ?? null)
+                : null;
+            if ($candMac === null || $candMac === $macNorm) {
+                return $candidate;
+            }
+        }
+
+        // Numeric id is ignored on purpose. A new board can still remember an
+        // old id, and matching that id hid the new MAC.
+        return null;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function detectRowFromSavedMachine(Microcontroller $item, ?array $discoveryNode = null): array
+    {
+        $display = trim((string) ($item->display_name ?? ''));
+        $label = $display !== '' ? $display : (string) $item->device_id;
+        $mac = $this->microcontrollersHasMacColumn() ? ($item->mac ?? null) : null;
+        if (($mac === null || $mac === '') && is_array($discoveryNode)) {
+            $fromNode = $this->normalizeHardwareMac((string) ($discoveryNode['mac'] ?? ''));
+            if ($fromNode) {
+                $mac = $this->formatMacForDisplay($fromNode);
+            }
+        } elseif (is_string($mac) && $mac !== '') {
+            $norm = $this->normalizeHardwareMac($mac);
+            if ($norm) {
+                $mac = $this->formatMacForDisplay($norm);
+            }
+        }
+
+        $seenMs = is_array($discoveryNode)
+            ? $this->discoveryUpdatedAtMs($discoveryNode['updated_at'] ?? null)
+            : null;
+        $lastSeen = $seenMs
+            ? Carbon::createFromTimestampMs($seenMs)->toIso8601String()
+            : ($item->last_seen ? $item->last_seen->toIso8601String() : null);
+
+        return [
+            'id' => (string) $item->id,
+            'name' => $label,
+            'device_id' => $item->device_id,
+            'mac' => $mac,
+            'display_name' => $item->display_name,
+            'last_seen' => $lastSeen,
+            'recent' => true,
+            'status' => 'online',
+            'already_exists' => true,
+            'selected' => false,
+        ];
+    }
+
+    /**
+     * Detect powered microcontrollers.
+     * Saved boards are included with already_exists=true. Unsaved discovery/{MAC}
+     * boards are included with already_exists=false so only those can be saved.
      */
     public function detectMicrocontrollers()
     {
         try {
-            // List ALL boards so the app can always show something to pick.
-            // `recent` / `status` use MySQL last_seen OR a live Firebase heartbeat.
-            $activeESP = Microcontroller::query()
+            $machines = Microcontroller::query()
                 ->orderByDesc('last_seen')
-                ->get()
-                ->map(function (Microcontroller $item) {
-                    $display = trim((string) ($item->display_name ?? ''));
-                    $label = $display !== '' ? $display : (string) $item->device_id;
-                    $recent = $this->isMicrocontrollerReachable($item);
+                ->get();
 
-                    return [
-                        'id' => (string) $item->id,
+            $byId = [];
+            $byMac = [];
+            $byDevice = [];
+            foreach ($machines as $item) {
+                $byId[(int) $item->id] = $item;
+                $mac = $this->microcontrollersHasMacColumn()
+                    ? $this->normalizeHardwareMac($item->mac ?? null)
+                    : null;
+                if ($mac) {
+                    $byMac[$mac] = $item;
+                }
+                $dev = strtolower(trim((string) $item->device_id));
+                if ($dev !== '') {
+                    $byDevice[$dev] = $item;
+                }
+            }
+
+            $rows = [];
+            $firebase = app(FirebaseRealtimeService::class);
+
+            foreach ($machines as $item) {
+                $snap = $firebase->getMachineHardwareStatus((int) $item->id);
+                if (! is_array($snap) || ! $this->discoveryNodeIsLive($snap)) {
+                    continue;
+                }
+                $rows['id:'.$item->id] = $this->detectRowFromSavedMachine($item, $snap);
+            }
+
+            $discovery = $firebase->getDiscovery();
+            if (is_array($discovery)) {
+                foreach ($discovery as $macKey => $node) {
+                    if (! is_array($node) || ! $this->discoveryNodeIsLive($node)) {
+                        continue;
+                    }
+                    $macNorm = $this->normalizeHardwareMac((string) ($node['mac'] ?? $macKey));
+                    if (! $macNorm) {
+                        continue;
+                    }
+                    $saved = $this->savedMachineForDiscoveryNode($node, $macNorm, $byMac, $byDevice, $byId);
+
+                    if ($saved) {
+                        $rows['id:'.$saved->id] = $this->detectRowFromSavedMachine($saved, $node);
+                        continue;
+                    }
+
+                    $label = trim((string) ($node['name'] ?? $node['device_id'] ?? ''));
+                    if ($label === '') {
+                        $label = 'Board '.strtoupper(substr($macNorm, -4));
+                    }
+                    $seenMs = $this->discoveryUpdatedAtMs($node['updated_at'] ?? null);
+                    $rows['mac:'.$macNorm] = [
+                        'id' => $this->formatMacForDisplay($macNorm),
                         'name' => $label,
-                        'device_id' => $item->device_id,
-                        'mac' => $this->microcontrollersHasMacColumn() ? ($item->mac ?? null) : null,
-                        'display_name' => $item->display_name,
-                        'last_seen' => $item->last_seen,
-                        'recent' => $recent,
-                        'status' => $recent ? 'online' : 'offline',
+                        'device_id' => (string) ($node['device_id'] ?? $label),
+                        'mac' => $this->formatMacForDisplay($macNorm),
+                        'display_name' => null,
+                        'last_seen' => $seenMs
+                            ? Carbon::createFromTimestampMs($seenMs)->toIso8601String()
+                            : now()->toIso8601String(),
+                        'recent' => true,
+                        'status' => 'online',
+                        'already_exists' => false,
                         'selected' => false,
                     ];
-                });
+                }
+            }
 
             return response()->json([
                 'success' => true,
-                'data' => $activeESP->values()->all(),
+                'data' => array_values($rows),
             ]);
         } catch (\Exception $e) {
             return response()->json([

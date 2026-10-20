@@ -15,19 +15,24 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { FontAwesome as Icon, MaterialCommunityIcons } from "@expo/vector-icons";
 import { getApiBaseUrl } from "@/config/api";
 import HardwareStatusModal from "./hardware-status-modal";
-import { onValue, ref as dbRef, get as dbGet, type DataSnapshot } from "firebase/database";
+import { onValue, ref as dbRef, get as dbGet } from "firebase/database";
 import { firebaseDb } from "@/config/firebase";
-import { isFirebaseHeartbeatLive, subscribeLiveHardwareStatus } from "@/lib/live-hardware-rtdb";
+import {
+  isFirebaseHeartbeatLive,
+  LIVE_HEARTBEAT_MS,
+  subscribeLiveHardwareStatus,
+} from "@/lib/live-hardware-rtdb";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
-import { formatMoistureReading, resolveMoisturePercent } from "@/lib/duration-format";
+import {
+  formatMoisturePercent,
+  resolveMoisturePercent,
+} from "@/lib/duration-format";
 import { ensureEspAssignment } from "@/lib/ensure-esp-assignment";
 import {
   computeStableOnlineByMachineId,
-  ingestRtdbHardwareSnapshot,
-  isMachineDetectable,
   isMachineLive,
   isMachineOnlineForUi,
-  isRtdbPayloadFresh,
+  liveHardwareIsForMachine,
   normalizeHardwareMacKey,
   recordMachineRtdbDelivery,
 } from "@/lib/machine-presence";
@@ -129,6 +134,63 @@ function machineMacForRow(m: Machine | null | undefined): string | null {
 
 function macWithColonsFromKey(macKey: string): string {
   return macKey.match(/.{1,2}/g)?.join(":") ?? macKey;
+}
+
+/** 12-hex MAC, or null. Device names like "Fish Dryer ABCD" are not MACs. */
+function macIdentity(value: unknown): string | null {
+  const key = normalizeHardwareMacKey(value);
+  if (!key || key.length < 12) return null;
+  return key.slice(0, 12);
+}
+
+/** Unresolved `{".sv":"timestamp"}` is not a heartbeat. */
+function beaconUpdatedMs(updatedAt: unknown): number | null {
+  if (updatedAt && typeof updatedAt === "object" && ".sv" in (updatedAt as object)) {
+    return null;
+  }
+  return parsePresenceMs(updatedAt);
+}
+
+/**
+ * Live only when the beacon time is inside the Online-card window, or this
+ * scan watched the discovery row change. A leftover row does not count.
+ */
+function beaconIsLive(
+  updatedMs: number | null,
+  movedAtMs: number | null,
+  nowMs: number
+): boolean {
+  if (updatedMs != null) {
+    const age = nowMs - updatedMs;
+    // Server time can sit a few minutes off the phone. A hours-old row still fails.
+    if (age >= -600_000 && age <= LIVE_HEARTBEAT_MS) return true;
+  }
+  if (movedAtMs != null) {
+    const movedAge = nowMs - movedAtMs;
+    if (movedAge >= 0 && movedAge <= LIVE_HEARTBEAT_MS) return true;
+  }
+  return false;
+}
+
+/** Any field the board rewrites. Seq, clock, RSSI, or IP — a dead row stays still. */
+function discoveryFingerprint(obj: Record<string, unknown>): string {
+  const seq = obj.seq ?? "";
+  const updated = obj.epoch_ms ?? obj.updated_at ?? "";
+  const updatedText =
+    updated && typeof updated === "object" ? "sv" : String(updated);
+  return `${seq}|${updatedText}|${obj.rssi ?? ""}|${obj.ip ?? ""}|${obj.mac ?? ""}`;
+}
+
+function discoveryBeaconMs(obj: Record<string, unknown>): number | null {
+  // Firebase server time is the only clock Add Machine trusts.
+  // The board's own epoch can be hours ahead and was hiding new MACs.
+  const server = beaconUpdatedMs(obj.updated_at);
+  if (server != null) return server;
+  const epoch = beaconUpdatedMs(obj.epoch_ms);
+  if (epoch == null) return null;
+  const age = Date.now() - epoch;
+  if (age < -120_000 || age > LIVE_HEARTBEAT_MS) return null;
+  return epoch;
 }
 
 /** Sync machine row with Firebase presence (not Laravel `last_seen`, which lags up to 3 min). */
@@ -377,6 +439,13 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
 
   const [modalVisible, setModalVisible] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  const discoveryCacheRef = useRef<{
+    val: Record<string, unknown> | null;
+    ready: boolean;
+    prevFp: Record<string, string>;
+    movedAt: Record<string, number>;
+  }>({ val: null, ready: false, prevFp: {}, movedAt: {} });
+  const discoveryWaitersRef = useRef<Array<() => void>>([]);
 
   /** Last Firebase delivery per machine id (`machines/{id}/hardware_status`). */
   const [machineRtdbReceiveMs, setMachineRtdbReceiveMs] = useState<Record<number, number>>({});
@@ -425,6 +494,69 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
   useEffect(() => {
     machinesRef.current = machines;
   }, [machines]);
+
+  // Keep listening while Hardware is open, not only after Add Machine.
+  // A one-shot read was missing new boards, and a timestamp that never
+  // parsed (unresolved server time) was dropped before it could move.
+  useEffect(() => {
+    if (!active || !firebaseDb) {
+      discoveryCacheRef.current = {
+        val: null,
+        ready: false,
+        prevFp: {},
+        movedAt: {},
+      };
+      return;
+    }
+    const db = firebaseDb;
+    const unsub = onValue(
+      dbRef(db, "discovery"),
+      (snap) => {
+        const raw = snap.val();
+        const prev = discoveryCacheRef.current;
+        const prevFp = { ...prev.prevFp };
+        const movedAt = { ...prev.movedAt };
+        const now = Date.now();
+        const primed = prev.ready;
+        if (raw && typeof raw === "object") {
+          for (const [key, node] of Object.entries(raw as Record<string, unknown>)) {
+            const obj =
+              node && typeof node === "object" ? (node as Record<string, unknown>) : null;
+            if (!obj) continue;
+            const fp = discoveryFingerprint(obj);
+            const before = prevFp[key];
+            const beaconMs = discoveryBeaconMs(obj);
+            const beaconAge = beaconMs == null ? null : now - beaconMs;
+            const beaconFresh =
+              beaconAge != null && beaconAge >= -300_000 && beaconAge <= LIVE_HEARTBEAT_MS;
+            // A row already in the first snapshot is live when its clock is fresh.
+            // A MAC that appears later, or any beacon that changes, is powered on now.
+            if (beaconFresh || (primed && (before == null || before !== fp))) {
+              movedAt[key] = now;
+            }
+            prevFp[key] = fp;
+          }
+        }
+        discoveryCacheRef.current = {
+          val: raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null,
+          ready: true,
+          prevFp,
+          movedAt,
+        };
+        const waiters = discoveryWaitersRef.current.splice(0);
+        waiters.forEach((fn) => fn());
+      },
+      (err) => {
+        console.log("discovery listener failed:", err);
+        discoveryCacheRef.current = { ...discoveryCacheRef.current, ready: true };
+        const waiters = discoveryWaitersRef.current.splice(0);
+        waiters.forEach((fn) => fn());
+      }
+    );
+    return () => {
+      unsub();
+    };
+  }, [active, firebaseDb]);
 
   const selectedHw =
     selectedMachine != null ? machineHwById[selectedMachine.id] : undefined;
@@ -477,6 +609,9 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     selectedMachine != null ? (stableOnlineById[selectedMachine.id] ?? false) : false;
 
   const applyLiveHw = useCallback((id: number, hwRec: Record<string, unknown>) => {
+    if (!liveHardwareIsForMachine(id, hwRec, machinesRef.current)) {
+      return;
+    }
     const now = Date.now();
     const parsed = parseHardwareStatusFromRtdb(hwRec);
     const payloadMs = parsed.payloadMs ?? parsePresenceMs(hwRec.updated_at);
@@ -725,8 +860,10 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       name === "LED Red" ||
       name === "Buzzer"
     ) {
-      if (Object.prototype.hasOwnProperty.call(outputVerdicts, name)) {
-        return outputVerdicts[name] ? "working" : "not_working";
+      const mid = selectedMachine?.id;
+      const scoped = mid != null ? outputVerdicts[`${mid}:${name}`] : undefined;
+      if (typeof scoped === "boolean") {
+        return scoped ? "working" : "not_working";
       }
       return "untested";
     }
@@ -769,17 +906,24 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
         })
       );
     }
-    // Offline MCU → every row is not_working; moisture must not read as Standby.
     if (name === "Moisture Sensor") {
-      if (!hardwareStreamFresh) {
-        return moistureSensorDisplayLabel(getComponentStatus(name));
-      }
-      const shown = formatMoistureReading(liveReadings as Record<string, unknown> | null);
-      if (shown != null) return shown;
       return moistureSensorDisplayLabel(getComponentStatus(name));
     }
+    if (name === "DHT22 (Temp & Humidity)") {
+      const dhtStatus = getComponentStatus(name);
+      if (hardwareStreamFresh && normalizeStatusWord(dhtStatus) === "working") {
+        const t = liveReadings?.temperature;
+        const h = liveReadings?.humidity;
+        const hasReading =
+          typeof t === "number" &&
+          Number.isFinite(t) &&
+          typeof h === "number" &&
+          Number.isFinite(h);
+        if (!hasReading) return "Not Working";
+      }
+    }
     const s = normalizeStatusWord(getComponentStatus(name));
-    if (s === "untested") return "Not tested";
+    if (s === "untested" || s === "unknown") return "Not tested";
     if (["working", "ok", "online", "pass", "passed"].includes(s)) return "Working";
     if (s === "standby" || s === "idle") return "Standby";
     if (["not_working", "error", "offline", "fail", "failed"].includes(s)) return "Not Working";
@@ -789,11 +933,20 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
 
   const statusColorForComponent = (name: string, status: string) => {
     if (name === "Moisture Sensor") {
-      if (hardwareStreamFresh) {
-        const shown = formatMoistureReading(liveReadings as Record<string, unknown> | null);
-        if (shown != null) return "#22c55e";
-      }
       return moistureSensorDisplayColor(getComponentStatus(name));
+    }
+    if (name === "DHT22 (Temp & Humidity)") {
+      const dhtStatus = getComponentStatus(name);
+      if (hardwareStreamFresh && normalizeStatusWord(dhtStatus) === "working") {
+        const t = liveReadings?.temperature;
+        const h = liveReadings?.humidity;
+        const hasReading =
+          typeof t === "number" &&
+          Number.isFinite(t) &&
+          typeof h === "number" &&
+          Number.isFinite(h);
+        if (!hasReading) return "#ef4444";
+      }
     }
     if (isDoorSensorUiLabel(name)) {
       return doorSensorDisplayColorHardware(
@@ -872,10 +1025,10 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
         key,
         label: "ESP32",
         ok: connected,
-        headline: connected ? "Online" : "Not responding",
+        headline: connected ? "Working" : "Not Working",
         details: connected
-          ? "WiFi healthy, heap OK, no recent crash."
-          : "Self-check failed (low heap, WiFi loss, or recent reset). Check power and Wi-Fi.",
+          ? "The board is online and publishing its own status."
+          : "The board is not publishing a live status. Check power and Wi-Fi.",
       };
     }
 
@@ -910,14 +1063,15 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
     }
 
     if (key === "moisture_sensor") {
-      const shown = formatMoistureReading(r as Record<string, unknown>);
       const pct = resolveMoisturePercent(r as Record<string, unknown>);
-      if (pct == null && !connected) {
+      const shown = formatMoisturePercent(pct);
+      const statusWord = moistureSensorDisplayLabel(connected ? "working" : "not_working");
+      if (!connected) {
         return {
           key,
           label: "Moisture Sensor",
           ok: false,
-          headline: "Not connected",
+          headline: statusWord,
           details: "Probe is not responding on GPIO35. Check probe leads and ADC supply.",
         };
       }
@@ -925,12 +1079,12 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       return {
         key,
         label: "Moisture Sensor",
-        ok: pct != null,
-        headline: shown != null ? shown : "Waiting for %",
+        ok: true,
+        headline: statusWord,
         details:
           shown != null
-            ? `Moisture in the fish: ${shown}`
-            : "Waiting for a moisture percent from the board.",
+            ? `Moisture: ${shown}`
+            : "Probe is connected. No percent yet.",
       };
     }
 
@@ -1112,7 +1266,13 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
                   ? "Buzzer"
                   : key;
     outputVerdictRef.current = { ...outputVerdictRef.current, [key]: yes };
-    setOutputVerdicts((prev) => ({ ...prev, [label]: yes, [key]: yes }));
+    const mid = testMachineIdRef.current ?? selectedMachineIdRef.current;
+    setOutputVerdicts((prev) => ({
+      ...prev,
+      [label]: yes,
+      [key]: yes,
+      ...(mid != null ? { [`${mid}:${label}`]: yes, [`${mid}:${key}`]: yes } : {}),
+    }));
   };
 
   const runLiveSensorTest = async (
@@ -1354,12 +1514,11 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
   };
 
   /**
-   * Detect microcontrollers from THREE sources, merged by id/device_id:
-   *   1. Firebase RTDB `discovery/` — every alive ESP32 advertises here regardless of Laravel ID.
-   *   2. Firebase RTDB `machines/{id}/hardware_status` — already-claimed boards still pulsing.
-   *   3. Laravel `/machines/detect` — server view (works only when Laravel reachable).
-   * Detection is *not* gated on Laravel; if the API is down but the board is publishing,
-   * the user can still see and add it.
+   * Detect powered microcontrollers.
+   * New boards come from a live `discovery/{MAC}` beacon.
+   * Saved boards that are actually heartbeating stay in the list with
+   * alreadyExists set, and cannot be saved again.
+   * A stale row, a shared name, or an old numeric id is not a detection.
    */
   const handleDetectMicrocontrollers = async () => {
     type DetectedRow = {
@@ -1370,142 +1529,223 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
       mac?: string;
       last_seen: string | null;
       status: MachineOnlineStatus;
+      alreadyExists: boolean;
     };
 
-    // Key by MAC when we have one (uniquely identifies the physical ESP32). Fall back
-    // to laravel id / device_id only for legacy rows that never advertised a MAC.
+    const known = machinesRef.current;
+    const savedMacs = new Set<string>();
+    const savedIds = new Set<string>();
+    for (const m of known) {
+      if (Number(m.id) > 0) savedIds.add(String(m.id));
+      const mac = macIdentity(m.mac) ?? macIdentity(m.device_id);
+      if (mac) savedMacs.add(mac);
+    }
+
+    const savedByMac = (macKey: string | null): Machine | undefined => {
+      if (!macKey) return undefined;
+      return known.find((m) => (macIdentity(m.mac) ?? macIdentity(m.device_id)) === macKey);
+    };
+
+    // Same physical board only. A new MAC is a new microcontroller even when
+    // the chip still remembers an old numeric id.
+    const savedMachineForBoard = (
+      macKey: string | null,
+      deviceId?: string
+    ): Machine | undefined => {
+      const byMac = savedByMac(macKey);
+      if (byMac) return byMac;
+      const dev = String(deviceId ?? "").trim().toLowerCase();
+      if (!dev || macIdentity(dev)) return undefined;
+      return known.find((m) => {
+        const savedMac = macIdentity(m.mac) ?? macIdentity(m.device_id);
+        if (macKey && savedMac && savedMac !== macKey) return false;
+        return String(m.device_id ?? "").trim().toLowerCase() === dev;
+      });
+    };
+
     const merged = new Map<string, DetectedRow>();
     const upsert = (row: DetectedRow) => {
-      const key = (row.mac || row.device_id || row.id || row.name || "")
-        .toLowerCase()
-        .replace(/:/g, "")
-        .trim();
+      const macKey = macIdentity(row.mac) ?? macIdentity(row.device_id);
+      const match = savedMachineForBoard(macKey, row.device_id);
+      if (match && macKey) merged.delete(`saved:${match.id}`);
+      const key = macKey || (match ? `saved:${match.id}` : Number(row.id) > 0 ? `saved:${row.id}` : "");
       if (!key) return;
+      const alreadyExists = row.alreadyExists || Boolean(match);
       const prev = merged.get(key);
       if (!prev) {
-        merged.set(key, row);
+        merged.set(key, {
+          ...row,
+          id: match ? String(match.id) : row.id,
+          name: match?.name || row.name,
+          device_id: row.device_id || match?.device_id,
+          mac: row.mac || match?.mac || undefined,
+          alreadyExists,
+        });
         return;
       }
       const prevMs = parsePresenceMs(prev.last_seen) ?? 0;
       const curMs = parsePresenceMs(row.last_seen) ?? 0;
-      // Always carry forward the MAC if either side has it.
       const winner = curMs >= prevMs ? row : prev;
-      merged.set(key, { ...winner, mac: winner.mac || prev.mac || row.mac });
+      merged.set(key, {
+        ...winner,
+        id: match ? String(match.id) : winner.id,
+        name: match?.name || winner.name,
+        device_id: winner.device_id || prev.device_id || row.device_id || match?.device_id,
+        mac: winner.mac || prev.mac || row.mac || match?.mac || undefined,
+        alreadyExists: prev.alreadyExists || alreadyExists,
+      });
     };
 
-    // (1) Firebase discovery — boards advertise even before Laravel knows about them.
+    if (firebaseDb && !discoveryCacheRef.current.ready) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 2000);
+        discoveryWaitersRef.current.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+
+    // Read discovery itself. The listener cache can still be empty on the
+    // first tap, which dropped a board that was already advertising.
     if (firebaseDb) {
       try {
-        const snap = await dbGet(dbRef(firebaseDb, "discovery"));
-        const val = snap.val();
-        if (val && typeof val === "object") {
-          for (const [macSafe, node] of Object.entries(val as Record<string, unknown>)) {
-            const obj = node && typeof node === "object" ? (node as Record<string, unknown>) : null;
-            if (!obj) continue;
-            const assignedRaw = obj.assigned;
-            const assigned =
-              assignedRaw === true ||
-              assignedRaw === 1 ||
-              String(assignedRaw).toLowerCase() === "true";
-            const mcId = Number(obj.microcontroller_id ?? obj.id ?? 0);
-            // Claimed boards live under machines/{id}/ — ignore stale discovery rows.
-            if (assigned || (Number.isFinite(mcId) && mcId > 0)) continue;
-            const disc = ingestRtdbHardwareSnapshot(obj.updated_at);
-            if (!disc.acceptDelivery || disc.payloadMs == null) continue;
-            if (!isRtdbPayloadFresh(disc.payloadMs)) continue;
-            const id = String(obj.microcontroller_id ?? obj.id ?? "0");
-            const macFromNode = String(obj.mac ?? "");
-            const mac = macFromNode || macSafe.match(/.{1,2}/g)?.join(":") || "";
-            const macKey = normalizeHardwareMacKey(mac);
-            if (macKey && machinesRef.current.some((m) => normalizeHardwareMacKey(m.mac) === macKey)) {
-              continue;
+        const snap = await Promise.race([
+          dbGet(dbRef(firebaseDb, "discovery")),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 6000)),
+        ]);
+        if (snap && typeof snap.val === "function") {
+          const raw = snap.val();
+          if (raw && typeof raw === "object") {
+            const prev = discoveryCacheRef.current;
+            const prevFp = { ...prev.prevFp };
+            const movedAt = { ...prev.movedAt };
+            const seenAt = Date.now();
+            for (const [key, node] of Object.entries(raw as Record<string, unknown>)) {
+              const obj =
+                node && typeof node === "object" ? (node as Record<string, unknown>) : null;
+              if (!obj) continue;
+              const fp = discoveryFingerprint(obj);
+              const before = prevFp[key];
+              const beaconMs = discoveryBeaconMs(obj);
+              const beaconAge = beaconMs == null ? null : seenAt - beaconMs;
+              const beaconFresh =
+                beaconAge != null && beaconAge >= -300_000 && beaconAge <= LIVE_HEARTBEAT_MS;
+              if (beaconFresh || (before != null && before !== fp)) {
+                movedAt[key] = seenAt;
+              }
+              prevFp[key] = fp;
             }
-            const dev = String(obj.device_id ?? obj.name ?? mac);
-            const name = String(obj.name ?? obj.device_id ?? `Board ${mac || id}`);
-            upsert({
-              id: Number(id) > 0 ? id : mac, // unassigned boards key by MAC, not 0
-              name,
-              device_id: dev || undefined,
-              mac: mac || undefined,
-              last_seen: new Date(disc.payloadMs).toISOString(),
-              status: "online",
-            });
+            discoveryCacheRef.current = {
+              val: raw as Record<string, unknown>,
+              ready: true,
+              prevFp,
+              movedAt,
+            };
           }
         }
       } catch (e) {
-        console.log("discovery/ read failed:", e);
-      }
-
-      // (2) Already-publishing machines/{id}/hardware_status still alive.
-      try {
-        const known = machinesRef.current;
-        const snap = await dbGet(dbRef(firebaseDb, "machines"));
-        const val = snap.val();
-        if (val && typeof val === "object") {
-          for (const [rawId, node] of Object.entries(val as Record<string, unknown>)) {
-            const obj = node && typeof node === "object" ? (node as Record<string, unknown>) : null;
-            if (!obj) continue;
-            const hw = obj.hardware_status && typeof obj.hardware_status === "object"
-              ? (obj.hardware_status as Record<string, unknown>)
-              : null;
-            if (!hw) continue;
-            const snapIng = ingestRtdbHardwareSnapshot(hw.updated_at);
-            if (!snapIng.acceptDelivery || snapIng.payloadMs == null) continue;
-            if (!isRtdbPayloadFresh(snapIng.payloadMs)) continue;
-            const hwMacRaw = String(hw.mac ?? obj.mac ?? "").trim();
-            const hwMacKey = normalizeHardwareMacKey(hwMacRaw);
-            if (!hwMacKey) continue;
-            const alreadyOwned = known.some(
-              (m) => normalizeHardwareMacKey(m.mac) === hwMacKey
-            );
-            if (alreadyOwned) continue;
-            // Unassigned board publishing hardware_status — offer for add-by-MAC only.
-            upsert({
-              id: hwMacKey,
-              name: String(hw.name ?? obj.name ?? `Board ${hwMacKey.slice(-4)}`),
-              device_id: String(hw.device_id ?? obj.device_id ?? hwMacRaw) || undefined,
-              mac: hwMacRaw || macWithColonsFromKey(hwMacKey),
-              last_seen: new Date(snapIng.payloadMs).toISOString(),
-              status: "online",
-            });
-          }
-        }
-      } catch (e) {
-        console.log("machines/ read failed:", e);
+        console.log("discovery get:", e);
       }
     }
 
-    // (3) Laravel — best-effort augmentation; errors are tolerated.
-    try {
-      const res = await apiRequest("/machines/detect", { method: "POST" });
-      asJsonArray<{
-        id: string | number;
-        name: string;
-        device_id?: string;
-        mac?: string;
-        last_seen?: string | null;
-        recent?: boolean;
-        status?: string;
-      }>(res.data).forEach((d) => {
-        const row: DetectedRow = {
-          id: String(d.id),
-          name: d.name,
-          device_id: d.device_id,
-          mac: d.mac,
-          last_seen: d.last_seen ?? null,
-          status: machineStatusFromApi(d.status ?? (d.recent ? "online" : "offline")),
-        };
-        if (d.recent === true && isMachineDetectable({ last_seen: row.last_seen, status: row.status })) {
-          upsert(row);
-        }
+    const nowMs = Date.now();
+
+    // Saved boards use the same heartbeat as the Online card. Offline stays off this list.
+    for (const m of known) {
+      const payloadMs =
+        machineRtdbPayloadRef.current[m.id] ?? machineHwByIdRef.current[m.id]?.payloadMs;
+      const receiveMs = machineRtdbReceiveRef.current[m.id] ?? null;
+      if (!isFirebaseHeartbeatLive(payloadMs, nowMs, receiveMs)) continue;
+      const seen = payloadMs ?? receiveMs ?? nowMs;
+      upsert({
+        id: String(m.id),
+        name: m.name,
+        device_id: m.device_id,
+        mac: m.mac || undefined,
+        last_seen: new Date(seen).toISOString(),
+        status: "online",
+        alreadyExists: true,
       });
+    }
+
+    const discovery = discoveryCacheRef.current;
+    if (discovery.val) {
+      for (const [macSafe, node] of Object.entries(discovery.val)) {
+        const obj = node && typeof node === "object" ? (node as Record<string, unknown>) : null;
+        if (!obj) continue;
+        const macFromNode = String(obj.mac ?? "").trim();
+        const macKey = macIdentity(macFromNode) ?? macIdentity(macSafe);
+        if (!macKey) continue;
+        const updatedMs = discoveryBeaconMs(obj);
+        const movedAt = discovery.movedAt[macSafe] ?? discovery.movedAt[macKey] ?? null;
+        if (!beaconIsLive(updatedMs, movedAt, nowMs)) continue;
+        const seen = updatedMs ?? movedAt ?? nowMs;
+        const dev = String(obj.device_id ?? obj.name ?? "").trim();
+        const macText = macIdentity(macFromNode)
+          ? macFromNode
+          : macWithColonsFromKey(macKey);
+        const saved = savedMachineForBoard(macKey, dev);
+        upsert({
+          id: saved ? String(saved.id) : macText,
+          name: String(obj.name ?? obj.device_id ?? `Board ${macKey.slice(-4)}`),
+          device_id: dev || undefined,
+          mac: macText,
+          last_seen: new Date(seen).toISOString(),
+          status: "online",
+          alreadyExists: Boolean(saved),
+        });
+      }
+    }
+
+    try {
+      const res = await Promise.race([
+        apiRequest("/machines/detect", { method: "POST" }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000)),
+      ]);
+      if (res) {
+        asJsonArray<{
+          id: string | number;
+          name: string;
+          device_id?: string;
+          mac?: string;
+          last_seen?: string | null;
+          recent?: boolean;
+          already_exists?: boolean;
+        }>(res.data).forEach((d) => {
+          if (d.recent !== true) return;
+          const seenMs = beaconUpdatedMs(d.last_seen);
+          if (seenMs != null && !beaconIsLive(seenMs, null, Date.now())) return;
+          const macKey = macIdentity(d.mac) ?? macIdentity(d.device_id) ?? macIdentity(d.id);
+          const saved = savedMachineForBoard(macKey, d.device_id);
+          if (!macKey && savedIds.has(String(d.id))) {
+            const idNum = Number(d.id);
+            const payloadMs =
+              machineRtdbPayloadRef.current[idNum] ??
+              machineHwByIdRef.current[idNum]?.payloadMs;
+            const receiveMs = machineRtdbReceiveRef.current[idNum] ?? null;
+            if (firebaseDb && !isFirebaseHeartbeatLive(payloadMs, Date.now(), receiveMs)) return;
+          }
+          const apiExists = d.already_exists === true;
+          upsert({
+            id: saved ? String(saved.id) : macKey ? macWithColonsFromKey(macKey) : String(d.id),
+            name: d.name,
+            device_id: d.device_id,
+            mac: d.mac || (macKey ? macWithColonsFromKey(macKey) : undefined),
+            last_seen: new Date(seenMs ?? Date.now()).toISOString(),
+            status: "online",
+            alreadyExists: apiExists || Boolean(saved) || (!macKey && savedIds.has(String(d.id))),
+          });
+        });
+      }
     } catch (e) {
       console.log("/machines/detect failed (ignored):", e);
     }
 
-    return Array.from(merged.values()).filter((row) =>
-      isMachineDetectable({ last_seen: row.last_seen, status: row.status })
-    );
+    return Array.from(merged.values()).sort((a, b) => {
+      if (a.alreadyExists !== b.alreadyExists) return a.alreadyExists ? 1 : -1;
+      return a.name.localeCompare(b.name);
+    });
   };
 
   /** Refresh machine names from API; online/offline comes from Firebase when configured. */
@@ -1540,7 +1780,13 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
 
   const handleSaveMachine = async (
     machineName: string,
-    selected: { id: string; name: string; device_id?: string; mac?: string } | null
+    selected: {
+      id: string;
+      name: string;
+      device_id?: string;
+      mac?: string;
+      alreadyExists?: boolean;
+    } | null
   ) => {
     try {
       const typedName = machineName.trim();
@@ -1552,28 +1798,42 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
         return;
       }
 
+      if (selected.alreadyExists) {
+        Alert.alert(
+          "Already exists",
+          "This microcontroller is already saved. Only a new microcontroller can be added."
+        );
+        return;
+      }
+
       const deviceId = String(selected.device_id ?? "").trim();
       const mac = String(selected.mac ?? selected.id ?? "").trim();
-      const macKey = normalizeHardwareMacKey(mac) ?? normalizeHardwareMacKey(selected.id);
+      const macKey = macIdentity(mac) ?? macIdentity(selected.id) ?? macIdentity(deviceId);
 
       if (!deviceId && !macKey) {
         Alert.alert("Missing hardware ID", "Could not read MAC/device_id from the detected board.");
         return;
       }
 
-      // If this physical MAC is already in the DB, update that row. Otherwise always mint a new id
-      // (never reuse machines/1 from detection when board 2 was wrongly publishing there).
-      const linkedRow = macKey
-        ? machines.find((m) => normalizeHardwareMacKey(m.mac) === macKey)
-        : undefined;
+      const linkedRow = machines.find((m) => {
+        const savedMac = macIdentity(m.mac) ?? macIdentity(m.device_id);
+        if (macKey && savedMac && macKey === savedMac) return true;
+        const savedDev = String(m.device_id ?? "").trim().toLowerCase();
+        return Boolean(deviceId && savedDev && deviceId.toLowerCase() === savedDev);
+      });
+      if (linkedRow) {
+        Alert.alert(
+          "Already exists",
+          `${linkedRow.name} is already saved. Only a new microcontroller can be added.`
+        );
+        return;
+      }
 
       // If user typed a new friendly name, don't treat it as a duplicate "machine row".
       const dupByDisplay =
         typedName &&
         machines.some(
-          (m) =>
-            m.id !== linkedRow?.id &&
-            normalizeKey(String(m.display_name ?? m.name)) === normalizeKey(typedName)
+          (m) => normalizeKey(String(m.display_name ?? m.name)) === normalizeKey(typedName)
         );
 
       if (dupByDisplay) {
@@ -1586,9 +1846,6 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
         device_id: deviceId || macWithColonsFromKey(macKey ?? ""),
         mac: macKey ? macWithColonsFromKey(macKey) : mac || undefined,
       };
-      if (linkedRow) {
-        saveBody.selected_id = linkedRow.id;
-      }
 
       const res = await apiRequest("/machines", {
         method: "POST",
@@ -1605,7 +1862,6 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
         Number(respObj.id) ||
         Number(respObj.microcontroller_id) ||
         Number((respObj.machine as Record<string, unknown> | undefined)?.id) ||
-        linkedRow?.id ||
         0;
 
       if (firebaseDb && macKey && assignedId > 0) {
@@ -1773,15 +2029,7 @@ export default function HardwareStatus({ active = true }: { active?: boolean }) 
               HARDWARE_ICON_BY_LABEL[name] ?? "cube-outline";
             const iconColor = !selectedMachine
               ? "#9ca3af"
-              : isDoorSensorUiLabel(name)
-                ? statusColorForComponent(name, status)
-                : status === "working"
-                  ? "#22c55e"
-                  : status === "not_working"
-                    ? "#ef4444"
-                    : status === "warning"
-                      ? "#f59e0b"
-                      : "#9ca3af";
+              : statusColorForComponent(name, status);
 
             return (
               <View key={name} style={styles.componentRow}>

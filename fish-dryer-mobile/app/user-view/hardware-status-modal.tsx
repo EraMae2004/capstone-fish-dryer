@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   TextInput,
   ActivityIndicator,
+  ScrollView,
 } from "react-native";
 import { FontAwesome as Icon } from "@expo/vector-icons";
 
@@ -20,6 +21,8 @@ type Microcontroller = {
   display_name?: string | null;
   /** Short line from RTDB components (discovery / hardware_status). */
   sensorSummary?: string;
+  /** Saved in the app already — shown in the list, but cannot be saved again. */
+  alreadyExists?: boolean;
 };
 
 type Props = {
@@ -41,65 +44,85 @@ export default function HardwareStatusModal({
   const [selected, setSelected] = useState<Microcontroller | null>(null);
 
   const [scanning, setScanning] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [scanSettled, setScanSettled] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const detectGenRef = useRef(0);
+  const onDetectRef = useRef(onDetect);
+  onDetectRef.current = onDetect;
 
-  // 🔁 START CONTINUOUS SCANNING
-  const startScanning = () => {
-    if (scanning) return;
-
-    setScanning(true);
-    setLoading(true);
-    const runDetect = async () => {
-      try {
-        const result = await onDetect();
-        setControllers(Array.isArray(result) ? result : []);
-      } catch (e) {
-        console.log(e);
-        setControllers([]);
-      }
-    };
-
-    runDetect(); // immediate detect
-    intervalRef.current = setInterval(runDetect, 2000); // scan every 2 sec
-  };
-
-  // 🛑 STOP SCANNING
   const stopScanning = () => {
     setScanning(false);
-    setLoading(false);
-
+    detectGenRef.current += 1;
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
   };
 
-  // ❗ STOP when dropdown closes or modal closes
-  useEffect(() => {
-    if (!dropdownOpen) stopScanning();
-  }, [dropdownOpen]);
+  const startScanning = () => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+
+    const gen = detectGenRef.current + 1;
+    detectGenRef.current = gen;
+    setScanning(true);
+    const runDetect = async () => {
+      try {
+        const result = await onDetectRef.current();
+        if (detectGenRef.current !== gen) return;
+        const rows = Array.isArray(result) ? result : [];
+        setControllers(rows);
+        setScanSettled(true);
+        setSelected((prev) => {
+          if (!prev) return prev;
+          const still = rows.find(
+            (row) =>
+              row.id === prev.id ||
+              (row.mac &&
+                prev.mac &&
+                row.mac.replace(/:/g, "").toUpperCase() ===
+                  prev.mac.replace(/:/g, "").toUpperCase())
+          );
+          if (!still || still.alreadyExists) return null;
+          return still;
+        });
+      } catch (e) {
+        console.log(e);
+        if (detectGenRef.current !== gen) return;
+        setScanSettled(true);
+      }
+    };
+
+    void runDetect();
+    intervalRef.current = setInterval(() => {
+      void runDetect();
+    }, 2000);
+  };
 
   useEffect(() => {
     if (!visible) {
       stopScanning();
       setDropdownOpen(false);
+      setControllers([]);
+      setSelected(null);
+      setScanSettled(false);
+      setMachineName("");
       return;
     }
 
-    // Auto-detect on modal open.
     setDropdownOpen(true);
     startScanning();
+    return () => stopScanning();
   }, [visible]);
 
+  const canSave = Boolean(selected?.id) && !selected?.alreadyExists;
+
   const handleSavePress = async () => {
-    if (saving) return;
-    if (!selected?.id) {
-      // Saving requires a detected board so we never accidentally invent/overwrite hardware IDs.
-      return;
-    }
+    if (saving || !canSave) return;
     setSaving(true);
     try {
       await onSave(machineName, selected);
@@ -134,7 +157,12 @@ export default function HardwareStatusModal({
 
           <TouchableOpacity
             style={styles.dropdown}
-            onPress={() => setDropdownOpen(!dropdownOpen)}
+            onPress={() => {
+              setDropdownOpen((open) => {
+                if (!open) startScanning();
+                return !open;
+              });
+            }}
           >
             <Text style={{ color: selected ? "#000" : "#888" }}>
               {selected
@@ -158,36 +186,57 @@ export default function HardwareStatusModal({
                 </TouchableOpacity>
               </View>
 
-              {/* LIST */}
-              {controllers.map((c) => (
-                <TouchableOpacity
-                  key={c.id}
-                  style={styles.item}
-                  onPress={() => {
-                    setSelected(c);
-                    setDropdownOpen(false);
-                    stopScanning();
-                  }}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontWeight: "600" }}>{c.name}</Text>
-                    {!!c.device_id && (
-                      <Text style={{ marginTop: 2, fontSize: 12, color: "#666" }}>
-                        ID: {c.device_id}
+              <ScrollView style={styles.detectScroll} nestedScrollEnabled>
+              {controllers.map((c) => {
+                const exists = Boolean(c.alreadyExists);
+                return (
+                  <TouchableOpacity
+                    key={c.mac || c.device_id || c.id}
+                    style={[styles.item, exists && styles.itemExists]}
+                    disabled={exists}
+                    onPress={() => {
+                      if (exists) return;
+                      setSelected(c);
+                      setDropdownOpen(false);
+                      stopScanning();
+                    }}
+                  >
+                    <View style={{ flex: 1, paddingRight: 8 }}>
+                      <Text style={{ fontWeight: "600", color: exists ? "#6b7280" : "#111" }}>
+                        {c.name}
                       </Text>
+                      {!!c.device_id && (
+                        <Text style={{ marginTop: 2, fontSize: 12, color: "#666" }}>
+                          ID: {c.device_id}
+                        </Text>
+                      )}
+                      {!!c.mac && (
+                        <Text style={{ marginTop: 2, fontSize: 11, color: "#888" }}>
+                          {c.mac}
+                        </Text>
+                      )}
+                      {!!c.sensorSummary && (
+                        <Text style={{ marginTop: 4, fontSize: 11, color: "#888" }} numberOfLines={2}>
+                          {c.sensorSummary}
+                        </Text>
+                      )}
+                    </View>
+                    {exists ? (
+                      <Text style={styles.existsBadge}>Already exists</Text>
+                    ) : (
+                      <View style={styles.greenDot} />
                     )}
-                    {!!c.sensorSummary && (
-                      <Text style={{ marginTop: 4, fontSize: 11, color: "#888" }} numberOfLines={2}>
-                        {c.sensorSummary}
-                      </Text>
-                    )}
-                  </View>
-                  <View style={styles.greenDot} />
-                </TouchableOpacity>
-              ))}
+                  </TouchableOpacity>
+                );
+              })}
 
-              {/* LOADING ROW (SPINNER ALWAYS ROTATING) */}
-              {scanning && (
+              {scanSettled && controllers.length === 0 && (
+                <Text style={styles.emptyDetect}>
+                  No powered microcontroller found. Turn the board on, connect it to Wi-Fi, then tap Refresh.
+                </Text>
+              )}
+
+              {scanning && !scanSettled && (
                 <View style={styles.loadingRow}>
                   <ActivityIndicator size="small" color="#1f4e6c" />
                   <Text style={{ marginLeft: 8 }}>
@@ -195,15 +244,20 @@ export default function HardwareStatusModal({
                   </Text>
                 </View>
               )}
+
+              {scanning && scanSettled && (
+                <Text style={styles.listening}>Listening for powered boards...</Text>
+              )}
+              </ScrollView>
             </View>
           )}
 
           {/* ACTIONS */}
           <View style={styles.actions}>
             <TouchableOpacity
-              style={[styles.save, !selected?.id && { opacity: 0.45 }]}
+              style={[styles.save, !canSave && { opacity: 0.45 }]}
               onPress={handleSavePress}
-              disabled={saving || !selected?.id}
+              disabled={saving || !canSave}
             >
               <Text style={{ color: "#fff" }}>{saving ? "Saving..." : "Save"}</Text>
             </TouchableOpacity>
@@ -279,10 +333,43 @@ const styles = StyleSheet.create({
   detectText: { fontSize: 12 },
   refresh: { fontSize: 12 },
 
+  detectScroll: {
+    maxHeight: 280,
+  },
+
   item: {
     flexDirection: "row",
     justifyContent: "space-between",
+    alignItems: "center",
     padding: 10,
+  },
+
+  itemExists: {
+    backgroundColor: "#f4f5f7",
+  },
+
+  existsBadge: {
+    color: "#9a6700",
+    backgroundColor: "#fff4d6",
+    borderRadius: 999,
+    overflow: "hidden",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+
+  emptyDetect: {
+    padding: 12,
+    fontSize: 12,
+    color: "#666",
+  },
+
+  listening: {
+    paddingHorizontal: 12,
+    paddingBottom: 10,
+    fontSize: 11,
+    color: "#6b7280",
   },
 
   greenDot: {

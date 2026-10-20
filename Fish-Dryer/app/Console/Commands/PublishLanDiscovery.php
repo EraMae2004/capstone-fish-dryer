@@ -71,6 +71,13 @@ class PublishLanDiscovery extends Command
             return $forced;
         }
 
+        // The address on the default route is the network the phone is on.
+        // Campus 10.x, home 192.168.x, and a phone hotspot are all valid.
+        $routed = $this->defaultRouteIpv4();
+        if ($routed) {
+            return $routed;
+        }
+
         $hotspot = $this->phoneHotspotIpv4();
         if ($hotspot) {
             return $hotspot;
@@ -83,7 +90,7 @@ class PublishLanDiscovery extends Command
                 $addr = null;
                 @socket_getsockname($sock, $addr);
                 @socket_close($sock);
-                if (is_string($addr) && $this->isUsableLanIp($addr) && ! $this->isCampusIpv4($addr)) {
+                if (is_string($addr) && $this->isUsableLanIp($addr)) {
                     return $addr;
                 }
             }
@@ -142,6 +149,32 @@ class PublishLanDiscovery extends Command
         }
 
         return null;
+    }
+
+    /** IPv4 of the interface that actually reaches the internet / the phone. */
+    private function defaultRouteIpv4(): ?string
+    {
+        if (PHP_OS_FAMILY !== 'Windows') {
+            return null;
+        }
+        $out = [];
+        exec('route print -4', $out);
+        $bestIp = null;
+        $bestMetric = PHP_INT_MAX;
+        foreach ($out as $line) {
+            if (! preg_match('/^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+\S+\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+)/', $line, $m)) {
+                continue;
+            }
+            $ip = $m[1];
+            $metric = (int) $m[2];
+            if (! $this->isUsableLanIp($ip) || $metric >= $bestMetric) {
+                continue;
+            }
+            $bestMetric = $metric;
+            $bestIp = $ip;
+        }
+
+        return $bestIp;
     }
 
     /** Android 192.168.43.x, Windows 192.168.137.x, iPhone 172.20.10.x. */

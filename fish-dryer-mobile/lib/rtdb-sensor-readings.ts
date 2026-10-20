@@ -15,6 +15,10 @@ export type RtdbSensorReadings = {
   moisture_connected?: boolean;
   moisture_spread?: number;
   door?: string;
+  door_raw?: number;
+  door_spread?: number;
+  lcd_addr?: number;
+  keypad_seen?: boolean;
 };
 
 function readNum(v: unknown): number | undefined {
@@ -64,5 +68,14 @@ export function parseRtdbSensorReadings(raw: unknown): RtdbSensorReadings | null
     out.moisture_surface = r.moisture_surface.trim().toLowerCase();
   }
   if (typeof r.door === "string") out.door = r.door;
+  const doorRaw = readNum(r.door_raw);
+  const doorSpread = readNum(r.door_spread);
+  const lcdAddr = readNum(r.lcd_addr);
+  if (doorRaw != null) out.door_raw = doorRaw;
+  if (doorSpread != null) out.door_spread = doorSpread;
+  if (lcdAddr != null) out.lcd_addr = lcdAddr;
+  if (typeof r.keypad_seen === "boolean") out.keypad_seen = r.keypad_seen;
+  else if (r.keypad_seen === "true") out.keypad_seen = true;
+  else if (r.keypad_seen === "false") out.keypad_seen = false;
   return Object.keys(out).length > 0 ? out : null;
 }

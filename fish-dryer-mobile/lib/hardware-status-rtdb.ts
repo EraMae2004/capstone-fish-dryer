@@ -1,3 +1,4 @@
+import { moistureReadingIsReal } from "@/lib/duration-format";
 import { parsePresenceMs } from "@/lib/parse-presence-ms";
 import { parseRtdbSensorReadings, type RtdbSensorReadings } from "@/lib/rtdb-sensor-readings";
 
@@ -120,6 +121,10 @@ export function coerceHardwareStatus(status: unknown): string {
     case "standby":
     case "idle":
       return "standby";
+    case "unknown":
+    case "untested":
+    case "not_tested":
+      return "unknown";
     case "not_working":
     case "off":
     case "false":
@@ -258,20 +263,13 @@ export function moistureSensorDisplayColor(status: unknown): string {
   return "#ef4444";
 }
 
-/** True when the board is publishing a fish moisture percent (0 = dry, 100 = wet). */
+/** True only when the published percent came from a stable probe reading. */
 export function isMoistureProbeWorking(
   liveReadings: Record<string, unknown> | null | undefined,
   componentStatus?: unknown
 ): boolean {
-  if (liveReadings && typeof liveReadings === "object") {
-    const pct = liveReadings.moisture_percent ?? liveReadings.moisture;
-    if (typeof pct === "number" && Number.isFinite(pct) && pct >= 0 && pct <= 100) return true;
-    if (typeof pct === "string" && pct.trim() !== "") {
-      const n = Number(pct);
-      if (Number.isFinite(n) && n >= 0 && n <= 100) return true;
-    }
-  }
-  return coerceHardwareStatus(componentStatus) === "working";
+  if (coerceHardwareStatus(componentStatus ?? "not_working") !== "working") return false;
+  return moistureReadingIsReal(liveReadings);
 }
 
 export function aliasesForDisplayLabel(label: string): string[] {

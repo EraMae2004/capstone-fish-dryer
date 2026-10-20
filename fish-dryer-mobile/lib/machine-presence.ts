@@ -11,7 +11,7 @@ export const RTDB_GO_ONLINE_MS = 45_000;
 export const RTDB_GO_OFFLINE_MS = 45_000;
 
 /** While Online, tolerate missed heartbeats during a drying run (heater Wi-Fi dips). */
-export const RTDB_STAY_ONLINE_MS = 90_000;
+export const RTDB_STAY_ONLINE_MS = 180_000;
 
 /** First snapshot only — ignore clearly stale rows when opening the app. */
 export const RTDB_INITIAL_STALE_MS = 45_000;
@@ -109,6 +109,40 @@ export function hardwareStatusBelongsToMachine(
     return false;
   }
   return true;
+}
+
+/**
+ * Live `hardware_status` may be shown for this machine only.
+ * A payload whose MAC belongs to a different saved board is rejected,
+ * even when two boards were publishing onto the same numeric id.
+ */
+export function liveHardwareIsForMachine(
+  machineId: number,
+  hwRec: Record<string, unknown>,
+  machines: { id: number; mac?: string | null; device_id?: string | null }[]
+): boolean {
+  const mine = machines.find((m) => Number(m.id) === machineId);
+  if (!hardwareStatusBelongsToMachine(machineId, hwRec, mine?.mac ?? null)) {
+    return false;
+  }
+  const payloadMac = normalizeHardwareMacKey(hwRec.mac);
+  if (!payloadMac || payloadMac.length < 12) {
+    const mcId = Number(hwRec.microcontroller_id);
+    if (Number.isFinite(mcId) && mcId > 0) return mcId === machineId;
+    return true;
+  }
+  const payload = payloadMac.slice(0, 12);
+  const mineMac =
+    normalizeHardwareMacKey(mine?.mac) ?? normalizeHardwareMacKey(mine?.device_id);
+  if (mineMac && mineMac.length >= 12) {
+    return mineMac.slice(0, 12) === payload;
+  }
+  return !machines.some((m) => {
+    if (Number(m.id) === machineId) return false;
+    const other =
+      normalizeHardwareMacKey(m.mac) ?? normalizeHardwareMacKey(m.device_id);
+    return Boolean(other && other.length >= 12 && other.slice(0, 12) === payload);
+  });
 }
 
 export function isRtdbPayloadFresh(

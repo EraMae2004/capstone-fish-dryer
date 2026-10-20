@@ -9,7 +9,7 @@ import {
   moistureSensorDisplayColor,
   moistureSensorDisplayLabel,
 } from "@/lib/hardware-status-rtdb";
-import { formatMoistureReading, resolveMoisturePercent } from "@/lib/duration-format";
+import { formatMoistureReading, moistureReadingIsReal } from "@/lib/duration-format";
 import { type MoistureBatchDraft } from "@/lib/moisture-checks";
 import { userTypography } from "@/lib/user-typography";
 
@@ -34,8 +34,6 @@ export default function OverviewStatus({
   liveReadings,
   hasActiveSession,
   remainingTimeLabel,
-  sessionStatus,
-  doorForceClosed,
   moistureDraftBatches = [],
   onMoistureDraftChange,
   onOpenMoistureModal,
@@ -57,20 +55,30 @@ export default function OverviewStatus({
     return raw || "--";
   };
 
-  const logs = session?.sensor_logs;
-  const latestLog = Array.isArray(logs) && logs.length > 0 ? logs[logs.length - 1] : null;
-
   const lr = liveReadings && typeof liveReadings === "object" ? liveReadings : null;
   const liveTemp = lr?.temperature ?? lr?.temp;
   const liveHum = lr?.humidity ?? lr?.hum;
-  const sessionSt = String(sessionStatus ?? "").trim().toLowerCase();
-  const useRealDoorSensor =
-    !sessionSt || sessionSt === "stopped" || sessionSt === "paused";
 
-  const liveMoistureLabel =
-    hardwareStreamFresh !== false
-      ? formatMoistureReading(lr as Record<string, unknown> | null)
-      : null;
+  const streamLive = hardwareStreamFresh === true;
+  const lookupStatus = (aliases: string[]) => {
+    const aliasSet = new Set(aliases.map((a) => normalizeKey(a)));
+    const found = hardware_statuses?.find((item: any) =>
+      aliasSet.has(normalizeKey(String(item?.component_name ?? "")))
+    );
+    if (!streamLive) return "not_working";
+    return normalizeStatus(String(found?.status ?? "unknown"));
+  };
+  const dhtWorking =
+    lookupStatus(["dht22", "dht11", "dht", "temp_humidity_sensor", "temperature_and_humidity_sensor"]) ===
+    "working";
+  const moistureWorking =
+    lookupStatus(["moisture_sensor", "moisture", "yl69", "yl_69", "soil_moisture"]) === "working";
+
+  const moistureReal =
+    moistureWorking && moistureReadingIsReal(lr as Record<string, unknown> | null);
+  const liveMoistureLabel = moistureReal
+    ? formatMoistureReading(lr as Record<string, unknown> | null)
+    : null;
   const moistureRowValue = showSessionDetails
     ? liveMoistureLabel ?? "Tap here"
     : liveMoistureLabel;
@@ -136,13 +144,12 @@ export default function OverviewStatus({
           {renderRow(
             "Current Temp",
             showSessionDetails &&
+              dhtWorking &&
               liveTemp != null &&
               String(liveTemp).trim() !== "" &&
               Number.isFinite(Number(liveTemp))
               ? `${Number(liveTemp).toFixed(1)}°C`
-              : showSessionDetails && latestLog?.temperature
-                ? Number(latestLog.temperature).toFixed(1) + "°C"
-                : null
+              : null
           )}
 
           {renderRow(
@@ -155,13 +162,12 @@ export default function OverviewStatus({
           {renderRow(
             "Humidity",
             showSessionDetails &&
+              dhtWorking &&
               liveHum != null &&
               String(liveHum).trim() !== "" &&
               Number.isFinite(Number(liveHum))
               ? `${Number(liveHum).toFixed(1)}%`
-              : showSessionDetails && latestLog?.humidity
-                ? Number(latestLog.humidity).toFixed(1) + "%"
-                : null
+              : null
           )}
 
           {renderMoistureRow(
@@ -192,7 +198,6 @@ export default function OverviewStatus({
               return aliasSet.has(key);
             });
 
-            const streamLive = typeof hardwareStreamFresh === "boolean" ? hardwareStreamFresh : true;
             const rawStatus = !streamLive
               ? "not_working"
               : (found?.status ?? "unknown");
@@ -203,32 +208,30 @@ export default function OverviewStatus({
                 ? formatDoorSensorDisplay(lr?.door, {
                     streamLive: streamLive,
                     componentStatus: rawStatus,
-                    forceClosed: !useRealDoorSensor && Boolean(doorForceClosed),
                   })
                 : null;
 
-            const moisturePct =
-              component.key === "moisture_sensor" && streamLive
-                ? resolveMoisturePercent(lr as Record<string, unknown> | null)
-                : null;
-            const moistureShown =
-              component.key === "moisture_sensor" && streamLive
-                ? formatMoistureReading(lr as Record<string, unknown> | null)
-                : null;
             const moistureLabel =
               component.key === "moisture_sensor" && !doorLabel
-                ? moistureShown ??
-                  (moisturePct != null ? `${moisturePct}%` : moistureSensorDisplayLabel(rawStatus))
+                ? moistureSensorDisplayLabel(statusValue)
                 : null;
+
+            const dhtHasReading =
+              component.key === "dht22" &&
+              statusValue === "working" &&
+              liveTemp != null &&
+              Number.isFinite(Number(liveTemp)) &&
+              liveHum != null &&
+              Number.isFinite(Number(liveHum));
 
             const displayText = doorLabel
               ? doorLabel === "not_working"
                 ? "not_working"
                 : doorLabel
               : moistureLabel
-                ? moisturePct != null
-                  ? moistureLabel
-                  : moistureLabel.toLowerCase()
+                ? moistureLabel
+                : component.key === "dht22" && statusValue === "working" && !dhtHasReading
+                  ? "not_working"
                 : statusValue === "working"
                   ? "working"
                   : statusValue === "standby"
@@ -240,9 +243,9 @@ export default function OverviewStatus({
             const color = doorLabel
               ? doorSensorDisplayColor(doorLabel)
               : moistureLabel
-                ? moisturePct != null
-                  ? "#2ecc71"
-                  : moistureSensorDisplayColor(rawStatus)
+                ? moistureSensorDisplayColor(statusValue)
+                : component.key === "dht22" && statusValue === "working" && !dhtHasReading
+                  ? "#e74c3c"
                 : statusValue === "working"
                   ? "#2ecc71"
                   : statusValue === "standby"

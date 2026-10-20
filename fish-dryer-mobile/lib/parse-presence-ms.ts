@@ -15,7 +15,8 @@ export function parsePresenceMs(iso: unknown): number | null {
     return Number.isFinite(ms) ? ms : null;
   }
   if (typeof iso === "object") {
-    if (iso && ".sv" in (iso as object)) return Date.now();
+    // Unresolved `{".sv":"timestamp"}` is not a heartbeat. Treating it as "now"
+    // kept dead boards and old sensor rows looking live.
     return null;
   }
   const d = new Date(String(iso));

@@ -15,10 +15,10 @@ import {
 import { useShellSidebarOpen } from "@/lib/shell-sidebar-context";
 import { firebaseDb } from "@/config/firebase";
 import {
-  firebaseUpdatedAtMs,
   isFirebaseHeartbeatLive,
   subscribeLiveHardwareStatus,
 } from "@/lib/live-hardware-rtdb";
+import { recordMachineRtdbDelivery } from "@/lib/machine-presence";
 
 type MachineDropdownProps = {
   active?: boolean;
@@ -75,29 +75,37 @@ export default function MachineDropdown({
     }
 
     const watch = machineIds;
-    const updatedAtById: Record<number, number> = {};
-    const receiveAtById: Record<number, number> = {};
+    let receiveById: Record<number, number> = {};
+    let payloadById: Record<number, number> = {};
+    const seenCallbackById: Record<number, boolean> = {};
     const unsubs = watch.map((id) =>
       subscribeLiveHardwareStatus(
         firebaseDb,
         id,
         (hw) => {
-          const t = firebaseUpdatedAtMs(hw.updated_at);
-          if (t != null) updatedAtById[id] = t;
-          receiveAtById[id] = Date.now();
+          const now = Date.now();
+          const delivered = recordMachineRtdbDelivery(
+            receiveById,
+            payloadById,
+            id,
+            hw.updated_at,
+            seenCallbackById,
+            now
+          );
+          receiveById = delivered.receiveById;
+          payloadById = delivered.payloadById;
+          const online =
+            delivered.accepted &&
+            isFirebaseHeartbeatLive(hw.updated_at, now, receiveById[id] ?? null);
           setStableOnlineById((prev) => {
-            const online = isFirebaseHeartbeatLive(
-              t ?? updatedAtById[id],
-              Date.now(),
-              receiveAtById[id]
-            );
             if (prev[id] === online) return prev;
             return { ...prev, [id]: online };
           });
         },
         () => {
-          delete updatedAtById[id];
-          delete receiveAtById[id];
+          delete receiveById[id];
+          delete payloadById[id];
+          seenCallbackById[id] = false;
           setStableOnlineById((prev) => {
             if (prev[id] === false) return prev;
             return { ...prev, [id]: false };
@@ -106,13 +114,14 @@ export default function MachineDropdown({
       )
     );
     const tick = setInterval(() => {
+      const now = Date.now();
       const next: Record<number, boolean> = {};
       let changed = false;
       for (const id of watch) {
         next[id] = isFirebaseHeartbeatLive(
-          updatedAtById[id],
-          Date.now(),
-          receiveAtById[id] ?? null
+          payloadById[id],
+          now,
+          receiveById[id] ?? null
         );
       }
       setStableOnlineById((prev) => {

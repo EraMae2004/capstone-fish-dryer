@@ -32,14 +32,15 @@ export function formatDoorSensorDisplay(
 ): DoorSensorDisplayLabel {
   if (options?.streamLive === false) return "not_working";
 
-  const componentSt = coerceHardwareStatus(options?.componentStatus ?? "working");
-  if (componentSt === "not_working") return "not_working";
+  const componentSt = coerceHardwareStatus(options?.componentStatus ?? "not_working");
+  if (componentSt !== "working") return "not_working";
 
   if (options?.forceClosed) return "Closed";
 
   const d = String(doorReading ?? "").trim().toLowerCase();
-  if (d === "closed") return "Closed";
-  return "Open";
+  if (d === "open" || d === "true" || d === "1") return "Open";
+  if (d === "closed" || d === "false" || d === "0") return "Closed";
+  return "not_working";
 }
 
 /** @deprecated Prefer {@link formatDoorSensorDisplay} with stream / component context. */
